@@ -1,0 +1,62 @@
+# AgentCarto 設定ファイルのサンプル。
+#
+# このファイルは組み込みデフォルトへ「マージ」されます（全項目を書く必要はなく、
+# 上書きしたいキーだけ書けば足ります）。plugins は id をキーにマージされます。
+#
+# 配置先（このファイルを置けば自動で読み込まれます）:
+#   Linux   : ${XDG_CONFIG_HOME:-~/.config}/agentcarto/config.yaml
+#   macOS   : ~/Library/Application Support/agentcarto/config.yaml
+#   Windows : %AppData%\agentcarto\config.yaml
+#
+# 明示指定とチェック:
+#   agentcarto --config ./config.example.yaml config validate   # 設定を検証
+#   agentcarto --config ./config.example.yaml config print       # マージ後の設定を表示
+#   agentcarto --config ./config.example.yaml plugins list       # プラグインと capability を表示
+
+version: 1
+
+ui:
+  refresh_interval: 2s      # 稼働判定などの再描画間隔
+  rescan_interval: 3s       # セッション再走査の間隔
+  default_view: time        # 一覧の既定ビュー: time | folder
+
+index:
+  max_chars_per_session: 131072  # 全文検索インデックスの1セッションあたり最大文字数
+
+cache:
+  enabled: true
+  cache_conversations: true
+  max_size: 512MiB          # 単位: B / KiB / MiB / GiB
+  max_age: 720h             # 期間: 例 30m, 12h, 720h
+
+# 各エージェントのプラグイン。本体は各プラグインを独立した実行ファイル（サブプロセス）として
+# 起動します。type はプラグインが名乗る識別子。実行ファイルは既定で本体と同じディレクトリ、または
+# PATH 上の "agentcarto-plugin-<type>" を探します。別の場所に置く場合は command で明示します。
+# color は default/black/red/green/yellow/blue/magenta/cyan/white/orange または bright-*。
+plugins:
+  - id: claude
+    type: claude
+    enabled: true
+    color: cyan
+    # command: /opt/agentcarto/agentcarto-plugin-claude   # 実行ファイルの明示パス（省略可）
+    options: {}
+  - id: codex
+    type: codex
+    enabled: true
+    color: red
+    options: {}
+  - id: grok
+    type: grok
+    enabled: true
+    color: magenta
+    options: {}
+  - id: copilot-vc        # GitHub Copilot Chat (VS Code)
+    type: copilot-vc
+    enabled: true
+    color: orange
+    options: {}
+  - id: copilot-jb        # GitHub Copilot Chat (JetBrains)
+    type: copilot-jb
+    enabled: true
+    color: yellow
+    options: {}
