@@ -1,0 +1,65 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Lay the host and its replace targets (../agentcarto-core, ../plugin-claude) side by side.
+      - uses: actions/checkout@v4
+        with:
+          path: agentcarto
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/core, path: agentcarto-core }
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/plugin-claude, path: plugin-claude }
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/plugin-codex, path: plugin-codex }
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/plugin-grok, path: plugin-grok }
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/plugin-copilot, path: plugin-copilot }
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentcarto/go.mod
+
+      - name: Build all targets
+        run: |
+          set -eu
+          root="$PWD"
+          mkdir -p dist
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            export GOOS="${t%/*}" GOARCH="${t#*/}" CGO_ENABLED=0
+            ext=""; [ "$GOOS" = windows ] && ext=".exe"
+            name="agentcarto_${GOOS}_${GOARCH}"
+            out="$root/dist/$name"
+            mkdir -p "$out"
+            build() { ( cd "$root/$1" && go build -trimpath -ldflags="-s -w" -o "$out/$3$ext" "$2" ); }
+            build agentcarto     ./cmd/agentcarto                   agentcarto
+            build plugin-claude  ./cmd/agentcarto-plugin-claude     agentcarto-plugin-claude
+            build plugin-codex   ./cmd/agentcarto-plugin-codex      agentcarto-plugin-codex
+            build plugin-grok    ./cmd/agentcarto-plugin-grok       agentcarto-plugin-grok
+            build plugin-copilot ./cmd/agentcarto-plugin-copilot-vc agentcarto-plugin-copilot-vc
+            build plugin-copilot ./cmd/agentcarto-plugin-copilot-jb agentcarto-plugin-copilot-jb
+            ( cd "$root/dist"
+              if [ "$GOOS" = windows ]; then zip -qr "$name.zip" "$name"; else tar -czf "$name.tar.gz" "$name"; fi )
+            echo "packaged $name"
+          done
+          ls -lh dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release create "$tag" dist/*.tar.gz dist/*.zip \
+            -R "${{ github.repository }}" --title "$tag" --generate-notes \
+            || gh release upload "$tag" dist/*.tar.gz dist/*.zip -R "${{ github.repository }}" --clobber

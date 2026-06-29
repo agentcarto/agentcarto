@@ -1,0 +1,13 @@
+# Compiled binaries
+/bin/
+*.test
+
+# Go build cache
+/.gocache/
+
+# macOS metadata
+.DS_Store
+._*
+
+# Legacy Python implementation (not published)
+/pre/
