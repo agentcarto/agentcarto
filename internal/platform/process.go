@@ -19,7 +19,8 @@ func Processes(ctx context.Context, enrich func(name string, args []string) bool
 	for _, p := range ps {
 		name, _ := p.NameWithContext(ctx)
 		args, _ := p.CmdlineSliceWithContext(ctx)
-		x := domain.Process{PID: p.Pid, Executable: name, Args: args}
+		ppid, _ := p.PpidWithContext(ctx)
+		x := domain.Process{PID: p.Pid, PPID: ppid, Executable: name, Args: args}
 		if enrich == nil || enrich(name, args) {
 			x.CWD, _ = p.CwdWithContext(ctx)
 			fs, _ := p.OpenFilesWithContext(ctx)

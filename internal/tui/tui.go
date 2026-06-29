@@ -2366,6 +2366,24 @@ func toolCallLabelBody(e domain.Event) (string, []string) {
 	if e.RawType == "custom_tool_call" || (name == "exec" && strings.Contains(raw, "tools.")) {
 		return strings.TrimSpace(name + " " + codexExecSummary(raw)), strings.Split(raw, "\n")
 	}
+	// Claude's Bash tool: render the shell command itself ($ ...) instead of the raw JSON input, with
+	// a trailing & when it runs in the background.
+	if name == "Bash" {
+		if inp := jsonObject(raw); inp != nil {
+			if cmd := strings.TrimSpace(stringArg(inp, "command")); cmd != "" {
+				bg := ""
+				if b, ok := inp["run_in_background"].(bool); ok && b {
+					bg = " &"
+				}
+				label := fmt.Sprintf("%s  $ %s%s", name, fit(strings.Join(strings.Fields(cmd), " "), 70), bg)
+				body := strings.Split(cmd, "\n")
+				if bg != "" {
+					body = append(body, "", "(run in background)")
+				}
+				return label, body
+			}
+		}
+	}
 	arg := ""
 	if inp := jsonObject(raw); inp != nil {
 		for _, k := range []string{"description", "file_path", "notebook_path", "path", "command", "pattern", "query", "url", "prompt"} {

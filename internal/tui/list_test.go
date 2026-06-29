@@ -204,6 +204,20 @@ func TestToolCallLabelBodyPrototypeEditAndPatch(t *testing.T) {
 	}
 }
 
+func TestToolCallLabelBodyPrototypeBashShell(t *testing.T) {
+	fg := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Bash", Text: `{"command":"ls -la\necho done","description":"list"}`})
+	if !strings.Contains(fg.Label, "Bash") || !strings.Contains(fg.Label, "$ ls -la echo done") || strings.Contains(fg.Label, "&") {
+		t.Fatalf("foreground bash label=%q", fg.Label)
+	}
+	if len(fg.Body) != 2 || fg.Body[0] != "ls -la" || fg.Body[1] != "echo done" {
+		t.Fatalf("foreground bash body=%#v", fg.Body)
+	}
+	bg := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Bash", Text: `{"command":"sleep 100","run_in_background":true}`})
+	if !strings.HasSuffix(bg.Label, "$ sleep 100 &") {
+		t.Fatalf("background bash label=%q", bg.Label)
+	}
+}
+
 func TestTurnMarkPartsPrototypeTaskRetryAndEditStats(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
 		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
