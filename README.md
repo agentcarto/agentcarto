@@ -75,16 +75,43 @@ Copilot Chat data is read-only (AgentCarto never writes to IDE-managed files).
 
 ## Install
 
-Download the prebuilt binaries (host + all plugins) for your machine from the latest
-release and install them into one directory — no Go or git needed (Linux/macOS):
+Download the prebuilt host binary and the plugin executables for your machine and
+install them into one directory — no Go or git needed (Linux/macOS):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/agentcarto/agentcarto/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin` by default (override with `PREFIX=/usr/local/bin`). Then run
-`agentcarto`. Windows users can grab the `.zip` from the
-[releases page](https://github.com/agentcarto/agentcarto/releases).
+The host and each plugin are released from their own repository; the installer fetches
+one archive per component (the host from its latest release, each plugin from the latest
+release of its own repo). Installs to `~/.local/bin` by default (override with
+`PREFIX=/usr/local/bin`). Then run `agentcarto`.
+
+Choose which plugins to install with `PLUGINS` (default `all`; available: `claude`,
+`codex`, `grok`, `copilot`). A missing plugin just isn't offered — the host degrades
+gracefully:
+
+```sh
+curl -fsSL .../install.sh | PLUGINS="claude codex" sh   # only these two
+curl -fsSL .../install.sh | PLUGINS=none sh             # host only
+```
+
+Windows users can grab the `.zip` files from each component's releases page (host:
+[agentcarto](https://github.com/agentcarto/agentcarto/releases); plugins: their
+respective repos).
+
+### Update
+
+Re-run the same command to update — `PLUGINS` is optional. On an existing install the
+installer updates **only the plugins you already have**, resolves each component's latest
+release, and skips any that are already current (versions are tracked in
+`~/.local/bin/.agentcarto-versions`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/agentcarto/agentcarto/main/install.sh | sh
+```
+
+Pass `PLUGINS=...` to add or change the installed set during an update.
 
 ## Usage
 

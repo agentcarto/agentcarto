@@ -13,20 +13,14 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      # Lay the host and its replace targets (../agentcarto-core, ../plugin-claude) side by side.
+      # The host binary alone is published here; each plugin is released from its
+      # own repository. The host replaces github.com/agentcarto/core => ../agentcarto-core,
+      # so check core out as a sibling (no plugin repos are needed for the host build).
       - uses: actions/checkout@v4
         with:
           path: agentcarto
       - uses: actions/checkout@v4
         with: { repository: agentcarto/core, path: agentcarto-core }
-      - uses: actions/checkout@v4
-        with: { repository: agentcarto/plugin-claude, path: plugin-claude }
-      - uses: actions/checkout@v4
-        with: { repository: agentcarto/plugin-codex, path: plugin-codex }
-      - uses: actions/checkout@v4
-        with: { repository: agentcarto/plugin-grok, path: plugin-grok }
-      - uses: actions/checkout@v4
-        with: { repository: agentcarto/plugin-copilot, path: plugin-copilot }
       - uses: actions/setup-go@v5
         with:
           go-version-file: agentcarto/go.mod
@@ -42,13 +36,8 @@ jobs:
             name="agentcarto_${GOOS}_${GOARCH}"
             out="$root/dist/$name"
             mkdir -p "$out"
-            build() { ( cd "$root/$1" && go build -trimpath -ldflags="-s -w" -o "$out/$3$ext" "$2" ); }
-            build agentcarto     ./cmd/agentcarto                   agentcarto
-            build plugin-claude  ./cmd/agentcarto-plugin-claude     agentcarto-plugin-claude
-            build plugin-codex   ./cmd/agentcarto-plugin-codex      agentcarto-plugin-codex
-            build plugin-grok    ./cmd/agentcarto-plugin-grok       agentcarto-plugin-grok
-            build plugin-copilot ./cmd/agentcarto-plugin-copilot-vc agentcarto-plugin-copilot-vc
-            build plugin-copilot ./cmd/agentcarto-plugin-copilot-jb agentcarto-plugin-copilot-jb
+            ( cd "$root/agentcarto" && go build -trimpath -ldflags="-s -w" \
+                -o "$out/agentcarto$ext" ./cmd/agentcarto )
             ( cd "$root/dist"
               if [ "$GOOS" = windows ]; then zip -qr "$name.zip" "$name"; else tar -czf "$name.tar.gz" "$name"; fi )
             echo "packaged $name"
