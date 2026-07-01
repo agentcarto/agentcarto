@@ -2241,9 +2241,22 @@ func (m *Model) openCurrentTurn(reset bool) {
 	m.ensureTurnOffset()
 }
 func (m Model) turnBlocksOf(ids []string) []turnBlock {
+	events := m.turnEvents(ids)
 	out := []turnBlock{}
-	for _, e := range m.turnEvents(ids) {
-		if e.Kind == domain.EventMeta {
+	// Consolidated "edited files" section at the top of the turn: one header line
+	// plus one block per file whose Body is the file's apply_patch diff.
+	if fes := turnFileEdits(events); len(fes) > 0 {
+		out = append(out, turnBlock{Sym: "*", Style: "tool", Label: fmt.Sprintf("Edited files (%d)", len(fes))})
+		for _, fe := range fes {
+			label := "  " + shortCWD(fe.Path, 40)
+			if !fe.noBody || fe.Added != 0 || fe.Removed != 0 {
+				label += fmt.Sprintf("  (+%d -%d)", fe.Added, fe.Removed)
+			}
+			out = append(out, turnBlock{Sym: "*", Style: "diff", Label: label, Body: fe.Diff})
+		}
+	}
+	for _, e := range events {
+		if e.Kind == domain.EventMeta || skipInFileSection(e) {
 			continue
 		}
 		out = append(out, eventBlock(e))
@@ -2289,7 +2302,7 @@ func eventBlock(e domain.Event) turnBlock {
 		lines = cleanToolResultLines(lines)
 		return turnBlock{Sym: "└", Style: "tool", Label: fmt.Sprintf("result (%d lines)", len(lines)), Body: lines}
 	case domain.EventFileChange:
-		files, added, removed := parseFileChange(text)
+		files, added, removed := fileChangeStats(text)
 		label := one
 		if len(files) > 0 {
 			shorts := make([]string, 0, len(files))
@@ -2446,7 +2459,9 @@ func (m Model) turnFullLines() []turnLine {
 		if expanded {
 			for _, ln := range b.Body {
 				st := b.Style
-				if strings.HasPrefix(ln, "+ ") {
+				if b.Style == "diff" {
+					st = diffLineStyle(ln)
+				} else if strings.HasPrefix(ln, "+ ") {
 					st = "add"
 				} else if strings.HasPrefix(ln, "- ") {
 					st = "del"
@@ -2777,9 +2792,10 @@ func turnSpan(events []domain.Event) string {
 func editStats(events []domain.Event) (int, int, int) {
 	files := map[string]bool{}
 	added, removed := 0, 0
+	hasFC := turnHasFileChangeDiff(events)
 	for _, e := range events {
 		if e.Kind == domain.EventFileChange {
-			fs, a, r := parseFileChange(e.Text)
+			fs, a, r := fileChangeStats(e.Text)
 			for _, f := range fs {
 				files[f] = true
 			}
@@ -2807,6 +2823,9 @@ func editStats(events []domain.Event) (int, int, int) {
 			continue
 		}
 		if e.ToolName == "apply_patch" || strings.Contains(e.Text, "*** Begin Patch") {
+			if hasFC {
+				continue // counted via patch_apply_end (file_change) instead
+			}
 			fs, a, r := codexPatchStats(patchText(e.Text))
 			for _, f := range fs {
 				files[f] = true
@@ -2918,6 +2937,316 @@ func splitForDiff(text string) []string {
 		return nil
 	}
 	return strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+}
+
+// diffContext is the number of unchanged context lines kept around each change
+// group in a generated apply_patch hunk (matches the unified-diff default).
+const diffContext = 3
+
+type diffOp struct {
+	kind byte // ' ' equal, '-' delete, '+' add
+	text string
+}
+
+// diffOps computes a line-level edit script between oldLines and newLines using the
+// same LCS DP as diffLines (delete-first on ties) so the added/removed counts agree.
+func diffOps(oldLines, newLines []string) []diffOp {
+	n, m := len(oldLines), len(newLines)
+	dp := make([][]int, n+1)
+	for i := range dp {
+		dp[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if oldLines[i] == newLines[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+	var ops []diffOp
+	i, j := 0, 0
+	for i < n && j < m {
+		switch {
+		case oldLines[i] == newLines[j]:
+			ops = append(ops, diffOp{' ', oldLines[i]})
+			i++
+			j++
+		case dp[i+1][j] >= dp[i][j+1]:
+			ops = append(ops, diffOp{'-', oldLines[i]})
+			i++
+		default:
+			ops = append(ops, diffOp{'+', newLines[j]})
+			j++
+		}
+	}
+	for ; i < n; i++ {
+		ops = append(ops, diffOp{'-', oldLines[i]})
+	}
+	for ; j < m; j++ {
+		ops = append(ops, diffOp{'+', newLines[j]})
+	}
+	return ops
+}
+
+// unifiedHunks renders apply_patch-style hunk lines from a line diff of oldText vs
+// newText: one "@@" per change group, context lines prefixed " ", deletions "-",
+// additions "+". It also returns the added/removed line counts. When oldText is
+// empty the whole body is an addition (used for Write / Add File).
+func unifiedHunks(oldText, newText string) ([]string, int, int) {
+	ops := diffOps(splitForDiff(oldText), splitForDiff(newText))
+	added, removed := 0, 0
+	changed := []int{}
+	for i, o := range ops {
+		switch o.kind {
+		case '+':
+			added++
+		case '-':
+			removed++
+		}
+		if o.kind != ' ' {
+			changed = append(changed, i)
+		}
+	}
+	if len(changed) == 0 {
+		return nil, 0, 0
+	}
+	var lines []string
+	for i := 0; i < len(changed); {
+		start, end := changed[i], changed[i]
+		j := i + 1
+		// Merge adjacent change groups separated by <= 2*context equal lines so
+		// their context does not overlap into two hunks.
+		for j < len(changed) && changed[j]-end-1 <= 2*diffContext {
+			end = changed[j]
+			j++
+		}
+		lo := max(0, start-diffContext)
+		hi := min(len(ops), end+1+diffContext)
+		lines = append(lines, "@@")
+		for _, o := range ops[lo:hi] {
+			lines = append(lines, string(o.kind)+o.text)
+		}
+		i = j
+	}
+	return lines, added, removed
+}
+
+// diffLineStyle maps an apply_patch body line to a turnLine style name.
+func diffLineStyle(ln string) string {
+	switch {
+	case strings.HasPrefix(ln, "+++") || strings.HasPrefix(ln, "---"):
+		return "meta"
+	case strings.HasPrefix(ln, "*** ") || strings.HasPrefix(ln, "@@"):
+		return "meta"
+	case strings.HasPrefix(ln, "+"):
+		return "add"
+	case strings.HasPrefix(ln, "-"):
+		return "del"
+	default:
+		return "plain"
+	}
+}
+
+// fileEdit is one file's consolidated change within a turn, rendered as an
+// apply_patch body (Diff, including the "*** ... File:" header line).
+type fileEdit struct {
+	Path           string
+	Diff           []string
+	Added, Removed int
+	noBody         bool // aggregate-only source (Codex file_change): no real diff body
+}
+
+// editHunks builds apply_patch hunks from a Claude edit tool's JSON input.
+func editHunks(name string, inp map[string]any) ([]string, int, int) {
+	switch name {
+	case "Write":
+		return unifiedHunks("", stringArg(inp, "content"))
+	case "NotebookEdit":
+		return unifiedHunks(stringArg(inp, "old_source"), stringArg(inp, "new_source"))
+	case "MultiEdit":
+		var lines []string
+		added, removed := 0, 0
+		if edits, ok := inp["edits"].([]any); ok {
+			for _, v := range edits {
+				ed, ok := v.(map[string]any)
+				if !ok {
+					continue
+				}
+				h, a, r := unifiedHunks(stringArg(ed, "old_string"), stringArg(ed, "new_string"))
+				lines = append(lines, h...)
+				added += a
+				removed += r
+			}
+		}
+		return lines, added, removed
+	default:
+		return unifiedHunks(stringArg(inp, "old_string"), stringArg(inp, "new_string"))
+	}
+}
+
+// splitPatchByFile splits a Codex apply_patch body into one fileEdit per file,
+// keeping each file's "*** ... File:" header as Diff[0] and counting +/- lines.
+func splitPatchByFile(patch string) []fileEdit {
+	var out []fileEdit
+	ci := -1
+	for _, line := range strings.Split(patch, "\n") {
+		if line == "*** Begin Patch" || line == "*** End Patch" {
+			continue
+		}
+		path := ""
+		for _, p := range []string{"*** Add File: ", "*** Update File: ", "*** Delete File: "} {
+			if strings.HasPrefix(line, p) {
+				path = strings.TrimSpace(strings.TrimPrefix(line, p))
+				break
+			}
+		}
+		if path != "" {
+			out = append(out, fileEdit{Path: path, Diff: []string{line}})
+			ci = len(out) - 1
+			continue
+		}
+		if ci < 0 {
+			continue
+		}
+		out[ci].Diff = append(out[ci].Diff, line)
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			out[ci].Added++
+		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			out[ci].Removed++
+		}
+	}
+	return out
+}
+
+// fileChangeStats returns the files and added/removed counts for an EventFileChange.
+// Codex (ParserVersion >=3) carries the real diff as an apply_patch document; older
+// cached sessions carry only the aggregate JSON summary.
+func fileChangeStats(text string) ([]string, int, int) {
+	if strings.Contains(text, "*** Begin Patch") {
+		return codexPatchStats(patchText(text))
+	}
+	return parseFileChange(text)
+}
+
+// turnHasFileChangeDiff reports whether the turn has an EventFileChange carrying a
+// real apply_patch diff. When it does, an apply_patch tool_call in the same turn is
+// the redundant request for that same change and must not be counted/rendered twice.
+func turnHasFileChangeDiff(events []domain.Event) bool {
+	for _, e := range events {
+		if e.Kind == domain.EventFileChange && strings.Contains(e.Text, "*** Begin Patch") {
+			return true
+		}
+	}
+	return false
+}
+
+// turnFileEdits consolidates a turn's edits by file: Claude edit tools reconstruct
+// apply_patch hunks from old/new, Codex apply_patch is split per file, and Codex
+// file_change contributes a body-less entry (aggregate counts only, no diff text).
+// Grok/Copilot carry no edit data and produce nothing. Files keep first-seen order;
+// repeated edits to one file append their hunks under a single header.
+func turnFileEdits(events []domain.Event) []fileEdit {
+	var out []fileEdit
+	idx := map[string]int{}
+	get := func(path, header string) int {
+		if i, ok := idx[path]; ok {
+			return i
+		}
+		fe := fileEdit{Path: path}
+		if header != "" {
+			fe.Diff = append(fe.Diff, header)
+		}
+		idx[path] = len(out)
+		out = append(out, fe)
+		return idx[path]
+	}
+	mergePatch := func(patch string) {
+		for _, seg := range splitPatchByFile(patch) {
+			if len(seg.Diff) == 0 {
+				continue
+			}
+			i := get(seg.Path, seg.Diff[0])
+			out[i].Diff = append(out[i].Diff, seg.Diff[1:]...)
+			out[i].Added += seg.Added
+			out[i].Removed += seg.Removed
+		}
+	}
+	hasFC := turnHasFileChangeDiff(events)
+	for _, e := range events {
+		switch {
+		case e.Kind == domain.EventFileChange:
+			// Codex patch_apply_end. Newer sessions carry the real diff as an
+			// apply_patch document; older cached ones only aggregate counts, which
+			// become a body-less entry (per-file counts trusted only for one file).
+			if strings.Contains(e.Text, "*** Begin Patch") {
+				mergePatch(patchText(e.Text))
+				continue
+			}
+			files, a, r := parseFileChange(e.Text)
+			for _, f := range files {
+				if _, ok := idx[f]; ok {
+					continue
+				}
+				i := get(f, "*** Update File: "+f)
+				out[i].noBody = true
+				if len(files) == 1 {
+					out[i].Added, out[i].Removed = a, r
+				}
+			}
+		case e.Kind == domain.EventToolCall && editTools[e.ToolName]:
+			inp := jsonObject(e.Text)
+			if inp == nil {
+				continue
+			}
+			fp := stringArg(inp, "file_path")
+			if fp == "" {
+				fp = stringArg(inp, "notebook_path")
+			}
+			if fp == "" {
+				continue
+			}
+			header := "*** Update File: " + fp
+			if e.ToolName == "Write" {
+				header = "*** Add File: " + fp
+			}
+			i := get(fp, header)
+			hunks, a, r := editHunks(e.ToolName, inp)
+			out[i].Diff = append(out[i].Diff, hunks...)
+			out[i].Added += a
+			out[i].Removed += r
+		case e.Kind == domain.EventToolCall && (e.ToolName == "apply_patch" || strings.Contains(e.Text, "*** Begin Patch")):
+			// When patch_apply_end already provided the applied diff, this tool_call
+			// is the redundant request for the same change; skip to avoid duplication.
+			if hasFC {
+				continue
+			}
+			mergePatch(patchText(e.Text))
+		}
+	}
+	for i := range out {
+		if out[i].noBody && len(out[i].Diff) <= 1 {
+			out[i].Diff = append(out[i].Diff, "(no diff body)")
+		}
+	}
+	return out
+}
+
+// skipInFileSection reports edit events already surfaced in the consolidated file
+// section, so turnBlocksOf omits them from the chronological block list.
+func skipInFileSection(e domain.Event) bool {
+	switch {
+	case e.Kind == domain.EventFileChange:
+		return true
+	case e.Kind == domain.EventToolCall && editTools[e.ToolName]:
+		return true
+	case e.Kind == domain.EventToolCall && (e.ToolName == "apply_patch" || strings.Contains(e.Text, "*** Begin Patch")):
+		return true
+	}
+	return false
 }
 
 func patchText(raw string) string {

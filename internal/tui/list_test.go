@@ -526,7 +526,9 @@ func TestFileChangeAppearsInTurnListAndFullView(t *testing.T) {
 	}
 	m.openCurrentTurn(true)
 	out = m.detailView()
-	for _, want := range []string{"apply_patch", "internal/tui/tui.go", "+2 -1"} {
+	// The file_change is now surfaced in the consolidated "Edited files" section.
+	// It carries no diff body (aggregate-only), but the single-file counts are shown.
+	for _, want := range []string{"Edited files", "internal/tui/tui.go", "+2 -1"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in full view:\n%s", want, out)
 		}
