@@ -104,9 +104,13 @@ Resuming or forking hands off by `syscall.Exec`-replacing the agentcarto process
 plugin subprocesses **before** the handoff.
 
 ### Conversation parsing helpers (`core/conversation`)
-Shared logic for turn/branch reconstruction. `branches.go` filters out system-injected pseudo-prompts
-(`<command-name>`, `<system-reminder>`, `<bash-input>`, …) so they aren't counted as genuine user
-turns — extend `pseudoPromptPrefixes` if agents introduce new wrapper tags.
+Shared, agent-agnostic logic for turn/branch reconstruction. What counts as a genuine prompt or
+command is decided **plugin-side at parse time**: each plugin classifies its own wrapper tags
+(`<command-name>`, `<system-reminder>`, `<bash-input>`, `<user_query>`, …) and fills the normalized
+`Event.Prompt`/`Event.Command` fields, which `branches.go` and `common.Title` consume for turn
+boundaries, headlines and titles. If an agent introduces new wrapper tags, extend that plugin's
+classifier (`classify.go` / `promptText`) — never core. Changing a classifier changes parse output:
+bump the plugin's `ParserVersion`.
 
 ### Host-side UI and search (`internal/tui`, `internal/search`)
 `internal/tui` is the Bubble Tea program (Elm-style model/update/view) for the list and detail
