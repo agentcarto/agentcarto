@@ -130,6 +130,9 @@ type turnBlock struct {
 	Body       []string
 	Open       bool
 	Time       time.Time // event timestamp shown as an HH:MM:SS gutter (zero = blank)
+	// NoGutter renders the block flush left, without the timestamp gutter.
+	// Used for the synthetic edited-files section, which carries no event time.
+	NoGutter bool
 }
 
 // labelSpan is one segment of a header line with its own style.
@@ -1153,6 +1156,7 @@ func wrapWidth(s string, n int) []string {
 	out = append(out, cur.String())
 	return out
 }
+
 func statusMark(s domain.Session) string {
 	if s.Status == domain.StatusRunning {
 		if s.PermissionWait {
@@ -2283,7 +2287,7 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 	// apply_patch hunks as Body (the "*** ... File:" header would repeat the
 	// label's op/path, so it is not rendered).
 	if fes := turnFileEdits(events); len(fes) > 0 {
-		out = append(out, turnBlock{Sym: "*", Style: "tool", Label: fmt.Sprintf("Edited files (%d)", len(fes))})
+		out = append(out, turnBlock{Sym: "*", Style: "tool", Label: fmt.Sprintf("Edited files (%d)", len(fes)), NoGutter: true})
 		for _, fe := range fes {
 			// The op/path segment is colored by op (A=green, M=yellow, D=red);
 			// the "diff-" prefix keeps per-line diff styling for the body.
@@ -2305,7 +2309,7 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 			for _, sp := range spans {
 				label += sp.text
 			}
-			out = append(out, turnBlock{Sym: "*", Style: style, Label: label, LabelSpans: spans, Body: fe.body()})
+			out = append(out, turnBlock{Sym: "*", Style: style, Label: label, LabelSpans: spans, Body: fe.body(), NoGutter: true})
 		}
 	}
 	for _, e := range events {
@@ -2485,9 +2489,16 @@ func (m Model) turnFullLines() []turnLine {
 	// get header=false so the block-start detection (turnBlockHeaderLine) is not broken.
 	wrap := max(20, m.width-1)
 	add := func(tl turnLine) {
-		for k, seg := range wrapWidth(tl.text, wrap) {
+		// Hanging indent: repeat the line's leading spaces on continuation segments so
+		// wrapped text stays under the body column instead of running into the
+		// timestamp gutter. Cap the indent so narrow screens keep room for content.
+		lead := tl.text[:len(tl.text)-len(strings.TrimLeft(tl.text, " "))]
+		if len(lead) > wrap/2 {
+			lead = lead[:wrap/2]
+		}
+		for k, seg := range wrapWidth(strings.TrimPrefix(tl.text, lead), wrap-len(lead)) {
 			t := tl
-			t.text = seg
+			t.text = lead + seg
 			if k > 0 {
 				t.header = false
 			}
@@ -2504,16 +2515,20 @@ func (m Model) turnFullLines() []turnLine {
 				marker = "▸"
 			}
 		}
-		// Timestamp gutter: HH:MM:SS for blocks that carry an event time,
-		// blank (same width) otherwise, so the fold markers stay aligned.
-		ts := strings.Repeat(" ", 8)
-		if !b.Time.IsZero() {
-			ts = b.Time.Local().Format("15:04:05")
+		// Timestamp gutter: HH:MM:SS for blocks that carry an event time, blank
+		// (same width) for time-less blocks so the fold markers stay aligned.
+		// NoGutter blocks (the edited-files section) render flush left instead.
+		gutter := ""
+		if !b.NoGutter {
+			gutter = strings.Repeat(" ", 8) + " "
+			if !b.Time.IsZero() {
+				gutter = b.Time.Local().Format("15:04:05") + " "
+			}
 		}
-		head := fmt.Sprintf("%s %s %s %s", ts, marker, b.Sym, b.Label)
+		head := fmt.Sprintf("%s%s %s %s", gutter, marker, b.Sym, b.Label)
 		var spans []labelSpan
 		if len(b.LabelSpans) > 0 {
-			spans = append(spans, labelSpan{fmt.Sprintf("%s %s %s %s", ts, marker, b.Sym, b.LabelSpans[0].text), b.LabelSpans[0].style})
+			spans = append(spans, labelSpan{fmt.Sprintf("%s%s %s %s", gutter, marker, b.Sym, b.LabelSpans[0].text), b.LabelSpans[0].style})
 			spans = append(spans, b.LabelSpans[1:]...)
 		}
 		if !expanded && len(b.Body) > 0 && b.Sym != "◆" {
@@ -2538,10 +2553,9 @@ func (m Model) turnFullLines() []turnLine {
 				} else if st != "user" && st != "assistant" {
 					st = "plain"
 				}
-				// Indent past the timestamp gutter so the body stays under the label.
-				add(turnLine{style: st, text: strings.Repeat(" ", 9) + "    " + ln, block: i})
+				// Indent past the gutter (if any) so the body stays under the label.
+				add(turnLine{style: st, text: strings.Repeat(" ", len(gutter)+4) + ln, block: i})
 			}
-			out = append(out, turnLine{style: "plain", text: "", block: i})
 		}
 	}
 	return out
