@@ -1,5 +1,11 @@
 name: CI
-on: [push, pull_request]
+# Branch pushes and PRs run this directly; tag pushes run it once, as the
+# release workflow's test gate (workflow_call), instead of racing beside it.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -35,3 +41,35 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: agentcarto
         run: go test -race ./...
+
+  # Cross-module check: build the plugin binaries and test the host, core and
+  # every plugin together (make check), so the pluginhost integration test
+  # actually runs and a break anywhere in the product fails this workflow.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: agentcarto
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/core, path: agentcarto-core }
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/plugin-claude, path: plugin-claude }
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/plugin-codex, path: plugin-codex }
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/plugin-grok, path: plugin-grok }
+      - uses: actions/checkout@v4
+        with: { repository: agentcarto/plugin-copilot, path: plugin-copilot }
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentcarto/go.mod
+      # make plugins builds sibling modules by path, which needs a workspace
+      # (locally the checkout root carries go.work; CI recreates it here).
+      - name: Create workspace
+        run: |
+          go work init ./agentcarto ./agentcarto-core ./plugin-claude ./plugin-codex ./plugin-grok ./plugin-copilot
+          go work sync
+      - name: make check
+        working-directory: agentcarto
+        run: make check
