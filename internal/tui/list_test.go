@@ -557,6 +557,43 @@ func TestFileChangeAppearsInTurnListAndFullView(t *testing.T) {
 	}
 }
 
+// The full turn view header shows the session's status mark like the detail header.
+func TestTurnFullViewHeaderShowsStatusMark(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q"}}},
+	})
+	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "t", Status: domain.StatusRunning}
+	m := Model{width: 120, height: 12, detailSession: &s}
+	updated, _ := m.Update(convMsg{c: &c, reset: true})
+	m = updated.(Model)
+	m.openCurrentTurn(true)
+	out := stripANSI(m.detailView())
+	if !strings.Contains(strings.Split(out, "\n")[0], "● RUN") {
+		t.Fatalf("missing status mark in full view header:\n%s", out)
+	}
+}
+
+// Each block header line in the full turn view carries its event's time as an
+// HH:MM:SS gutter.
+func TestTurnFullViewShowsEventTimeGutter(t *testing.T) {
+	ts := time.Date(2026, 6, 23, 14, 3, 22, 0, time.Local)
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: ts, Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Timestamp: ts}}},
+		{ID: "a", Parent: "u", Timestamp: ts.Add(3 * time.Second), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "ans", Timestamp: ts.Add(3 * time.Second)}}},
+	})
+	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "t"}
+	m := Model{width: 120, height: 12, detailSession: &s}
+	updated, _ := m.Update(convMsg{c: &c, reset: true})
+	m = updated.(Model)
+	m.openCurrentTurn(true)
+	out := stripANSI(m.detailView())
+	for _, want := range []string{"14:03:22 ", "14:03:25 "} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing time gutter %q in full view:\n%s", want, out)
+		}
+	}
+}
+
 func TestTurnListColumnsAlignAndFooterStaysBottom(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
 		{ID: "u1", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "short"}}},

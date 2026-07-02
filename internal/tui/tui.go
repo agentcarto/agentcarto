@@ -129,6 +129,7 @@ type turnBlock struct {
 	LabelSpans []labelSpan
 	Body       []string
 	Open       bool
+	Time       time.Time // event timestamp shown as an HH:MM:SS gutter (zero = blank)
 }
 
 // labelSpan is one segment of a header line with its own style.
@@ -2311,7 +2312,9 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 		if e.Kind == domain.EventMeta || skipInFileSection(e) {
 			continue
 		}
-		out = append(out, eventBlock(e))
+		b := eventBlock(e)
+		b.Time = e.Timestamp
+		out = append(out, b)
 	}
 	return out
 }
@@ -2501,10 +2504,16 @@ func (m Model) turnFullLines() []turnLine {
 				marker = "▸"
 			}
 		}
-		head := fmt.Sprintf("%s %s %s", marker, b.Sym, b.Label)
+		// Timestamp gutter: HH:MM:SS for blocks that carry an event time,
+		// blank (same width) otherwise, so the fold markers stay aligned.
+		ts := strings.Repeat(" ", 8)
+		if !b.Time.IsZero() {
+			ts = b.Time.Local().Format("15:04:05")
+		}
+		head := fmt.Sprintf("%s %s %s %s", ts, marker, b.Sym, b.Label)
 		var spans []labelSpan
 		if len(b.LabelSpans) > 0 {
-			spans = append(spans, labelSpan{fmt.Sprintf("%s %s %s", marker, b.Sym, b.LabelSpans[0].text), b.LabelSpans[0].style})
+			spans = append(spans, labelSpan{fmt.Sprintf("%s %s %s %s", ts, marker, b.Sym, b.LabelSpans[0].text), b.LabelSpans[0].style})
 			spans = append(spans, b.LabelSpans[1:]...)
 		}
 		if !expanded && len(b.Body) > 0 && b.Sym != "◆" {
@@ -2529,7 +2538,8 @@ func (m Model) turnFullLines() []turnLine {
 				} else if st != "user" && st != "assistant" {
 					st = "plain"
 				}
-				add(turnLine{style: st, text: "    " + ln, block: i})
+				// Indent past the timestamp gutter so the body stays under the label.
+				add(turnLine{style: st, text: strings.Repeat(" ", 9) + "    " + ln, block: i})
 			}
 			out = append(out, turnLine{style: "plain", text: "", block: i})
 		}
@@ -2551,6 +2561,9 @@ func (m Model) turnFullView() string {
 	events := m.turnEvents(row.Turn)
 	head := " "
 	if s != nil {
+		if mk := strings.TrimSpace(statusMark(*s)); mk != "" {
+			head += statusStyled(mk+" ", *s, false, true)
+		}
 		head += styled(s.AgentType+"  ", m.pluginColor(*s), false, true) + styled(shortID(s.SessionID)+"   ", lipgloss.Color("3"), false, false)
 	}
 	head += fmt.Sprintf("turn #%d/%d", turnNo, len(m.detailTurns))
