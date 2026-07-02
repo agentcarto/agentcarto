@@ -337,7 +337,7 @@ func TestDetailTurnsNewestFirst(t *testing.T) {
 		t.Fatalf("top turn = %q", got)
 	}
 	out := m.detailView()
-	if strings.Index(out, "#2") < 0 || strings.Index(out, "#1") < 0 || strings.Index(out, "#2") > strings.Index(out, "#1") {
+	if !strings.Contains(out, "#2") || !strings.Contains(out, "#1") || strings.Index(out, "#2") > strings.Index(out, "#1") {
 		t.Fatalf("turn numbers not newest first:\n%s", out)
 	}
 }
@@ -443,7 +443,7 @@ func TestDetailCursorScrollsAndMovesWithinViewport(t *testing.T) {
 		t.Fatalf("after up cursor=%d offset=%d, want cursor=3 offset=2", m.detailCursor, m.detailOffset)
 	}
 	out = m.detailView()
-	if strings.Index(out, "#3") < 0 || strings.Index(out, "#4") < 0 || strings.Index(out, "#3") < strings.Index(out, "#4") {
+	if !strings.Contains(out, "#3") || !strings.Contains(out, "#4") || strings.Index(out, "#3") < strings.Index(out, "#4") {
 		t.Fatalf("cursor should move up within the existing viewport:\n%s", out)
 	}
 }

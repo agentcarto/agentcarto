@@ -159,3 +159,24 @@ func TestReloadKeepsBranchNavigationWhenDrilledIn(t *testing.T) {
 		t.Fatalf("drilled-in navigation was lost: top=%v", top)
 	}
 }
+
+// A load result tagged with a different session key is stale (the view moved
+// to another session while the load ran) and must not be applied: quickly
+// closing A and opening B used to show A's conversation under B's header.
+func TestStaleConvMsgForAnotherSessionIsDropped(t *testing.T) {
+	ts := func(s int64) time.Time { return time.Unix(s, 0) }
+	stale := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "A's content"}}},
+	})
+	b := domain.Session{PluginID: "claude", SessionID: "B"}
+	m := Model{detailSession: &b}
+	nm, _ := m.Update(convMsg{c: &stale, key: domain.SessionKey{PluginID: "claude", SessionID: "A"}, reset: true})
+	if got := nm.(Model).detail; got != nil {
+		t.Fatal("stale conversation for session A was applied while viewing B")
+	}
+	// The matching key is applied normally.
+	nm, _ = m.Update(convMsg{c: &stale, key: b.Key(), reset: true})
+	if nm.(Model).detail == nil {
+		t.Fatal("matching conversation was not applied")
+	}
+}

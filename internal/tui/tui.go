@@ -32,6 +32,8 @@ type scanMsg struct {
 type convMsg struct {
 	c         *domain.Conversation
 	focusLeaf string // ID in the synthesized tree matching the opened fork's active leaf (used to focus that branch in the root-anchored view)
+	origins   map[string]app.NodeOrigin
+	key       domain.SessionKey // session the load was requested for (stale results are dropped)
 	e         error
 	reset     bool
 }
@@ -65,6 +67,7 @@ type Model struct {
 	searching         bool
 	detail            *domain.Conversation
 	detailSession     *domain.Session
+	detailOrigins     map[string]app.NodeOrigin // synthesized-tree node ID -> owning session + real node ID
 	detailTurns       [][]string
 	detailRows        []detailRow
 	detailPathStack   []detailFrame
@@ -72,7 +75,6 @@ type Model struct {
 	blinkOn           bool // blink phase for the elapsed time of the selected in-progress turn (true=background lit, false=no background).
 	detailCursor      int
 	detailOffset      int
-	detailExpanded    bool
 	turnOpen          bool
 	turnBlocks        []turnBlock
 	turnExpanded      map[int]bool
@@ -517,8 +519,16 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 	// is nil again. A load result that arrives late must not set detail while
 	// detailSession is nil, or detailView would dereference a nil *detailSession and
 	// panic. When closed, drop the conversation body (but still surface an error flash).
+	// A result for a *different* session (the view moved on while the load ran) is
+	// stale and dropped entirely, so quickly closing A and opening B cannot show A's
+	// conversation under B's header. (A zero key means the sender did not tag the
+	// load; only tagged results are subject to the staleness check.)
+	if m.detailSession != nil && x.key != (domain.SessionKey{}) && x.key != m.detailSession.Key() {
+		return m, nil
+	}
 	if m.detailSession != nil {
 		m.detail = x.c
+		m.detailOrigins = x.origins
 	}
 	if x.c != nil && m.detail != nil {
 		// While viewing the current branch (not descended into a sub-branch, i.e. stack
@@ -827,16 +837,22 @@ func (m Model) updateTurnListSearch(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // forkFromDetail creates a fork from the selected turn (or from the active leaf when
-// the cursor is not on a turn) and arms the confirm prompt.
+// the cursor is not on a turn) and arms the confirm prompt. The displayed tree is
+// synthesized (fork-child nodes carry grafted IDs that don't exist in any file), so
+// the selected node is translated back to its owning session and real node ID via
+// detailOrigins; app.ForkAt then recomputes KeepTurns in the owner's own numbering.
 func (m Model) forkFromDetail() (tea.Model, tea.Cmd) {
 	target := m.detail.ActiveLeaf
-	keep := len(m.detailTurns)
 	if row, ok := m.selectedDetailRow(); ok && row.Kind == "turn" && len(row.Turn) > 0 {
 		turn := row.Turn
 		target = turn[len(turn)-1]
-		keep = row.TurnIndex + 1
 	}
-	plan, cmd, e := m.app.Fork(context.Background(), *m.detailSession, domain.ForkTarget{NodeID: target, KeepTurns: keep})
+	origin, ok := m.detailOrigins[target]
+	if !ok {
+		// No graft mapping for this node: it can only belong to the focused session.
+		origin = app.NodeOrigin{Session: *m.detailSession, NodeID: target}
+	}
+	plan, cmd, e := m.app.ForkAt(context.Background(), origin)
 	if e != nil {
 		m.flash = e.Error()
 	} else {
@@ -856,7 +872,8 @@ func (m Model) jumpToParent() (tea.Model, tea.Cmd) {
 	}
 	var parent *domain.Session
 	for i := range m.sessions {
-		if m.sessions[i].SessionID == pid {
+		// Match the plugin too: session IDs are only unique within one plugin.
+		if m.sessions[i].PluginID == m.detailSession.PluginID && m.sessions[i].SessionID == pid {
 			parent = &m.sessions[i]
 			break
 		}
@@ -955,6 +972,12 @@ func (m Model) updateList(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.offset = 0
 		m.filter()
 	case "r":
+		// Ignore while a scan is in flight: a second concurrent scan could land
+		// out of order and overwrite newer results with older ones (and would
+		// hit the cache DB concurrently).
+		if m.scanning {
+			return m, nil
+		}
 		m.scanning = true
 		return m, m.scan()
 	case "v":
@@ -1083,8 +1106,8 @@ func (m Model) loadConversation(s domain.Session, useCache, reset bool) tea.Cmd 
 		// Build the whole tree from s's root ancestor rather than from s itself, so that
 		// however a session is opened it canonicalizes to the same parent → … → current
 		// tree. focusLeaf points the view at s's own branch.
-		c, focusLeaf, e := m.app.ConversationFromFocus(ctx, s, m.sessions)
-		return convMsg{c: c, focusLeaf: focusLeaf, e: e, reset: reset}
+		c, focusLeaf, origins, e := m.app.ConversationFromFocus(ctx, s, m.sessions)
+		return convMsg{c: c, focusLeaf: focusLeaf, origins: origins, key: s.Key(), e: e, reset: reset}
 	}
 }
 func fit(s string, n int) string {
@@ -1422,6 +1445,8 @@ func (m Model) updateRelocate(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.flash = fmt.Sprintf("relocated %d items", len(r.Completed))
 			}
 			m = m.endRelocate()
+			// Mark the rescan as in flight so the next tick doesn't start a second one.
+			m.scanning = true
 			return m, m.scan()
 		}
 		m = m.endRelocate()
@@ -2487,8 +2512,7 @@ func (m Model) turnFullView() string {
 		return m.detailView()
 	}
 	turnNo := row.TurnIndex + 1
-	events := []domain.Event{}
-	events = m.turnEvents(row.Turn)
+	events := m.turnEvents(row.Turn)
 	head := " "
 	if s != nil {
 		head += styled(s.AgentType+"  ", m.pluginColor(*s), false, true) + styled(shortID(s.SessionID)+"   ", lipgloss.Color("3"), false, false)

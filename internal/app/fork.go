@@ -3,29 +3,85 @@ package app
 import (
 	"context"
 	"fmt"
+	convlogic "github.com/agentcarto/core/conversation"
 	"github.com/agentcarto/core/domain"
 	"sort"
 )
 
+// NodeOrigin identifies, for a node of the synthesized (grafted) tree, the
+// session that owns the node and the node's real ID within that session's own
+// conversation. Grafting renames fork-child nodes to synthetic IDs (k0_…), so
+// any operation that reaches back into a session's file (fork) must translate
+// through this mapping first.
+type NodeOrigin struct {
+	Session domain.Session
+	NodeID  string
+}
+
 func (a *App) ConversationWithForks(ctx context.Context, s domain.Session, sessions []domain.Session) (*domain.Conversation, error) {
 	forks := buildForkMap(sessions)
 	seen := map[domain.SessionKey]bool{}
-	conv, _, err := a.conversationWithForks(ctx, s, forks, seen, domain.SessionKey{})
+	conv, _, _, err := a.conversationWithForks(ctx, s, forks, seen, domain.SessionKey{})
 	return conv, err
 }
 
 // ConversationFromFocus resolves the root ancestor of focus within sessions and,
 // starting from that root, returns the full tree with forks grafted in, together
 // with the synthetic in-tree node ID (focusLeaf) corresponding to focus's active
-// leaf. If focus is itself the root (has no ancestor), focusLeaf is the root's
-// active leaf. This is the entry point that canonicalizes the conversation view so
-// that, however a session is opened, it shows the same "parent → … → current" tree;
-// the TUI derives the focused branch from focusLeaf.
-func (a *App) ConversationFromFocus(ctx context.Context, focus domain.Session, sessions []domain.Session) (*domain.Conversation, string, error) {
+// leaf and the node-origin map for the whole tree. If focus is itself the root
+// (has no ancestor), focusLeaf is the root's active leaf. This is the entry
+// point that canonicalizes the conversation view so that, however a session is
+// opened, it shows the same "parent → … → current" tree; the TUI derives the
+// focused branch from focusLeaf.
+func (a *App) ConversationFromFocus(ctx context.Context, focus domain.Session, sessions []domain.Session) (*domain.Conversation, string, map[string]NodeOrigin, error) {
 	root := rootAncestor(focus, sessions)
 	forks := buildForkMap(sessions)
 	seen := map[domain.SessionKey]bool{}
 	return a.conversationWithForks(ctx, root, forks, seen, focus.Key())
+}
+
+// ForkAt plans a fork at a node identified by its origin (owning session +
+// real node ID). KeepTurns is recomputed on the owner's own conversation with
+// the same turn rules the display uses (TurnsOfPath), because turn numbers on
+// the synthesized tree count the ancestors' turns too and do not match the
+// owner's file.
+func (a *App) ForkAt(ctx context.Context, origin NodeOrigin) (domain.MutationPlan, domain.Command, error) {
+	conv, err := a.Conversation(ctx, origin.Session)
+	if err != nil {
+		return domain.MutationPlan{}, domain.Command{}, err
+	}
+	if conv == nil {
+		return domain.MutationPlan{}, domain.Command{}, fmt.Errorf("conversation unavailable for %s", origin.Session.SessionID)
+	}
+	path := pathToNode(*conv, origin.NodeID)
+	if len(path) == 0 {
+		return domain.MutationPlan{}, domain.Command{}, fmt.Errorf("fork point %q not found in session %s", origin.NodeID, origin.Session.SessionID)
+	}
+	keep := len(convlogic.TurnsOfPath(*conv, path))
+	return a.Fork(ctx, origin.Session, domain.ForkTarget{NodeID: origin.NodeID, KeepTurns: keep})
+}
+
+// pathToNode returns the root→id path within c, or nil when id is absent.
+// A dangling parent link mid-chain ends the walk there (treated as the root).
+func pathToNode(c domain.Conversation, id string) []string {
+	if _, ok := c.Nodes[id]; !ok {
+		return nil
+	}
+	var rev []string
+	seen := map[string]bool{}
+	for cur := id; cur != "" && !seen[cur]; {
+		n, ok := c.Nodes[cur]
+		if !ok {
+			break
+		}
+		seen[cur] = true
+		rev = append(rev, cur)
+		cur = n.Parent
+	}
+	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
+		rev[i], rev[j] = rev[j], rev[i]
+	}
+	return rev
 }
 
 // rootAncestor walks s's ParentSessionID chain as far back as it can be followed
@@ -50,27 +106,28 @@ func rootAncestor(s domain.Session, sessions []domain.Session) domain.Session {
 	return cur
 }
 
-func (a *App) conversationWithForks(ctx context.Context, s domain.Session, forks map[string][]domain.Session, seen map[domain.SessionKey]bool, focusKey domain.SessionKey) (*domain.Conversation, string, error) {
+func (a *App) conversationWithForks(ctx context.Context, s domain.Session, forks map[string][]domain.Session, seen map[domain.SessionKey]bool, focusKey domain.SessionKey) (*domain.Conversation, string, map[string]NodeOrigin, error) {
 	k := s.Key()
 	if seen[k] {
 		conv, err := a.Conversation(ctx, s)
-		return conv, "", err
+		return conv, "", identityOrigins(conv, s), err
 	}
 	seen[k] = true
 	conv, err := a.Conversation(ctx, s)
 	if err != nil {
-		return conv, "", err
+		return conv, "", nil, err
 	}
 	if conv == nil {
-		return conv, "", nil
+		return conv, "", nil, nil
 	}
+	origins := identityOrigins(conv, s)
 	focusLeaf := ""
 	if k == focusKey {
 		focusLeaf = conv.ActiveLeaf
 	}
 	children := forks[s.SessionID]
 	for i, child := range children {
-		childConv, childFocus, err := a.conversationWithForks(ctx, child, forks, seen, focusKey)
+		childConv, childFocus, childOrigins, err := a.conversationWithForks(ctx, child, forks, seen, focusKey)
 		if err != nil || childConv == nil {
 			continue
 		}
@@ -78,18 +135,37 @@ func (a *App) conversationWithForks(ctx context.Context, s domain.Session, forks
 		if want == "" && child.Key() == focusKey {
 			want = childConv.ActiveLeaf
 		}
+		grafted := map[string]string{} // grafted (renamed) ID -> ID in the child tree
 		var mapped string
 		if child.ForkAt != "" {
-			mapped = graftClaudeFork(conv, *childConv, child.ForkAt, i, want)
+			mapped = graftClaudeFork(conv, *childConv, child.ForkAt, i, want, grafted)
 		} else {
-			mapped = graftFork(conv, *childConv, i, want)
+			mapped = graftFork(conv, *childConv, i, want, grafted)
+		}
+		// The child tree may itself contain grafts, so compose through its map.
+		for nid, cid := range grafted {
+			if o, ok := childOrigins[cid]; ok {
+				origins[nid] = o
+			}
 		}
 		if mapped != "" {
 			focusLeaf = mapped
 		}
 	}
 	sortConversationChildren(conv)
-	return conv, focusLeaf, nil
+	return conv, focusLeaf, origins, nil
+}
+
+// identityOrigins maps every node of a session's own conversation to itself.
+func identityOrigins(c *domain.Conversation, s domain.Session) map[string]NodeOrigin {
+	if c == nil {
+		return nil
+	}
+	out := make(map[string]NodeOrigin, len(c.Nodes))
+	for id := range c.Nodes {
+		out[id] = NodeOrigin{Session: s, NodeID: id}
+	}
+	return out
 }
 
 // MarkEmptyForks handles forks from plugins that do not record a fork point
@@ -185,8 +261,8 @@ func forkSplit(parent, child domain.Conversation) int {
 // graftFork grafts child (a fork matched by shared prefix) onto parent. If want is a
 // node ID within child, it returns the corresponding ID within parent after the graft
 // (used to locate the focused branch; returns "" if want is outside the grafted
-// subtree or empty).
-func graftFork(parent *domain.Conversation, child domain.Conversation, idx int, want string) string {
+// subtree or empty). Every renamed node is recorded in grafted (new ID -> child ID).
+func graftFork(parent *domain.Conversation, child domain.Conversation, idx int, want string, grafted map[string]string) string {
 	pa, ca := parent.ActivePath(), child.ActivePath()
 	split := forkSplit(*parent, child)
 	if split == 0 || split >= len(ca) || split > len(pa) {
@@ -205,6 +281,7 @@ func graftFork(parent *domain.Conversation, child domain.Conversation, idx int, 
 		}
 		parent.Nodes[nid] = domain.ConvNode{ID: nid, Parent: par, Timestamp: n.Timestamp, Events: append([]domain.Event(nil), n.Events...)}
 		parent.Children[par] = append(parent.Children[par], nid)
+		grafted[nid] = id
 	}
 	parent.ForkRoots = append(parent.ForkRoots, prefix+graftRoot)
 	if want != "" && containsID(sub, want) {
@@ -217,8 +294,9 @@ func graftFork(parent *domain.Conversation, child domain.Conversation, idx int, 
 // onto parent. Nodes already present in parent are skipped, so the shared base is not
 // duplicated. If want is a node ID within child, it returns the corresponding ID
 // within parent after the graft (used to locate the focused branch; returns "" if
-// want is empty).
-func graftClaudeFork(parent *domain.Conversation, child domain.Conversation, attach string, idx int, want string) string {
+// want is empty). Every renamed node is recorded in grafted (new ID -> child ID);
+// nodes inherited from parent keep their IDs and their parent origin.
+func graftClaudeFork(parent *domain.Conversation, child domain.Conversation, attach string, idx int, want string, grafted map[string]string) string {
 	if _, ok := parent.Nodes[attach]; !ok || len(child.Nodes) == 0 {
 		return ""
 	}
@@ -244,6 +322,7 @@ func graftClaudeFork(parent *domain.Conversation, child domain.Conversation, att
 		}
 		parent.Nodes[nid] = domain.ConvNode{ID: nid, Parent: par, Timestamp: n.Timestamp, Events: append([]domain.Event(nil), n.Events...)}
 		parent.Children[par] = append(parent.Children[par], nid)
+		grafted[nid] = id
 		if par == attach || par == n.Parent {
 			parent.ForkRoots = append(parent.ForkRoots, nid)
 		}
@@ -287,12 +366,6 @@ func containsID(ids []string, want string) bool {
 }
 
 func sortConversationChildren(c *domain.Conversation) {
-	order := map[string]int{}
-	i := 0
-	for id := range c.Nodes {
-		order[id] = i
-		i++
-	}
 	for parent := range c.Children {
 		sort.SliceStable(c.Children[parent], func(i, j int) bool {
 			a, b := c.Nodes[c.Children[parent][i]], c.Nodes[c.Children[parent][j]]
@@ -305,7 +378,9 @@ func sortConversationChildren(c *domain.Conversation) {
 				}
 				return a.Timestamp.Before(b.Timestamp)
 			}
-			return order[a.ID] < order[b.ID]
+			// ID as the tiebreak: the previous map-iteration order was random,
+			// so equal-timestamp siblings shuffled on every reload.
+			return a.ID < b.ID
 		})
 	}
 }
