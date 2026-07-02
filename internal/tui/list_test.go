@@ -540,7 +540,8 @@ func TestFileChangeAppearsInTurnListAndFullView(t *testing.T) {
 		t.Fatalf("redundant patch header in full view:\n%s", out)
 	}
 	// The file row is colored by its op (update → diff-mod), with the counts
-	// as separate green/red segments whose concatenation is the plain label.
+	// as separate green/red segments — parentheses stay plain — whose
+	// concatenation is the plain label.
 	if len(m.turnBlocks) < 2 || m.turnBlocks[1].Style != "diff-mod" {
 		t.Fatalf("file row style = %+v", m.turnBlocks)
 	}
@@ -552,7 +553,8 @@ func TestFileChangeAppearsInTurnListAndFullView(t *testing.T) {
 	if joined != fb.Label {
 		t.Fatalf("span concat %q != label %q", joined, fb.Label)
 	}
-	if len(fb.LabelSpans) != 3 || fb.LabelSpans[1].style != "add" || fb.LabelSpans[2].style != "del" {
+	if len(fb.LabelSpans) != 5 || fb.LabelSpans[1].style != "plain" || fb.LabelSpans[2].style != "add" ||
+		fb.LabelSpans[3].style != "del" || fb.LabelSpans[4].style != "plain" {
 		t.Fatalf("label spans = %+v", fb.LabelSpans)
 	}
 }

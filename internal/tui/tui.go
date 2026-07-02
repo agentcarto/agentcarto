@@ -816,6 +816,16 @@ func (m Model) updateTurnFull(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.turnFullQuery = ""
 		return m, nil
 	case "q", "left", "h":
+		// ← / h first fold the expanded block under the cursor (mirroring → which
+		// expands it), parking the cursor on its header; q, or a second press, leaves.
+		if blk := m.blockAtCursor(); x.String() != "q" && m.turnExpanded[blk] {
+			m.toggleTurnBlock(blk)
+			if line := m.turnBlockHeaderLine(blk); line >= 0 {
+				m.turnCursor = line
+				m.ensureTurnOffset()
+			}
+			return m, nil
+		}
 		m.turnOpen = false
 		m.turnFullQuery = ""
 		return m, nil
@@ -1209,6 +1219,18 @@ func shortCWD(s string, w int) string {
 	left := (w - 1 + 1) / 2
 	right := w - 1 - left
 	return runewidth.Truncate(s, left, "") + "…" + tailWidth(s, right)
+}
+// relCWD returns path relative to the session's working directory when it is
+// inside it; paths outside cwd (or already relative) are returned unchanged.
+func relCWD(path, cwd string) string {
+	if cwd == "" || !filepath.IsAbs(path) {
+		return path
+	}
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return path
+	}
+	return rel
 }
 func tailWidth(s string, w int) string {
 	r := []rune(s)
@@ -2287,6 +2309,10 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 	// apply_patch hunks as Body (the "*** ... File:" header would repeat the
 	// label's op/path, so it is not rendered).
 	if fes := turnFileEdits(events); len(fes) > 0 {
+		cwd := ""
+		if m.detailSession != nil {
+			cwd = m.detailSession.CWD
+		}
 		out = append(out, turnBlock{Sym: "*", Style: "tool", Label: fmt.Sprintf("Edited files (%d)", len(fes)), NoGutter: true})
 		for _, fe := range fes {
 			// The op/path segment is colored by op (A=green, M=yellow, D=red);
@@ -2298,11 +2324,13 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 			case "D":
 				style = "diff-del"
 			}
-			spans := []labelSpan{{fmt.Sprintf("  %s %s", fe.op(), shortCWD(fe.Path, 40)), style}}
+			spans := []labelSpan{{fmt.Sprintf("  %s %s", fe.op(), shortCWD(relCWD(fe.Path, cwd), 80)), style}}
 			if !fe.noBody || fe.Added != 0 || fe.Removed != 0 {
 				spans = append(spans,
-					labelSpan{fmt.Sprintf("  (+%d", fe.Added), "add"},
-					labelSpan{fmt.Sprintf(" -%d)", fe.Removed), "del"},
+					labelSpan{"  (", "plain"},
+					labelSpan{fmt.Sprintf("+%d ", fe.Added), "add"},
+					labelSpan{fmt.Sprintf("-%d", fe.Removed), "del"},
+					labelSpan{")", "plain"},
 				)
 			}
 			label := ""
@@ -2618,7 +2646,7 @@ func (m Model) turnFullView() string {
 		}
 		foot = m.searchFooter(" Search > "+m.turnFullQuery, len(hits), pos)
 	} else {
-		foot = " ↑↓/jk move  Tab/[ ] block  Enter fold  z all  / search  q/← back "
+		foot = " ↑↓/jk move  Tab/[ ] block  →/← unfold/fold  z all  / search  q/← back "
 	}
 	b.WriteString(footer(padCol(clip(foot, max(1, m.width-1)), max(1, m.width-1))))
 	return b.String()

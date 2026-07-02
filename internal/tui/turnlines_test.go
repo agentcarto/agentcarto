@@ -41,6 +41,23 @@ func TestTurnFullLinesNoGutterPacksLeft(t *testing.T) {
 	}
 }
 
+// Edited-file paths render relative to the session's working directory;
+// paths outside it (or already relative) stay as-is.
+func TestRelCWD(t *testing.T) {
+	cases := []struct{ path, cwd, want string }{
+		{"/repo/app/internal/x.go", "/repo/app", "internal/x.go"},
+		{"/etc/hosts", "/repo/app", "/etc/hosts"},
+		{"/repo/app2/x.go", "/repo/app", "/repo/app2/x.go"}, // sibling with a shared name prefix
+		{"internal/x.go", "/repo/app", "internal/x.go"},     // already relative
+		{"/repo/app/x.go", "", "/repo/app/x.go"},            // no cwd known
+	}
+	for _, c := range cases {
+		if got := relCWD(c.path, c.cwd); got != c.want {
+			t.Fatalf("relCWD(%q, %q)=%q want %q", c.path, c.cwd, got, c.want)
+		}
+	}
+}
+
 func texts(lines []turnLine) []string {
 	out := make([]string, len(lines))
 	for i, ln := range lines {

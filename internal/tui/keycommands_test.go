@@ -103,6 +103,50 @@ func TestTurnFullBlockJump(t *testing.T) {
 	}
 }
 
+// In the full turn view, ← folds the expanded block under the cursor (mirroring
+// → which expands it); when the block is already folded, ← leaves the view.
+func TestTurnFullLeftFoldsThenCloses(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q"}}},
+		{ID: "a", Parent: "u", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "l1\nl2\nl3"}}},
+	})
+	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "t"}
+	m := Model{width: 120, height: 20, detailSession: &s}
+	u, _ := m.Update(convMsg{c: &c, reset: true})
+	m = u.(Model)
+	send := func(msg tea.Msg) { u, _ := m.Update(msg); m = u.(Model) }
+	send(tea.KeyMsg{Type: tea.KeyEnter}) // open the newest turn
+	if !m.turnOpen {
+		t.Fatal("Enter did not open the full turn view")
+	}
+	blk := -1
+	for i, b := range m.turnBlocks {
+		if len(b.Body) > 0 {
+			blk = i
+			break
+		}
+	}
+	if blk < 0 {
+		t.Fatal("no foldable block in the fixture")
+	}
+	m.turnExpanded[blk] = true
+	m.turnCursor = m.turnBlockHeaderLine(blk)
+	send(tea.KeyMsg{Type: tea.KeyLeft})
+	if !m.turnOpen {
+		t.Fatal("← closed the view instead of folding the expanded block")
+	}
+	if m.turnExpanded[blk] {
+		t.Fatal("← did not fold the expanded block")
+	}
+	if m.turnCursor != m.turnBlockHeaderLine(blk) {
+		t.Fatalf("cursor did not stay on the folded block header: %d", m.turnCursor)
+	}
+	send(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.turnOpen {
+		t.Fatal("second ← did not leave the view")
+	}
+}
+
 // The turn-list search query is inherited into the full turn view when a turn is opened, jumping to the first hit.
 func TestSearchQueryInheritedTurnListToTurnFull(t *testing.T) {
 	m := turnListModel(t)
