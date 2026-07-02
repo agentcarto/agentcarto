@@ -45,6 +45,10 @@ func Open(path string) (*DB, error) {
 	if e != nil {
 		return nil, e
 	}
+	// A single connection: connection-scoped PRAGMAs (busy_timeout) would
+	// otherwise apply to only one connection of the pool, and SQLite serializes
+	// writers anyway, so a pool buys nothing here.
+	d.SetMaxOpenConns(1)
 	// Configure the connection (WAL + a short busy timeout) and create the schema:
 	// sessions holds one JSON-encoded session per (plugin_id, session_id); artifacts caches
 	// derived data (e.g. parsed conversations) per (plugin_id, session_id, kind), keyed also
@@ -56,6 +60,19 @@ func Open(path string) (*DB, error) {
 		"CREATE TABLE IF NOT EXISTS artifacts (plugin_id TEXT, session_id TEXT, fingerprint TEXT, parser_version TEXT, kind TEXT, data BLOB NOT NULL, accessed INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,kind))",
 	} {
 		if _, e = d.Exec(q); e != nil {
+			d.Close()
+			return nil, e
+		}
+	}
+	// Enforce reclaims space with incremental_vacuum, which is a no-op unless
+	// auto_vacuum=incremental. The setting only takes effect on a fresh database
+	// or after a full VACUUM, so migrate existing files once here.
+	var av int
+	if e := d.QueryRow("PRAGMA auto_vacuum").Scan(&av); e == nil && av != 2 {
+		if _, e = d.Exec("PRAGMA auto_vacuum=incremental"); e == nil {
+			_, e = d.Exec("VACUUM")
+		}
+		if e != nil {
 			d.Close()
 			return nil, e
 		}
@@ -148,27 +165,44 @@ func (d *DB) Prune(ctx context.Context, sessions []domain.Session, successful ma
 	}
 	return rows.Err()
 }
+
+// sizeOnDisk reports the cache's real footprint: the main file plus the WAL
+// (which can hold most of the data between checkpoints).
+func (d *DB) sizeOnDisk() (int64, error) {
+	st, e := os.Stat(d.path)
+	if e != nil {
+		return 0, e
+	}
+	size := st.Size()
+	if wst, e := os.Stat(d.path + "-wal"); e == nil {
+		size += wst.Size()
+	}
+	return size, nil
+}
 func (d *DB) Stats(ctx context.Context) (int, int64, error) {
 	var n int
 	if e := d.db.QueryRowContext(ctx, "SELECT count(*) FROM sessions").Scan(&n); e != nil {
 		return 0, 0, e
 	}
-	st, e := os.Stat(d.path)
-	if e != nil {
-		return n, 0, e
-	}
-	return n, st.Size(), nil
+	size, e := d.sizeOnDisk()
+	return n, size, e
 }
+
+// Enforce evicts least-recently-accessed artifacts until the on-disk size
+// drops below max. Deletions alone never shrink a SQLite file, so each round
+// releases the freed pages (incremental_vacuum, enabled in Open) and truncates
+// the WAL; without that the loop degenerated into wiping the whole artifacts
+// table while the file stayed oversized.
 func (d *DB) Enforce(ctx context.Context, max int64) error {
 	if max <= 0 {
 		return fmt.Errorf("max size must be positive")
 	}
 	for {
-		st, e := os.Stat(d.path)
+		size, e := d.sizeOnDisk()
 		if e != nil {
 			return e
 		}
-		if st.Size() <= max {
+		if size <= max {
 			return nil
 		}
 		res, e := d.db.ExecContext(ctx, "DELETE FROM artifacts WHERE rowid IN (SELECT rowid FROM artifacts ORDER BY CASE kind WHEN 'conversation' THEN 0 ELSE 1 END, accessed LIMIT 32)")
@@ -179,7 +213,12 @@ func (d *DB) Enforce(ctx context.Context, max int64) error {
 		if n == 0 {
 			return nil
 		}
-		_, _ = d.db.ExecContext(ctx, "PRAGMA incremental_vacuum(64)")
+		if _, e = d.db.ExecContext(ctx, "PRAGMA incremental_vacuum"); e != nil {
+			return e
+		}
+		if _, e = d.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); e != nil {
+			return e
+		}
 	}
 }
 func Clear(path string) error {
