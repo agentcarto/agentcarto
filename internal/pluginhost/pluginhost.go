@@ -3,14 +3,20 @@
 package pluginhost
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/agentcarto/agentcarto/internal/config"
 	"github.com/agentcarto/core/plugin"
 )
+
+// initTimeout bounds a plugin's Init RPC at startup, so one wedged plugin
+// process cannot hang the whole host before the UI even appears.
+const initTimeout = 30 * time.Second
 
 // Hosted bundles the launched plugins together with their teardown. Warnings holds messages
 // for plugins that failed to start and were skipped (binary missing, launch failure, Init
@@ -73,7 +79,9 @@ func launchOne(p config.Plugin) (plugin.Instance, *plugin.Launched, error) {
 		return plugin.Instance{}, nil, fmt.Errorf("launch %s: %w", bin, err)
 	}
 	opts := p.Options
-	desc, err := l.API.Init(p.ID, &opts)
+	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	defer cancel()
+	desc, err := l.API.Init(ctx, p.ID, &opts)
 	if err != nil {
 		return plugin.Instance{}, l, fmt.Errorf("init: %w", err)
 	}

@@ -37,7 +37,7 @@ func TestSubprocessClaudeRoundTrip(t *testing.T) {
 	if err := opts.Encode(map[string]string{"projects_dir": proj}); err != nil {
 		t.Fatal(err)
 	}
-	desc, err := l.API.Init("claude", &opts)
+	desc, err := l.API.Init(context.Background(), "claude", &opts)
 	if err != nil {
 		t.Fatalf("init: %v", err)
 	}

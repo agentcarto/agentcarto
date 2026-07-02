@@ -238,6 +238,14 @@ func Validate(c Config) error {
 	if c.Cache.MaxAge <= 0 {
 		return fmt.Errorf("cache.max_age: must be positive")
 	}
+	// A non-positive rescan interval would make the TUI's tick fire immediately
+	// and continuously (a scan busy-loop).
+	if c.UI.RescanInterval <= 0 {
+		return fmt.Errorf("ui.rescan_interval: must be positive")
+	}
+	if c.UI.RefreshInterval <= 0 {
+		return fmt.Errorf("ui.refresh_interval: must be positive")
+	}
 	colors := map[string]bool{"default": true, "black": true, "red": true, "green": true, "yellow": true, "blue": true, "magenta": true, "cyan": true, "white": true, "orange": true}
 	ids := map[string]bool{}
 	for i, p := range c.Plugins {

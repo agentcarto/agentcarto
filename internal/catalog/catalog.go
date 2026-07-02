@@ -13,7 +13,14 @@ import (
 
 type Catalog struct{ Plugins []plugin.Instance }
 
+// scanTimeout bounds one full scan round. Without it, a single hung plugin
+// left the RPC call blocked forever, which kept the TUI's scanning flag set
+// and permanently stopped further rescans.
+const scanTimeout = 5 * time.Minute
+
 func (c Catalog) Scan(ctx context.Context, warm []domain.Session, deadWarm map[string]string) domain.Snapshot {
+	ctx, cancel := context.WithTimeout(ctx, scanTimeout)
+	defer cancel()
 	// The previous results (warm/dead) are handed to each plugin in bulk; the
 	// incremental scan (fingerprinting, reuse/skip decisions, and
 	// ParserVersion/Fingerprint backfill) happens on the plugin side (core/scan).

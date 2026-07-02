@@ -84,12 +84,12 @@ func TestMatch(t *testing.T) {
 		q    string
 		want bool
 	}{
-		{"", true},          // empty query matches everything
-		{"   ", true},       // whitespace-only too
-		{"FIX", true},       // title, case-insensitive
+		{"", true},           // empty query matches everything
+		{"   ", true},        // whitespace-only too
+		{"FIX", true},        // title, case-insensitive
 		{"/home/work", true}, // cwd
-		{"claude", true},    // agent type / plugin id
-		{"body", true},      // conversation text
+		{"claude", true},     // agent type / plugin id
+		{"body", true},       // conversation text
 		{"missing", false},
 	}
 	for _, c := range cases {

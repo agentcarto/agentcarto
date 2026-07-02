@@ -92,6 +92,10 @@ func runTUI(ctx context.Context, a *app.App, c config.Config, host *pluginhost.H
 			db = d
 			defer db.Close()
 			cached, _ = db.Load(ctx)
+		} else {
+			// Degrade to running without a cache, but say so: silently losing the
+			// cache makes every launch re-parse everything.
+			fmt.Fprintf(os.Stderr, "warning: cache disabled (open failed: %v)\n", err)
 		}
 	}
 	if db != nil && len(cached) == 0 {
@@ -213,5 +217,9 @@ func doctor(a *app.App) {
 	}
 }
 func executable(p plugin.Instance) string {
-	return strings.ToLower(strings.Fields(p.Descriptor.DisplayName)[0])
+	f := strings.Fields(p.Descriptor.DisplayName)
+	if len(f) == 0 {
+		return ""
+	}
+	return strings.ToLower(f[0])
 }
