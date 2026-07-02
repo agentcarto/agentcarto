@@ -29,13 +29,13 @@ func testAppWithConvs(convs map[string]domain.Conversation) *App {
 
 func TestConversationWithForksGraftsSharedPrefixFork(t *testing.T) {
 	parent := domain.NewConversation([]domain.ConvNode{
-		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "test1"}}},
+		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "test1", Prompt: "test1"}}},
 		{ID: "p2", Parent: "p1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a1"}}},
 	})
 	child := domain.NewConversation([]domain.ConvNode{
-		{ID: "c1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "test1"}}},
+		{ID: "c1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "test1", Prompt: "test1"}}},
 		{ID: "c2", Parent: "c1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a1"}}},
-		{ID: "c3", Parent: "c2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork"}}},
+		{ID: "c3", Parent: "c2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork", Prompt: "fork"}}},
 		{ID: "c4", Parent: "c3", Timestamp: time.Unix(4, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "af"}}},
 	})
 	a := testAppWithConvs(map[string]domain.Conversation{"parent": parent, "child": child})
@@ -61,20 +61,20 @@ func TestConversationWithForksGraftsSharedPrefixFork(t *testing.T) {
 // (not continued), and do not set it when there is unique continuation.
 func TestMarkEmptyForksDiffBased(t *testing.T) {
 	parent := domain.NewConversation([]domain.ConvNode{
-		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q1"}}},
+		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q1", Prompt: "q1"}}},
 		{ID: "p2", Parent: "p1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a1"}}},
-		{ID: "p3", Parent: "p2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q2"}}},
+		{ID: "p3", Parent: "p2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q2", Prompt: "q2"}}},
 	})
 	// empty fork: exactly the parent's prefix (through q1,a1) with no unique continuation.
 	empty := domain.NewConversation([]domain.ConvNode{
-		{ID: "e1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q1"}}},
+		{ID: "e1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q1", Prompt: "q1"}}},
 		{ID: "e2", Parent: "e1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a1"}}},
 	})
 	// continued fork: a unique message q9 after the shared prefix.
 	cont := domain.NewConversation([]domain.ConvNode{
-		{ID: "c1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q1"}}},
+		{ID: "c1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q1", Prompt: "q1"}}},
 		{ID: "c2", Parent: "c1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a1"}}},
-		{ID: "c3", Parent: "c2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q9"}}},
+		{ID: "c3", Parent: "c2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q9", Prompt: "q9"}}},
 	})
 	a := testAppWithConvs(map[string]domain.Conversation{"parent": parent, "empty": empty, "cont": cont})
 	sessions := []domain.Session{
@@ -101,7 +101,7 @@ func TestMarkEmptyForksDiffBased(t *testing.T) {
 // Forks with ForkAt (claude decides them at Scan time) are excluded from MarkEmptyForks.
 func TestMarkEmptyForksSkipsForkAtSessions(t *testing.T) {
 	parent := domain.NewConversation([]domain.ConvNode{
-		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q1"}}},
+		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "q1", Prompt: "q1"}}},
 	})
 	a := testAppWithConvs(map[string]domain.Conversation{"parent": parent, "child": parent})
 	sessions := []domain.Session{
@@ -118,11 +118,11 @@ func TestMarkEmptyForksSkipsForkAtSessions(t *testing.T) {
 
 func TestConversationWithForksGraftsClaudeForkAtUUID(t *testing.T) {
 	parent := domain.NewConversation([]domain.ConvNode{
-		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "test1"}}},
+		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "test1", Prompt: "test1"}}},
 		{ID: "p2", Parent: "p1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a1"}}},
 	})
 	child := domain.NewConversation([]domain.ConvNode{
-		{ID: "f1", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "forkdir"}}},
+		{ID: "f1", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "forkdir", Prompt: "forkdir"}}},
 		{ID: "f2", Parent: "f1", Timestamp: time.Unix(4, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "fa"}}},
 	})
 	a := testAppWithConvs(map[string]domain.Conversation{"parent": parent, "child": child})
@@ -149,11 +149,11 @@ func TestConversationWithForksGraftsClaudeForkAtUUID(t *testing.T) {
 // heart of conversation-view canonicalization.
 func TestConversationFromFocusRootsAtAncestorAndFocusesFork(t *testing.T) {
 	parent := domain.NewConversation([]domain.ConvNode{
-		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "test1"}}},
+		{ID: "p1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "test1", Prompt: "test1"}}},
 		{ID: "p2", Parent: "p1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a1"}}},
 	})
 	child := domain.NewConversation([]domain.ConvNode{
-		{ID: "f1", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "forkdir"}}},
+		{ID: "f1", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "forkdir", Prompt: "forkdir"}}},
 		{ID: "f2", Parent: "f1", Timestamp: time.Unix(4, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "fa"}}},
 	})
 	a := testAppWithConvs(map[string]domain.Conversation{"parent": parent, "child": child})
@@ -210,9 +210,9 @@ func (s rewinderStub) PlanFork(_ context.Context, sess domain.Session, t domain.
 // turn count in the child's numbering, not the synthesized tree's.
 func TestForkAtUsesOwnerSessionAndOwnerTurnNumbering(t *testing.T) {
 	child := domain.NewConversation([]domain.ConvNode{
-		{ID: "f1", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "turn one"}}},
+		{ID: "f1", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "turn one", Prompt: "turn one"}}},
 		{ID: "f2", Parent: "f1", Timestamp: time.Unix(4, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a"}}},
-		{ID: "f3", Parent: "f2", Timestamp: time.Unix(5, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "turn two"}}},
+		{ID: "f3", Parent: "f2", Timestamp: time.Unix(5, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "turn two", Prompt: "turn two"}}},
 		{ID: "f4", Parent: "f3", Timestamp: time.Unix(6, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "b"}}},
 	})
 	var got domain.ForkTarget

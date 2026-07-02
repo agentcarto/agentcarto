@@ -14,9 +14,9 @@ import (
 func TestConvMsgFocusesForkBranch(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "main-line continuation"}}},
-		{ID: "b", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork-side continuation"}}},
+		{ID: "b", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork-side continuation", Prompt: "fork-side continuation"}}},
 	})
 	c.ForkRoots = []string{"b"} // make b a fork branch (the active main line is the newest u->a)
 	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "sessabcd99", CWD: "/repo", Title: "t", ParentSessionID: "parent01"}

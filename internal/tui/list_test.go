@@ -162,7 +162,7 @@ func TestShortCWDMiddleEllipsis(t *testing.T) {
 func TestDetailViewPrototypeColorsAndMetadata(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "12345678-x", CWD: "/repo", Title: "title", Status: domain.StatusRunning, LastKind: domain.EventToolCall}
-	c := domain.NewConversation([]domain.ConvNode{{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Timestamp: time.Date(2026, 6, 23, 1, 2, 0, 0, time.Local)}}}, {ID: "a", Parent: "u", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}, {Kind: domain.EventToolCall, ToolName: "Bash", Text: "ls"}}}})
+	c := domain.NewConversation([]domain.ConvNode{{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question", Timestamp: time.Date(2026, 6, 23, 1, 2, 0, 0, time.Local)}}}, {ID: "a", Parent: "u", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}, {Kind: domain.EventToolCall, ToolName: "Bash", Text: "ls"}}}})
 	m := Model{width: 100, detailSession: &s, detail: &c, detailTurns: [][]string{{"u", "a"}}}
 	out := m.detailView()
 	for _, want := range []string{"● TOOL", "claude", "12345678", "#1", "06-23 01:02", "↩1", "⚙1", "question"} {
@@ -220,7 +220,7 @@ func TestToolCallLabelBodyPrototypeBashShell(t *testing.T) {
 
 func TestTurnMarkPartsPrototypeTaskRetryAndEditStats(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: time.Date(2026, 6, 23, 1, 2, 0, 0, time.Local), Events: []domain.Event{
 			{Kind: domain.EventQueued, Text: "queued question"},
 			{Kind: domain.EventUser, Text: "<task-notification><task-id>t</task-id></task-notification>"},
@@ -297,7 +297,7 @@ func TestEditStatsPrototypeCountsUniqueFilesAndGitDiff(t *testing.T) {
 		return domain.Event{Kind: domain.EventToolCall, ToolName: name, Text: string(b)}
 	}
 	events := []domain.Event{
-		{Kind: domain.EventUser, Text: "do it"},
+		{Kind: domain.EventUser, Text: "do it", Prompt: "do it"},
 		tc("Edit", map[string]any{"file_path": "/x/a.py", "old_string": "old1\nold2", "new_string": "new1\nnew2\nnew3"}),
 		tc("Write", map[string]any{"file_path": "/x/b.py", "content": "1\n2"}),
 		tc("Read", map[string]any{"file_path": "/x/c.py"}),
@@ -324,9 +324,9 @@ func TestEventBlockPrototypeGeneralToolShowsKeyArg(t *testing.T) {
 }
 func TestDetailTurnsNewestFirst(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u1", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "old question"}}},
+		{ID: "u1", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "old question", Prompt: "old question"}}},
 		{ID: "a1", Parent: "u1", Timestamp: time.Date(2026, 6, 23, 1, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "old answer"}}},
-		{ID: "u2", Parent: "a1", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "new question"}}},
+		{ID: "u2", Parent: "a1", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "new question", Prompt: "new question"}}},
 		{ID: "a2", Parent: "u2", Timestamp: time.Date(2026, 6, 23, 2, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "new answer"}}},
 	})
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
@@ -344,9 +344,9 @@ func TestDetailTurnsNewestFirst(t *testing.T) {
 
 func TestBranchRowsSelectableAndEnterDives(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: time.Date(2026, 6, 23, 3, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "active"}}},
-		{ID: "b", Parent: "u", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "branch question"}}},
+		{ID: "b", Parent: "u", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "branch question", Prompt: "branch question"}}},
 		{ID: "ba", Parent: "b", Timestamp: time.Date(2026, 6, 23, 2, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "branch answer"}}},
 	})
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
@@ -377,9 +377,9 @@ func TestBranchRowsSelectableAndEnterDives(t *testing.T) {
 
 func TestForkBranchLabelUsesForkKind(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: time.Date(2026, 6, 23, 3, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "active"}}},
-		{ID: "fork", Parent: "u", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork question"}}},
+		{ID: "fork", Parent: "u", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork question", Prompt: "fork question"}}},
 	})
 	c.ForkRoots = []string{"fork"}
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
@@ -394,7 +394,7 @@ func TestForkBranchLabelUsesForkKind(t *testing.T) {
 
 func TestBranchLeadAvoidsNoContentForAssistantOnlyBranch(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: time.Date(2026, 6, 23, 3, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "active"}}},
 		{ID: "b", Parent: "u", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "old branch work"}}},
 		{ID: "b1", Parent: "b", Timestamp: time.Date(2026, 6, 23, 2, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventToolCall, ToolName: "Read"}}},
@@ -416,7 +416,7 @@ func TestDetailCursorScrollsAndMovesWithinViewport(t *testing.T) {
 	nodes := make([]domain.ConvNode, 0, 12)
 	parent := ""
 	for i := 1; i <= 6; i++ {
-		u := domain.ConvNode{ID: fmt.Sprintf("u%d", i), Parent: parent, Timestamp: time.Date(2026, 6, 23, i, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: fmt.Sprintf("question %d", i)}}}
+		u := domain.ConvNode{ID: fmt.Sprintf("u%d", i), Parent: parent, Timestamp: time.Date(2026, 6, 23, i, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: fmt.Sprintf("question %d", i), Prompt: fmt.Sprintf("question %d", i)}}}
 		a := domain.ConvNode{ID: fmt.Sprintf("a%d", i), Parent: u.ID, Timestamp: time.Date(2026, 6, 23, i, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: fmt.Sprintf("answer %d", i)}}}
 		nodes = append(nodes, u, a)
 		parent = a.ID
@@ -451,7 +451,7 @@ func TestConversationRefreshPreservesDetailPosition(t *testing.T) {
 	nodes := make([]domain.ConvNode, 0, 12)
 	parent := ""
 	for i := 1; i <= 6; i++ {
-		u := domain.ConvNode{ID: fmt.Sprintf("u%d", i), Parent: parent, Timestamp: time.Date(2026, 6, 23, i, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: fmt.Sprintf("question %d", i)}}}
+		u := domain.ConvNode{ID: fmt.Sprintf("u%d", i), Parent: parent, Timestamp: time.Date(2026, 6, 23, i, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: fmt.Sprintf("question %d", i), Prompt: fmt.Sprintf("question %d", i)}}}
 		a := domain.ConvNode{ID: fmt.Sprintf("a%d", i), Parent: u.ID, Timestamp: time.Date(2026, 6, 23, i, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: fmt.Sprintf("answer %d", i)}}}
 		nodes = append(nodes, u, a)
 		parent = a.ID
@@ -475,7 +475,7 @@ func TestConversationRefreshPreservesDetailPosition(t *testing.T) {
 // only detail would become non-nil, causing a panic at *detailSession in View->detailView. Once closed, ignore it.
 func TestStaleConvMsgAfterDetailClosedIgnored(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q"}}},
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Prompt: "q"}}},
 		{ID: "a", Parent: "u", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a"}}},
 	})
 	// A conversation-load result arrives while detailSession==nil (already closed).
@@ -490,7 +490,7 @@ func TestStaleConvMsgAfterDetailClosedIgnored(t *testing.T) {
 }
 func TestEnterOpensTurnFullViewAndQReturns(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}}},
 	})
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
@@ -511,7 +511,7 @@ func TestEnterOpensTurnFullViewAndQReturns(t *testing.T) {
 func TestFileChangeAppearsInTurnListAndFullView(t *testing.T) {
 	change := `{"files":["internal/tui/tui.go"],"added":2,"removed":1}`
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "edit"}}},
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "edit", Prompt: "edit"}}},
 		{ID: "fc", Parent: "u", Events: []domain.Event{{Kind: domain.EventFileChange, Text: change}}},
 	})
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
@@ -562,7 +562,7 @@ func TestFileChangeAppearsInTurnListAndFullView(t *testing.T) {
 // The full turn view header shows the session's status mark like the detail header.
 func TestTurnFullViewHeaderShowsStatusMark(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q"}}},
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Prompt: "q"}}},
 	})
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "t", Status: domain.StatusRunning}
 	m := Model{width: 120, height: 12, detailSession: &s}
@@ -580,7 +580,7 @@ func TestTurnFullViewHeaderShowsStatusMark(t *testing.T) {
 func TestTurnFullViewShowsEventTimeGutter(t *testing.T) {
 	ts := time.Date(2026, 6, 23, 14, 3, 22, 0, time.Local)
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: ts, Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Timestamp: ts}}},
+		{ID: "u", Timestamp: ts, Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Prompt: "q", Timestamp: ts}}},
 		{ID: "a", Parent: "u", Timestamp: ts.Add(3 * time.Second), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "ans", Timestamp: ts.Add(3 * time.Second)}}},
 	})
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "t"}
@@ -598,9 +598,9 @@ func TestTurnFullViewShowsEventTimeGutter(t *testing.T) {
 
 func TestTurnListColumnsAlignAndFooterStaysBottom(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u1", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "short"}}},
+		{ID: "u1", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "short", Prompt: "short"}}},
 		{ID: "a1", Parent: "u1", Timestamp: time.Date(2026, 6, 23, 1, 0, 2, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}}},
-		{ID: "u2", Parent: "a1", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "longer headline"}}},
+		{ID: "u2", Parent: "a1", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "longer headline", Prompt: "longer headline"}}},
 		{ID: "t2", Parent: "u2", Timestamp: time.Date(2026, 6, 23, 2, 0, 1, 0, time.Local), Events: []domain.Event{{Kind: domain.EventToolCall, ToolName: "Bash", Text: "ls"}}},
 		{ID: "a2", Parent: "t2", Timestamp: time.Date(2026, 6, 23, 2, 1, 10, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}}},
 	})

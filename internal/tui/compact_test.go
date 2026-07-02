@@ -12,11 +12,11 @@ import (
 func TestCompactSummaryOnlyTurnSkippedAndBadgeCarried(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "first question"}}},
+		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "first question", Prompt: "first question"}}},
 		{ID: "a1", Parent: "u1", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}}},
 		// Summary-only /compact boundary node (no real content).
 		{ID: "c1", Parent: "a1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventUser, Text: "(auto summary)", RawType: "compact_summary"}}},
-		{ID: "u2", Parent: "c1", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventUser, Text: "next question"}}},
+		{ID: "u2", Parent: "c1", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventUser, Text: "next question", Prompt: "next question"}}},
 	})
 	s := domain.Session{PluginID: "claude", SessionID: "x"}
 	m := Model{width: 120, height: 20, detailSession: &s}
@@ -46,7 +46,7 @@ func TestCompactSummaryOnlyTurnSkippedAndBadgeCarried(t *testing.T) {
 func TestCompactTurnWithContentGetsBadgeNotSkipped(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		// A compact summary plus real content (assistant) within the same turn.
 		{ID: "c1", Parent: "u1", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "(summary)", RawType: "compact_summary"}}},
 		{ID: "a1", Parent: "c1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "work"}}},

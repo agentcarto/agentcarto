@@ -16,7 +16,7 @@ func TestReloadFollowsGrowingActivePathNoPhantomBranch(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	// Conversation A at open time: user -> assistant
 	nodesA := []domain.ConvNode{
-		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "request"}}},
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "request", Prompt: "request"}}},
 		{ID: "a1", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "work started"}}},
 	}
 	a := domain.NewConversation(nodesA)
@@ -61,9 +61,9 @@ func TestReloadFollowsGrowingActivePathNoPhantomBranch(t *testing.T) {
 func TestDetailHeaderShowsBreadcrumbWhenDrilledIntoBranch(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "current"}}},
-		{ID: "b", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "alternative"}}},
+		{ID: "b", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "alternative", Prompt: "alternative"}}},
 	})
 	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo", Title: "t"}
 	m := Model{width: 120, height: 20, detailSession: &s}
@@ -91,7 +91,7 @@ func TestDetailHeaderShowsBreadcrumbWhenDrilledIntoBranch(t *testing.T) {
 func TestDetailHeaderShowsForkLineageRoute(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "response"}}},
 	})
 	// Lineage: rootaaaa <- midbbbb <- selccccc (open selccccc).
@@ -113,9 +113,9 @@ func TestDetailHeaderShowsForkLineageRoute(t *testing.T) {
 func TestDetailHeaderUnifiesForkDrilldownToForkedFrom(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question"}}},
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "current"}}},
-		{ID: "fk", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork side"}}},
+		{ID: "fk", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork side", Prompt: "fork side"}}},
 	})
 	c.ForkRoots = []string{"fk"}
 	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "sessabcd99", CWD: "/repo", Title: "t"}
@@ -146,7 +146,7 @@ func rowIsBranch(m Model) bool {
 func TestReloadKeepsBranchNavigationWhenDrilledIn(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	a := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "x"}}},
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "x", Prompt: "x"}}},
 		{ID: "a1", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventAssistant}}},
 	})
 	sess := domain.Session{PluginID: "claude", SessionID: "s"}
@@ -166,7 +166,7 @@ func TestReloadKeepsBranchNavigationWhenDrilledIn(t *testing.T) {
 func TestStaleConvMsgForAnotherSessionIsDropped(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	stale := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "A's content"}}},
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "A's content", Prompt: "A's content"}}},
 	})
 	b := domain.Session{PluginID: "claude", SessionID: "B"}
 	m := Model{detailSession: &b}

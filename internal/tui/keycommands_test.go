@@ -37,11 +37,11 @@ func turnListModel(t *testing.T) Model {
 	// rune-by-rune and assert it matches the two "りんご"-containing turns, exercising
 	// multibyte search/navigation. "みかんの話" (a tangerine topic) is the non-matching turn.
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "りんごの話"}}},
+		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "りんごの話", Prompt: "りんごの話"}}},
 		{ID: "a1", Parent: "u1", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "ok"}}},
-		{ID: "u2", Parent: "a1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventUser, Text: "みかんの話"}}},
+		{ID: "u2", Parent: "a1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventUser, Text: "みかんの話", Prompt: "みかんの話"}}},
 		{ID: "a2", Parent: "u2", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "ok2"}}},
-		{ID: "u3", Parent: "a2", Timestamp: ts(5), Events: []domain.Event{{Kind: domain.EventUser, Text: "りんご再び"}}},
+		{ID: "u3", Parent: "a2", Timestamp: ts(5), Events: []domain.Event{{Kind: domain.EventUser, Text: "りんご再び", Prompt: "りんご再び"}}},
 		{ID: "a3", Parent: "u3", Timestamp: ts(6), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "ok3"}}},
 	})
 	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo", Title: "t"}
@@ -107,7 +107,7 @@ func TestTurnFullBlockJump(t *testing.T) {
 // → which expands it); when the block is already folded, ← leaves the view.
 func TestTurnFullLeftFoldsThenCloses(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q"}}},
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Prompt: "q"}}},
 		{ID: "a", Parent: "u", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "l1\nl2\nl3"}}},
 	})
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "t"}

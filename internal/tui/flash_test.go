@@ -13,7 +13,7 @@ import (
 
 func detailModelWithFlash() Model {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q"}}},
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Prompt: "q"}}},
 	})
 	s := domain.Session{PluginID: "claude", SessionID: "s"}
 	return Model{detail: &c, detailSession: &s, flash: "Jumped to parent: abc1234 (q to go back)"}
@@ -83,7 +83,7 @@ func TestFlashExpireKeepsRecentMessage(t *testing.T) {
 // The flash is rendered in both the list and detail footers (the detail view previously did not show a flash).
 func TestFlashRendersInBothFooters(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
-		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "hi"}}},
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "hi", Prompt: "hi"}}},
 	})
 	s := domain.Session{PluginID: "claude", SessionID: "s"}
 
