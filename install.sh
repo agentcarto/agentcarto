@@ -139,7 +139,7 @@ record_tag() {
 
 # download_extract <owner/repo> <archive-prefix> <tag>
 # Fetches <prefix>_<os>_<arch>.tar.gz for the given tag into a fresh tmp dir,
-# extracts it, and copies every executable it contains into PREFIX.
+# extracts it, and installs every executable it contains into PREFIX.
 download_extract() {
   repo="$1"; prefix="$2"; tag="$3"
   name="${prefix}_${os}_${arch}"
@@ -152,7 +152,14 @@ download_extract() {
   curl -fSL --progress-bar "$url" -o "$tmp/$name.tar.gz" \
     || err "download failed ($url)."
   tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
-  cp "$tmp/$name/"* "$PREFIX/"
+  # Stage next to the target and rename over it: overwriting a running binary
+  # with cp fails with "Text file busy", while rename always succeeds and the
+  # running process keeps executing the old inode.
+  for f in "$tmp/$name/"*; do
+    base=$(basename "$f")
+    cp "$f" "$PREFIX/.$base.new"
+    mv -f "$PREFIX/.$base.new" "$PREFIX/$base"
+  done
   rm -rf "$tmp"
   trap - EXIT
 }
