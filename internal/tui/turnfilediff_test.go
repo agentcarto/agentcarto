@@ -129,6 +129,66 @@ func TestTurnFileEditsFileChangeNoBody(t *testing.T) {
 	}
 }
 
+// The block label shows the op letter and path, so body() must drop the
+// "*** ... File:" header that would repeat them. Bare "@@" markers carry no
+// information and become blank-line hunk separators (none at the edges);
+// "@@ <context>" markers are kept.
+func TestFileEditOpAndBody(t *testing.T) {
+	cases := []struct {
+		fe   fileEdit
+		op   string
+		body []string
+	}{
+		{fileEdit{Diff: []string{"*** Update File: a.go", "@@", "+x"}}, "M", []string{"+x"}},
+		{fileEdit{Diff: []string{"*** Add File: b.go", "+y"}}, "A", []string{"+y"}},
+		{fileEdit{Diff: []string{"*** Delete File: c.go"}}, "D", []string{}},
+		{fileEdit{Diff: nil}, "M", nil},
+		{
+			fileEdit{Diff: []string{"*** Update File: a.go", "@@", " a", "-b", "+c", "@@", " d", "+e", "@@"}},
+			"M",
+			[]string{" a", "-b", "+c", "", " d", "+e"},
+		},
+		{
+			fileEdit{Diff: []string{"*** Update File: a.go", "@@ func main", "+x"}},
+			"M",
+			[]string{"@@ func main", "+x"},
+		},
+	}
+	for _, c := range cases {
+		if got := c.fe.op(); got != c.op {
+			t.Errorf("op(%v) = %q, want %q", c.fe.Diff, got, c.op)
+		}
+		if got := c.fe.body(); strings.Join(got, "\n") != strings.Join(c.body, "\n") {
+			t.Errorf("body(%v) = %v, want %v", c.fe.Diff, got, c.body)
+		}
+	}
+}
+
+// File rows in the "Edited files" section are colored by op letter.
+func TestTurnStyleDiffOps(t *testing.T) {
+	for style, role := range map[string]string{"diff-add": "add", "diff-del": "del", "diff-mod": "meta"} {
+		if fg, _ := turnStyle(style); fg != roleColor(role) {
+			t.Errorf("turnStyle(%q) = %v, want roleColor(%q) = %v", style, fg, role, roleColor(role))
+		}
+	}
+}
+
+// renderSpans must clip the joined text at the given width across segment
+// boundaries, since clip is not ANSI-aware and runs per segment. A selected
+// line keeps its segment colors and pads the cursor background to the width.
+func TestRenderSpansClipsAcrossSegments(t *testing.T) {
+	spans := []labelSpan{{"abc", "add"}, {"def", "del"}}
+	if got := stripANSI(renderSpans(spans, 4, false)); got != "abcd" {
+		t.Fatalf("renderSpans(w=4) = %q, want %q", got, "abcd")
+	}
+	if got := stripANSI(renderSpans(spans, 10, false)); got != "abcdef" {
+		t.Fatalf("renderSpans(w=10) = %q, want %q", got, "abcdef")
+	}
+	if got := stripANSI(renderSpans(spans, 10, true)); got != "abcdef    " {
+		t.Fatalf("selected renderSpans(w=10) = %q, want %q", got, "abcdef    ")
+	}
+}
+
 func TestDiffLineStyle(t *testing.T) {
 	cases := map[string]string{
 		"+added":             "add",

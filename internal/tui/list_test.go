@@ -525,13 +525,35 @@ func TestFileChangeAppearsInTurnListAndFullView(t *testing.T) {
 		}
 	}
 	m.openCurrentTurn(true)
-	out = m.detailView()
+	// stripANSI: the counts render as separately colored segments, so the plain
+	// text is only contiguous once the escape codes are removed.
+	out = stripANSI(m.detailView())
 	// The file_change is now surfaced in the consolidated "Edited files" section.
 	// It carries no diff body (aggregate-only), but the single-file counts are shown.
-	for _, want := range []string{"Edited files", "internal/tui/tui.go", "+2 -1"} {
+	for _, want := range []string{"Edited files", "M internal/tui/tui.go", "+2 -1"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in full view:\n%s", want, out)
 		}
+	}
+	// The "*** ... File:" header would repeat the label's op/path; it must not render.
+	if strings.Contains(out, "*** Update File") {
+		t.Fatalf("redundant patch header in full view:\n%s", out)
+	}
+	// The file row is colored by its op (update → diff-mod), with the counts
+	// as separate green/red segments whose concatenation is the plain label.
+	if len(m.turnBlocks) < 2 || m.turnBlocks[1].Style != "diff-mod" {
+		t.Fatalf("file row style = %+v", m.turnBlocks)
+	}
+	fb := m.turnBlocks[1]
+	joined := ""
+	for _, sp := range fb.LabelSpans {
+		joined += sp.text
+	}
+	if joined != fb.Label {
+		t.Fatalf("span concat %q != label %q", joined, fb.Label)
+	}
+	if len(fb.LabelSpans) != 3 || fb.LabelSpans[1].style != "add" || fb.LabelSpans[2].style != "del" {
+		t.Fatalf("label spans = %+v", fb.LabelSpans)
 	}
 }
 

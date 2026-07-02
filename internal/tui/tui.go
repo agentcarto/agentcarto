@@ -123,8 +123,17 @@ type listRow struct {
 
 type turnBlock struct {
 	Sym, Style, Label string
-	Body              []string
-	Open              bool
+	// LabelSpans, when set, renders the collapsed/expanded header line in
+	// per-segment colors. Label must equal the concatenation of the span
+	// texts (search and cursor rendering use the plain Label text).
+	LabelSpans []labelSpan
+	Body       []string
+	Open       bool
+}
+
+// labelSpan is one segment of a header line with its own style.
+type labelSpan struct {
+	text, style string
 }
 
 type detailRow struct {
@@ -2269,15 +2278,33 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 	events := m.turnEvents(ids)
 	out := []turnBlock{}
 	// Consolidated "edited files" section at the top of the turn: one header line
-	// plus one block per file whose Body is the file's apply_patch diff.
+	// plus one block per file, labeled "<op> <path>  (+a -r)" with the file's
+	// apply_patch hunks as Body (the "*** ... File:" header would repeat the
+	// label's op/path, so it is not rendered).
 	if fes := turnFileEdits(events); len(fes) > 0 {
 		out = append(out, turnBlock{Sym: "*", Style: "tool", Label: fmt.Sprintf("Edited files (%d)", len(fes))})
 		for _, fe := range fes {
-			label := "  " + shortCWD(fe.Path, 40)
-			if !fe.noBody || fe.Added != 0 || fe.Removed != 0 {
-				label += fmt.Sprintf("  (+%d -%d)", fe.Added, fe.Removed)
+			// The op/path segment is colored by op (A=green, M=yellow, D=red);
+			// the "diff-" prefix keeps per-line diff styling for the body.
+			style := "diff-mod"
+			switch fe.op() {
+			case "A":
+				style = "diff-add"
+			case "D":
+				style = "diff-del"
 			}
-			out = append(out, turnBlock{Sym: "*", Style: "diff", Label: label, Body: fe.Diff})
+			spans := []labelSpan{{fmt.Sprintf("  %s %s", fe.op(), shortCWD(fe.Path, 40)), style}}
+			if !fe.noBody || fe.Added != 0 || fe.Removed != 0 {
+				spans = append(spans,
+					labelSpan{fmt.Sprintf("  (+%d", fe.Added), "add"},
+					labelSpan{fmt.Sprintf(" -%d)", fe.Removed), "del"},
+				)
+			}
+			label := ""
+			for _, sp := range spans {
+				label += sp.text
+			}
+			out = append(out, turnBlock{Sym: "*", Style: style, Label: label, LabelSpans: spans, Body: fe.body()})
 		}
 	}
 	for _, e := range events {
@@ -2445,6 +2472,7 @@ type turnLine struct {
 	text   string
 	block  int
 	header bool
+	spans  []labelSpan // per-segment colors for the header line; text is their concatenation
 }
 
 func (m Model) turnFullLines() []turnLine {
@@ -2474,17 +2502,25 @@ func (m Model) turnFullLines() []turnLine {
 			}
 		}
 		head := fmt.Sprintf("%s %s %s", marker, b.Sym, b.Label)
+		var spans []labelSpan
+		if len(b.LabelSpans) > 0 {
+			spans = append(spans, labelSpan{fmt.Sprintf("%s %s %s", marker, b.Sym, b.LabelSpans[0].text), b.LabelSpans[0].style})
+			spans = append(spans, b.LabelSpans[1:]...)
+		}
 		if !expanded && len(b.Body) > 0 && b.Sym != "◆" {
 			if prev := oneLine(strings.Join(b.Body, "\n")); prev != "" {
 				head += "  — " + prev
+				if spans != nil {
+					spans = append(spans, labelSpan{"  — " + prev, "plain"})
+				}
 			}
 		}
 		// The header is a one-line summary (with a preview when collapsed), so do not wrap it; truncate at the edge.
-		out = append(out, turnLine{style: b.Style, text: head, block: i, header: true})
+		out = append(out, turnLine{style: b.Style, text: head, block: i, header: true, spans: spans})
 		if expanded {
 			for _, ln := range b.Body {
 				st := b.Style
-				if b.Style == "diff" {
+				if strings.HasPrefix(b.Style, "diff") {
 					st = diffLineStyle(ln)
 				} else if strings.HasPrefix(ln, "+ ") {
 					st = "add"
@@ -2527,10 +2563,14 @@ func (m Model) turnFullView() string {
 		fg, bold := turnStyle(line.style)
 		text := clip(line.text, max(20, m.width-1))
 		switch {
+		case i == m.turnCursor && len(line.spans) > 0:
+			text = renderSpans(line.spans, max(20, m.width-1), true)
 		case i == m.turnCursor:
 			text = styled(padCol(text, max(1, m.width-1)), fg, true, bold)
 		case m.turnFullQuery != "" && strings.Contains(strings.ToLower(line.text), strings.ToLower(m.turnFullQuery)):
 			text = styled(text, roleColor("meta"), true, bold) // search hit (distinguished from the cursor by color)
+		case len(line.spans) > 0:
+			text = renderSpans(line.spans, max(20, m.width-1), false)
 		default:
 			text = styled(text, fg, false, bold)
 		}
@@ -2556,6 +2596,32 @@ func (m Model) turnFullView() string {
 	b.WriteString(footer(padCol(clip(foot, max(1, m.width-1)), max(1, m.width-1))))
 	return b.String()
 }
+
+// renderSpans renders a header line whose segments carry their own styles,
+// clipping the joined text at width w (clip is not ANSI-aware, so each
+// segment is clipped before styling). When selected, every segment keeps its
+// foreground color and gets the cursor background, padded to the full width.
+func renderSpans(spans []labelSpan, w int, selected bool) string {
+	var b strings.Builder
+	rem := w
+	for _, sp := range spans {
+		t := clip(sp.text, rem)
+		if t == "" {
+			break
+		}
+		fg, bold := turnStyle(sp.style)
+		b.WriteString(styled(t, fg, selected, bold))
+		rem -= runewidth.StringWidth(t)
+		if rem <= 0 {
+			break
+		}
+	}
+	if selected && rem > 0 {
+		b.WriteString(styled(strings.Repeat(" ", rem), "", true, false))
+	}
+	return b.String()
+}
+
 func turnStyle(style string) (lipgloss.Color, bool) {
 	switch style {
 	case "user":
@@ -2566,10 +2632,12 @@ func turnStyle(style string) (lipgloss.Color, bool) {
 		return roleColor("tool"), false
 	case "meta":
 		return roleColor("meta"), false
-	case "add":
+	case "add", "diff-add":
 		return roleColor("add"), false
-	case "del":
+	case "del", "diff-del":
 		return roleColor("del"), false
+	case "diff-mod":
+		return roleColor("meta"), false
 	}
 	return lipgloss.Color(""), false
 }
@@ -3082,6 +3150,45 @@ type fileEdit struct {
 	Diff           []string
 	Added, Removed int
 	noBody         bool // aggregate-only source (Codex file_change): no real diff body
+}
+
+// op returns the git-style status letter (A/M/D) derived from the
+// "*** <op> File:" header in Diff[0].
+func (fe fileEdit) op() string {
+	if len(fe.Diff) > 0 {
+		switch {
+		case strings.HasPrefix(fe.Diff[0], "*** Add File:"):
+			return "A"
+		case strings.HasPrefix(fe.Diff[0], "*** Delete File:"):
+			return "D"
+		}
+	}
+	return "M"
+}
+
+// body returns the hunks to render: Diff without the "*** ... File:" header,
+// whose op and path the block label already shows. Bare "@@" markers carry no
+// line numbers or context, so they render as a blank line between hunks (and
+// not at all at the edges); "@@ <context>" lines are kept.
+func (fe fileEdit) body() []string {
+	src := fe.Diff
+	if len(src) > 0 && strings.HasPrefix(src[0], "*** ") {
+		src = src[1:]
+	}
+	out := make([]string, 0, len(src))
+	for _, ln := range src {
+		if ln == "@@" {
+			if len(out) > 0 && out[len(out)-1] != "" {
+				out = append(out, "")
+			}
+			continue
+		}
+		out = append(out, ln)
+	}
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	return out
 }
 
 // editHunks builds apply_patch hunks from a Claude edit tool's JSON input.
