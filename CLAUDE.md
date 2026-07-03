@@ -124,6 +124,32 @@ screens; it calls `internal/app` for every operation and never touches plugins d
 is the in-process full-text engine over titles, working dirs, agent names, and conversation bodies.
 Both are host-only — keep agent-specific logic in plugins, not here.
 
+## Releasing
+
+Each repo releases independently from its own GitHub repository; `core` is a library with
+**no tags or releases** — plugins and the host build against its `main`. The release workflow
+fires on a `v*` tag push, is **gated on the full CI** (`needs: test`; a failing test cancels the
+release), and publishes `agentcarto-plugin-<repo>_<os>_<arch>.tar.gz` (`.zip` on Windows;
+`plugin-copilot` bundles both `-vc` and `-jb` binaries). The installer fetches the latest release
+of everything.
+
+Order matters, because cross-repo CI checks out sibling repos at `main`:
+
+1. **Push `core` main first** (plugin/host CI and release builds check out `agentcarto/core@main`),
+   then all plugin mains, then the host main — back to back.
+2. **Wait for CI green on all six repos.** Known race: core's `dependents` job checks out the
+   host/plugin mains, so if it starts before they are pushed it fails transiently — re-run it
+   once all mains are up (`gh run rerun <id> -R agentcarto/core --failed`).
+3. **Tag and push tags** in each plugin repo and the host
+   (`git tag vX.Y.Z && git push origin vX.Y.Z`); the tag push runs the gated CI again and publishes.
+4. **Verify**: `gh run list -R agentcarto/<repo> --workflow release --branch <tag>` succeeds and
+   `gh release view <tag> --json assets` shows 5 assets per release.
+
+Version coordination: when `plugin.Handshake.ProtocolVersion` changes, the host and **all**
+plugins must be released together (a mismatched pair fails the handshake by design). Align the
+plugin versions on such a coordinated release (e.g. all plugins v0.2.0 ↔ host v0.6.0). A
+parse/classification change instead needs only that plugin's `ParserVersion` bump and release.
+
 ## Config
 
 Settings merge in order (later wins): built-in defaults → `config.yaml` next to the executable → OS
