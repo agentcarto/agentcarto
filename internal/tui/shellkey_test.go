@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -8,6 +9,16 @@ import (
 	"github.com/agentcarto/agentcarto/internal/config"
 	"github.com/agentcarto/core/domain"
 )
+
+// setShellEnv points the platform's shell env var (SHELL, COMSPEC on Windows)
+// at a fake path so tests can assert it is what gets launched.
+func setShellEnv(t *testing.T, path string) {
+	env := "SHELL"
+	if runtime.GOOS == "windows" {
+		env = "COMSPEC"
+	}
+	t.Setenv(env, path)
+}
 
 func shellModel(cwd string) Model {
 	t0 := time.Date(2026, 6, 23, 10, 0, 0, 0, time.Local)
@@ -20,7 +31,7 @@ func shellModel(cwd string) Model {
 
 // Pressing c on a header row hands off a shell in the group's cwd.
 func TestShellKeyOnHeader(t *testing.T) {
-	t.Setenv("SHELL", "/opt/fancy/sh")
+	setShellEnv(t, "/opt/fancy/sh")
 	dir := t.TempDir()
 	m := shellModel(dir)
 	updated, cmd := m.updateList(key("c")) // cursor 0 = header row
@@ -35,7 +46,7 @@ func TestShellKeyOnHeader(t *testing.T) {
 
 // Pressing c on a session row hands off a shell in the session's cwd.
 func TestShellKeyOnSession(t *testing.T) {
-	t.Setenv("SHELL", "/opt/fancy/sh")
+	setShellEnv(t, "/opt/fancy/sh")
 	dir := t.TempDir()
 	m := shellModel(dir)
 	m.cursor = 1 // session row under the header
@@ -64,7 +75,7 @@ func TestShellKeyMissingDirFlashes(t *testing.T) {
 
 // The detail view's c key hands off a shell in the open session's cwd.
 func TestShellKeyInDetail(t *testing.T) {
-	t.Setenv("SHELL", "/opt/fancy/sh")
+	setShellEnv(t, "/opt/fancy/sh")
 	dir := t.TempDir()
 	s := domain.Session{PluginID: "codex", SessionID: "s1", CWD: dir}
 	m := Model{app: app.Build(config.Config{}, nil), detailSession: &s}
