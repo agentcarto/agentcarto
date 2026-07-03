@@ -38,13 +38,18 @@ func (i *Index) Build(ctx context.Context, s domain.Session, l plugin.Conversati
 	for _, nid := range c.ActivePath() {
 		for _, ev := range c.Nodes[nid].Events {
 			// EventTask is included because task notices were previously user
-			// events; their summaries/results stay searchable.
+			// events; their summaries/results stay searchable. Index the
+			// normalized body rather than the raw notification wrapper.
 			if ev.Kind == domain.EventUser || ev.Kind == domain.EventQueued || ev.Kind == domain.EventAssistant || ev.Kind == domain.EventTask {
 				count++
 				if b.Len() >= i.MaxChars {
 					break
 				}
-				b.WriteString(ev.Text)
+				text := ev.Text
+				if ev.Kind == domain.EventTask && ev.ToolDetail != "" {
+					text = ev.ToolDetail
+				}
+				b.WriteString(text)
 				b.WriteByte('\n')
 			}
 		}

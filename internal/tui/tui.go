@@ -2360,22 +2360,6 @@ func eventBlock(e domain.Event) turnBlock {
 	case domain.EventToolResult:
 		lines = toolBody(e, lines)
 		return turnBlock{Sym: "└", Style: "tool", Label: fmt.Sprintf("result (%d lines)", len(lines)), Body: lines}
-	case domain.EventFileChange:
-		files := make([]string, 0, len(e.Changes))
-		shorts := make([]string, 0, len(e.Changes))
-		added, removed := 0, 0
-		for _, fc := range e.Changes {
-			files = append(files, fc.Path)
-			shorts = append(shorts, filepath.Base(fc.Path))
-			added += fc.Added
-			removed += fc.Removed
-		}
-		label := one
-		if len(shorts) > 0 {
-			label = strings.Join(shorts, ", ")
-		}
-		label = fmt.Sprintf("apply_patch %s  (+%d -%d)", label, added, removed)
-		return turnBlock{Sym: "✎", Style: "tool", Label: strings.TrimSpace(label), Body: files}
 	case domain.EventSystem:
 		return turnBlock{Sym: "#", Style: "meta", Label: "system: " + one, Body: lines}
 	default:
@@ -2960,9 +2944,11 @@ func turnFileEdits(events []domain.Event) []fileEdit {
 }
 
 // skipInFileSection reports edit events already surfaced in the consolidated file
-// section, so turnBlocksOf omits them from the chronological block list.
+// section, so turnBlocksOf omits them from the chronological block list. An
+// event without Changes stays visible in the timeline (a file_change lacking
+// them would otherwise silently render nowhere).
 func skipInFileSection(e domain.Event) bool {
-	return e.Kind == domain.EventFileChange || len(e.Changes) > 0
+	return len(e.Changes) > 0
 }
 
 func oneLine(text string) string {
