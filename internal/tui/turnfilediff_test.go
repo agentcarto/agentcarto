@@ -16,121 +16,79 @@ func hasLine(lines []string, want string) bool {
 	return false
 }
 
-func TestUnifiedHunksChange(t *testing.T) {
-	lines, added, removed := unifiedHunks("a\nb\nc", "a\nB\nc")
-	if added != 1 || removed != 1 {
-		t.Fatalf("counts = +%d -%d, want +1 -1", added, removed)
-	}
-	want := []string{"@@", " a", "-b", "+B", " c"}
-	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("hunk =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
-	}
+func editEvent(kind domain.EventKind, changes ...domain.FileChange) domain.Event {
+	return domain.Event{Kind: kind, ToolName: "Edit", Changes: changes}
 }
 
-func TestUnifiedHunksAddOnly(t *testing.T) {
-	lines, added, removed := unifiedHunks("", "x\ny")
-	if added != 2 || removed != 0 {
-		t.Fatalf("counts = +%d -%d, want +2 -0", added, removed)
-	}
-	if !hasLine(lines, "+x") || !hasLine(lines, "+y") || hasLine(lines, "-") {
-		t.Fatalf("add-only hunk unexpected: %v", lines)
-	}
-}
-
-func TestUnifiedHunksDeleteOnly(t *testing.T) {
-	lines, added, removed := unifiedHunks("x\ny\nz", "x\nz")
-	if added != 0 || removed != 1 {
-		t.Fatalf("counts = +%d -%d, want +0 -1", added, removed)
-	}
-	if !hasLine(lines, "-y") {
-		t.Fatalf("delete hunk missing -y: %v", lines)
-	}
-}
-
-func TestUnifiedHunksNoChange(t *testing.T) {
-	lines, added, removed := unifiedHunks("a\nb", "a\nb")
-	if lines != nil || added != 0 || removed != 0 {
-		t.Fatalf("no-change should be empty, got %v +%d -%d", lines, added, removed)
-	}
-}
-
-func toolCall(name, text string) domain.Event {
-	return domain.Event{Kind: domain.EventToolCall, ToolName: name, Text: text}
-}
-
-func TestTurnFileEditsClaudeEdit(t *testing.T) {
-	e := toolCall("Edit", `{"file_path":"/x/foo.go","old_string":"a\nb","new_string":"a\nc"}`)
+func TestTurnFileEditsFromChanges(t *testing.T) {
+	e := editEvent(domain.EventToolCall, domain.FileChange{Path: "/x/foo.go", Op: "update", Added: 1, Removed: 1, Diff: "@@\n a\n-b\n+c"})
 	fes := turnFileEdits([]domain.Event{e})
 	if len(fes) != 1 {
 		t.Fatalf("want 1 file, got %d", len(fes))
 	}
 	fe := fes[0]
-	if fe.Path != "/x/foo.go" || fe.Added != 1 || fe.Removed != 1 {
+	if fe.Path != "/x/foo.go" || fe.Added != 1 || fe.Removed != 1 || fe.op() != "M" {
 		t.Fatalf("fileEdit = %+v", fe)
-	}
-	if fe.Diff[0] != "*** Update File: /x/foo.go" {
-		t.Fatalf("header = %q", fe.Diff[0])
 	}
 	if !hasLine(fe.Diff, "-b") || !hasLine(fe.Diff, "+c") {
 		t.Fatalf("diff body missing -b/+c: %v", fe.Diff)
 	}
 }
 
-func TestTurnFileEditsWriteIsAddFile(t *testing.T) {
-	e := toolCall("Write", `{"file_path":"/x/new.go","content":"one\ntwo"}`)
-	fes := turnFileEdits([]domain.Event{e})
-	if len(fes) != 1 || fes[0].Diff[0] != "*** Add File: /x/new.go" {
-		t.Fatalf("Write should be Add File, got %v", fes)
-	}
-	if fes[0].Added != 2 || fes[0].Removed != 0 {
-		t.Fatalf("Write counts = +%d -%d, want +2 -0", fes[0].Added, fes[0].Removed)
-	}
-}
-
 func TestTurnFileEditsSameFileMerged(t *testing.T) {
-	e1 := toolCall("Edit", `{"file_path":"/x/foo.go","old_string":"a","new_string":"b"}`)
-	e2 := toolCall("Edit", `{"file_path":"/x/foo.go","old_string":"c","new_string":"d"}`)
+	e1 := editEvent(domain.EventToolCall, domain.FileChange{Path: "/x/foo.go", Added: 1, Removed: 1, Diff: "@@\n-a\n+b"})
+	e2 := editEvent(domain.EventToolCall, domain.FileChange{Path: "/x/foo.go", Added: 1, Removed: 1, Diff: "@@\n-c\n+d"})
 	fes := turnFileEdits([]domain.Event{e1, e2})
 	if len(fes) != 1 {
 		t.Fatalf("same file should merge into 1, got %d", len(fes))
 	}
-	// one header, two @@ hunks
-	if strings.Count(strings.Join(fes[0].Diff, "\n"), "*** ") != 1 {
-		t.Fatalf("want single header: %v", fes[0].Diff)
+	if fes[0].Added != 2 || fes[0].Removed != 2 {
+		t.Fatalf("merged counts +%d -%d, want +2 -2", fes[0].Added, fes[0].Removed)
 	}
 	if strings.Count(strings.Join(fes[0].Diff, "\n"), "@@") != 2 {
 		t.Fatalf("want 2 hunks: %v", fes[0].Diff)
 	}
 }
 
-func TestTurnFileEditsCodexApplyPatch(t *testing.T) {
-	patch := "*** Begin Patch\n*** Update File: pkg/a.go\n@@\n-old\n+new\n*** End Patch"
-	e := toolCall("apply_patch", patch)
+func TestTurnFileEditsDiffLessChangeIsBodyLess(t *testing.T) {
+	e := editEvent(domain.EventFileChange, domain.FileChange{Path: "/y/bar.go", Added: 3, Removed: 1})
 	fes := turnFileEdits([]domain.Event{e})
-	if len(fes) != 1 || fes[0].Path != "pkg/a.go" {
-		t.Fatalf("apply_patch parse = %v", fes)
-	}
-	if fes[0].Added != 1 || fes[0].Removed != 1 {
-		t.Fatalf("codex counts = +%d -%d, want +1 -1", fes[0].Added, fes[0].Removed)
-	}
-	if fes[0].Diff[0] != "*** Update File: pkg/a.go" || !hasLine(fes[0].Diff, "+new") {
-		t.Fatalf("codex diff body = %v", fes[0].Diff)
-	}
-}
-
-func TestTurnFileEditsFileChangeNoBody(t *testing.T) {
-	e := domain.Event{Kind: domain.EventFileChange, Text: `{"files":["/y/bar.go"],"added":3,"removed":1}`}
-	fes := turnFileEdits([]domain.Event{e})
-	if len(fes) != 1 || !fes[0].noBody {
-		t.Fatalf("file_change should be body-less, got %v", fes)
+	if len(fes) != 1 || !fes[0].noBody || fes[0].Added != 3 || fes[0].Removed != 1 {
+		t.Fatalf("diff-less change = %+v", fes)
 	}
 	if !hasLine(fes[0].Diff, "(no diff body)") {
 		t.Fatalf("want no-body note: %v", fes[0].Diff)
 	}
 }
 
-// The block label shows the op letter and path, so body() must drop the
-// "*** ... File:" header that would repeat them. Bare "@@" markers carry no
+// An apply_patch tool_call and its patch_apply_end file_change describe the same
+// change; the applied result supersedes the request, so no doubled entries,
+// hunks or counts.
+func TestTurnFileEditsAppliedSupersedesRequested(t *testing.T) {
+	fc := domain.FileChange{Path: "a.go", Added: 1, Removed: 1, Diff: "+new\n-old"}
+	events := []domain.Event{editEvent(domain.EventToolCall, fc), editEvent(domain.EventFileChange, fc)}
+	fes := turnFileEdits(events)
+	if len(fes) != 1 {
+		t.Fatalf("want 1 deduped file, got %d: %+v", len(fes), fes)
+	}
+	if fes[0].Added != 1 || fes[0].Removed != 1 {
+		t.Fatalf("dedup counts +%d -%d, want +1 -1", fes[0].Added, fes[0].Removed)
+	}
+	if n := strings.Count(strings.Join(fes[0].Diff, "\n"), "+new"); n != 1 {
+		t.Fatalf("diff duplicated (+new x%d): %v", n, fes[0].Diff)
+	}
+}
+
+func TestEditStatsNoDoubleCountWithFileChange(t *testing.T) {
+	fc := domain.FileChange{Path: "a.go", Added: 1, Removed: 1, Diff: "+new\n-old"}
+	events := []domain.Event{editEvent(domain.EventToolCall, fc), editEvent(domain.EventFileChange, fc)}
+	files, added, removed := editStats(events)
+	if files != 1 || added != 1 || removed != 1 {
+		t.Fatalf("editStats = files%d +%d -%d, want 1 +1 -1", files, added, removed)
+	}
+}
+
+// The block label shows the op letter and path. Bare "@@" markers carry no
 // information and become blank-line hunk separators (none at the edges);
 // "@@ <context>" markers are kept.
 func TestFileEditOpAndBody(t *testing.T) {
@@ -139,27 +97,27 @@ func TestFileEditOpAndBody(t *testing.T) {
 		op   string
 		body []string
 	}{
-		{fileEdit{Diff: []string{"*** Update File: a.go", "@@", "+x"}}, "M", []string{"+x"}},
-		{fileEdit{Diff: []string{"*** Add File: b.go", "+y"}}, "A", []string{"+y"}},
-		{fileEdit{Diff: []string{"*** Delete File: c.go"}}, "D", []string{}},
-		{fileEdit{Diff: nil}, "M", nil},
+		{fileEdit{Op: "update", Diff: []string{"@@", "+x"}}, "M", []string{"+x"}},
+		{fileEdit{Op: "add", Diff: []string{"+y"}}, "A", []string{"+y"}},
+		{fileEdit{Op: "delete"}, "D", nil},
+		{fileEdit{}, "M", nil},
 		{
-			fileEdit{Diff: []string{"*** Update File: a.go", "@@", " a", "-b", "+c", "@@", " d", "+e", "@@"}},
+			fileEdit{Diff: []string{"@@", " a", "-b", "+c", "@@", " d", "+e", "@@"}},
 			"M",
 			[]string{" a", "-b", "+c", "", " d", "+e"},
 		},
 		{
-			fileEdit{Diff: []string{"*** Update File: a.go", "@@ func main", "+x"}},
+			fileEdit{Diff: []string{"@@ func main", "+x"}},
 			"M",
 			[]string{"@@ func main", "+x"},
 		},
 	}
 	for _, c := range cases {
 		if got := c.fe.op(); got != c.op {
-			t.Errorf("op(%v) = %q, want %q", c.fe.Diff, got, c.op)
+			t.Errorf("op(%+v) = %q, want %q", c.fe, got, c.op)
 		}
 		if got := c.fe.body(); strings.Join(got, "\n") != strings.Join(c.body, "\n") {
-			t.Errorf("body(%v) = %v, want %v", c.fe.Diff, got, c.body)
+			t.Errorf("body(%+v) = %v, want %v", c.fe, got, c.body)
 		}
 	}
 }
@@ -201,57 +159,5 @@ func TestDiffLineStyle(t *testing.T) {
 		if got := diffLineStyle(in); got != want {
 			t.Errorf("diffLineStyle(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-func countLine(lines []string, want string) int {
-	n := 0
-	for _, l := range lines {
-		if l == want {
-			n++
-		}
-	}
-	return n
-}
-
-// Codex patch_apply_end now carries the real diff as an apply_patch document.
-func TestTurnFileEditsCodexFileChangeDiff(t *testing.T) {
-	patch := "*** Begin Patch\n*** Update File: a.go\n--- a/a.go\n+++ b/a.go\n+new\n-old\n*** End Patch"
-	e := domain.Event{Kind: domain.EventFileChange, Text: patch}
-	fes := turnFileEdits([]domain.Event{e})
-	if len(fes) != 1 || fes[0].Path != "a.go" || fes[0].noBody {
-		t.Fatalf("file_change diff = %+v", fes)
-	}
-	if fes[0].Added != 1 || fes[0].Removed != 1 {
-		t.Fatalf("counts +%d -%d, want +1 -1", fes[0].Added, fes[0].Removed)
-	}
-	if !hasLine(fes[0].Diff, "+new") || !hasLine(fes[0].Diff, "-old") {
-		t.Fatalf("missing diff body: %v", fes[0].Diff)
-	}
-}
-
-// An apply_patch tool_call and its patch_apply_end file_change describe the same
-// change; they must not produce two entries or doubled hunks/counts.
-func TestTurnFileEditsDedupsToolCallAndFileChange(t *testing.T) {
-	patch := "*** Begin Patch\n*** Update File: a.go\n+new\n-old\n*** End Patch"
-	events := []domain.Event{toolCall("apply_patch", patch), {Kind: domain.EventFileChange, Text: patch}}
-	fes := turnFileEdits(events)
-	if len(fes) != 1 {
-		t.Fatalf("want 1 deduped file, got %d: %+v", len(fes), fes)
-	}
-	if fes[0].Added != 1 || fes[0].Removed != 1 {
-		t.Fatalf("dedup counts +%d -%d, want +1 -1", fes[0].Added, fes[0].Removed)
-	}
-	if n := countLine(fes[0].Diff, "+new"); n != 1 {
-		t.Fatalf("diff duplicated (+new x%d): %v", n, fes[0].Diff)
-	}
-}
-
-func TestEditStatsNoDoubleCountWithFileChange(t *testing.T) {
-	patch := "*** Begin Patch\n*** Update File: a.go\n+new\n-old\n*** End Patch"
-	events := []domain.Event{toolCall("apply_patch", patch), {Kind: domain.EventFileChange, Text: patch}}
-	files, added, removed := editStats(events)
-	if files != 1 || added != 1 || removed != 1 {
-		t.Fatalf("editStats = files%d +%d -%d, want 1 +1 -1", files, added, removed)
 	}
 }

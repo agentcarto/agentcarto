@@ -38,7 +38,7 @@ func (c Catalog) Scan(ctx context.Context, warm []domain.Session, deadWarm map[s
 			snap.Errors = append(snap.Errors, r.err)
 		}
 	}
-	backfillCopilotUnknownCWD(snap.Sessions, 6*time.Hour)
+	backfillInferredCWD(snap.Sessions, 6*time.Hour)
 	sort.SliceStable(snap.Sessions, func(i, j int) bool { return snap.Sessions[i].UpdatedAt.After(snap.Sessions[j].UpdatedAt) })
 	snap.Version = 1
 	return snap
@@ -93,21 +93,19 @@ func (c Catalog) scanAll(ctx context.Context, warmByPlugin map[string][]domain.S
 	return ch
 }
 
-func backfillCopilotUnknownCWD(sessions []domain.Session, maxGap time.Duration) {
+// backfillInferredCWD fills the working directory of sessions whose plugin
+// flagged them InferCWD (the agent never records one) by borrowing from a
+// temporally-near session of any agent — a cross-plugin heuristic only the
+// host can run.
+func backfillInferredCWD(sessions []domain.Session, maxGap time.Duration) {
 	for i := range sessions {
-		// Only the copilot family (VS Code / JetBrains) is eligible. AgentType is
-		// driven by the plugin and is robust against ID renames.
-		if !isCopilot(sessions[i].AgentType) || sessions[i].CWD != "(unknown)" {
+		if !sessions[i].InferCWD {
 			continue
 		}
 		if cwd := nearestKnownCWD(sessions, i, maxGap); cwd != "" {
 			sessions[i].CWD = cwd
 		}
 	}
-}
-
-func isCopilot(agentType string) bool {
-	return agentType == "copilot-vc" || agentType == "copilot-jb"
 }
 
 // nearestKnownCWD returns the CWD of the session closest in time to sessions[i]

@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	searchpkg "github.com/agentcarto/agentcarto/internal/search"
 	convlogic "github.com/agentcarto/core/conversation"
@@ -183,7 +182,7 @@ func TestDetailViewPrototypeColorsAndMetadata(t *testing.T) {
 }
 
 func TestEventBlockPrototypeTaskAndPseudoUser(t *testing.T) {
-	task := eventBlock(domain.Event{Kind: domain.EventUser, Text: "<task-notification><task-id>abcdef123456</task-id><status>done</status><summary>sum</summary><result>result line</result></task-notification>"})
+	task := eventBlock(domain.Event{Kind: domain.EventTask, ToolArg: "abcdef12 [done]", ToolDetail: "sum\n\nresult line"})
 	if task.Sym != "⤤" || task.Style != "task" || !strings.Contains(task.Label, "TASK abcdef12 [done]") {
 		t.Fatalf("task block=%#v", task)
 	}
@@ -193,26 +192,26 @@ func TestEventBlockPrototypeTaskAndPseudoUser(t *testing.T) {
 	}
 }
 
-func TestToolCallLabelBodyPrototypeEditAndPatch(t *testing.T) {
-	edit := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Edit", Text: `{"file_path":"/repo/a.go","old_string":"one\nold\n","new_string":"one\nnew\nmore\n"}`})
-	if edit.Sym != "◆" || !strings.Contains(edit.Label, "Edit") || !strings.Contains(edit.Label, "a.go") || !strings.Contains(edit.Label, "(+2 -1)") {
-		t.Fatalf("edit block=%#v", edit)
-	}
-	patch := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "apply_patch", Text: "*** Begin Patch\n*** Update File: x.go\n-old\n+new\n*** End Patch\n"})
-	if !strings.Contains(patch.Label, "apply_patch x.go") || !strings.Contains(patch.Label, "(+1 -1)") {
-		t.Fatalf("patch block=%#v", patch)
+// Changes-bearing events (edit tool calls, file changes) are surfaced by the
+// consolidated file section, not the chronological block list.
+func TestChangesBearingEventsSkipTimeline(t *testing.T) {
+	edit := domain.Event{Kind: domain.EventToolCall, ToolName: "Edit", Changes: []domain.FileChange{{Path: "a.go"}}}
+	fc := domain.Event{Kind: domain.EventFileChange, Changes: []domain.FileChange{{Path: "a.go"}}}
+	plain := domain.Event{Kind: domain.EventToolCall, ToolName: "Read", ToolArg: "/x/c.py"}
+	if !skipInFileSection(edit) || !skipInFileSection(fc) || skipInFileSection(plain) {
+		t.Fatalf("skipInFileSection: edit=%v fc=%v plain=%v", skipInFileSection(edit), skipInFileSection(fc), skipInFileSection(plain))
 	}
 }
 
 func TestToolCallLabelBodyPrototypeBashShell(t *testing.T) {
-	fg := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Bash", Text: `{"command":"ls -la\necho done","description":"list"}`})
+	fg := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: "$ ls -la echo done", ToolDetail: "ls -la\necho done"})
 	if !strings.Contains(fg.Label, "Bash") || !strings.Contains(fg.Label, "$ ls -la echo done") || strings.Contains(fg.Label, "&") {
 		t.Fatalf("foreground bash label=%q", fg.Label)
 	}
 	if len(fg.Body) != 2 || fg.Body[0] != "ls -la" || fg.Body[1] != "echo done" {
 		t.Fatalf("foreground bash body=%#v", fg.Body)
 	}
-	bg := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Bash", Text: `{"command":"sleep 100","run_in_background":true}`})
+	bg := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: "$ sleep 100 &", ToolDetail: "sleep 100\n\n(run in background)"})
 	if !strings.HasSuffix(bg.Label, "$ sleep 100 &") {
 		t.Fatalf("background bash label=%q", bg.Label)
 	}
@@ -223,8 +222,8 @@ func TestTurnMarkPartsPrototypeTaskRetryAndEditStats(t *testing.T) {
 		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
 		{ID: "a", Parent: "u", Timestamp: time.Date(2026, 6, 23, 1, 2, 0, 0, time.Local), Events: []domain.Event{
 			{Kind: domain.EventQueued, Text: "queued question"},
-			{Kind: domain.EventUser, Text: "<task-notification><task-id>t</task-id></task-notification>"},
-			{Kind: domain.EventToolCall, ToolName: "Edit", Text: `{"file_path":"a.go","old_string":"old\n","new_string":"new\n"}`},
+			{Kind: domain.EventTask, ToolArg: "t"},
+			{Kind: domain.EventToolCall, ToolName: "Edit", Changes: []domain.FileChange{{Path: "a.go", Added: 1, Removed: 1, Diff: "@@\n-old\n+new"}}},
 		}},
 		{ID: "side", Parent: "u", Timestamp: time.Date(2026, 6, 23, 1, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "retry"}}},
 	})
@@ -266,12 +265,11 @@ func TestEventBlockLineCounts(t *testing.T) {
 	}
 }
 
-func TestEventBlockPrototypeTaskBodyStripsXmlShell(t *testing.T) {
-	// Intentional Japanese (multibyte) test data: the summary/result carry Japanese
-	// ("調査" = investigation; "結果本文\n2行目" = result body / line 2). The assertions below
-	// verify this exact multibyte text survives in the body after the XML shell is stripped.
-	text := "<task-notification>\n<task-id>acbe1947efb01f983</task-id>\n<status>completed</status>\n<summary>Agent \"調査\" came to rest</summary>\n<note>boilerplate</note>\n<result>結果本文\n2行目</result>\n</task-notification>"
-	b := eventBlock(domain.Event{Kind: domain.EventUser, Text: text})
+func TestEventBlockTaskBodyFromToolDetail(t *testing.T) {
+	// Intentional Japanese (multibyte) test data ("調査" = investigation;
+	// "結果本文\n2行目" = result body / line 2): the plugin-normalized label and
+	// body must survive rendering verbatim.
+	b := eventBlock(domain.Event{Kind: domain.EventTask, ToolArg: "acbe1947 [completed]", ToolDetail: "Agent \"調査\" came to rest\n\n結果本文\n2行目"})
 	joined := strings.Join(b.Body, "\n")
 	if b.Style != "task" || b.Open || !strings.Contains(b.Label, "acbe1947") || !strings.Contains(b.Label, "[completed]") {
 		t.Fatalf("task block=%#v", b)
@@ -281,26 +279,17 @@ func TestEventBlockPrototypeTaskBodyStripsXmlShell(t *testing.T) {
 			t.Fatalf("missing %q in body %q", want, joined)
 		}
 	}
-	for _, banned := range []string{"boilerplate", "<task-id>"} {
-		if strings.Contains(joined, banned) {
-			t.Fatalf("body should not contain %q: %q", banned, joined)
-		}
-	}
 }
 
-func TestEditStatsPrototypeCountsUniqueFilesAndGitDiff(t *testing.T) {
-	tc := func(name string, inp map[string]any) domain.Event {
-		b, err := json.Marshal(inp)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return domain.Event{Kind: domain.EventToolCall, ToolName: name, Text: string(b)}
+func TestEditStatsPrototypeCountsUniqueFiles(t *testing.T) {
+	tc := func(fc ...domain.FileChange) domain.Event {
+		return domain.Event{Kind: domain.EventToolCall, ToolName: "Edit", Changes: fc}
 	}
 	events := []domain.Event{
 		{Kind: domain.EventUser, Text: "do it", Prompt: "do it"},
-		tc("Edit", map[string]any{"file_path": "/x/a.py", "old_string": "old1\nold2", "new_string": "new1\nnew2\nnew3"}),
-		tc("Write", map[string]any{"file_path": "/x/b.py", "content": "1\n2"}),
-		tc("Read", map[string]any{"file_path": "/x/c.py"}),
+		tc(domain.FileChange{Path: "/x/a.py", Added: 3, Removed: 2, Diff: "@@\n-old1\n-old2\n+new1\n+new2\n+new3"}),
+		tc(domain.FileChange{Path: "/x/b.py", Op: "add", Added: 2, Diff: "@@\n+1\n+2"}),
+		{Kind: domain.EventToolCall, ToolName: "Read", ToolArg: "/x/c.py"},
 	}
 	files, added, removed := editStats(events)
 	if files != 2 || added != 5 || removed != 2 {
@@ -308,16 +297,8 @@ func TestEditStatsPrototypeCountsUniqueFilesAndGitDiff(t *testing.T) {
 	}
 }
 
-func TestEditStatsPrototypeCodexApplyPatch(t *testing.T) {
-	patch := "*** Begin Patch\n*** Update File: foo.py\n@@\n-old line\n+new line\n+added line\n*** Add File: bar.py\n+x\n+y\n*** End Patch\n"
-	files, added, removed := editStats([]domain.Event{{Kind: domain.EventToolCall, ToolName: "apply_patch", Text: patch}})
-	if files != 2 || added != 4 || removed != 1 {
-		t.Fatalf("editStats=(%d,%d,%d), want (2,4,1)", files, added, removed)
-	}
-}
-
 func TestEventBlockPrototypeGeneralToolShowsKeyArg(t *testing.T) {
-	b := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Read", Text: `{"file_path":"/x/c.py"}`})
+	b := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Read", ToolArg: "/x/c.py"})
 	if !strings.HasPrefix(b.Label, "Read") || !strings.Contains(b.Label, "c.py") {
 		t.Fatalf("tool block=%#v", b)
 	}
@@ -509,10 +490,10 @@ func TestEnterOpensTurnFullViewAndQReturns(t *testing.T) {
 	}
 }
 func TestFileChangeAppearsInTurnListAndFullView(t *testing.T) {
-	change := `{"files":["internal/tui/tui.go"],"added":2,"removed":1}`
+	change := domain.FileChange{Path: "internal/tui/tui.go", Added: 2, Removed: 1}
 	c := domain.NewConversation([]domain.ConvNode{
 		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "edit", Prompt: "edit"}}},
-		{ID: "fc", Parent: "u", Events: []domain.Event{{Kind: domain.EventFileChange, Text: change}}},
+		{ID: "fc", Parent: "u", Events: []domain.Event{{Kind: domain.EventFileChange, Changes: []domain.FileChange{change}}}},
 	})
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
 	m := Model{width: 120, height: 10, detailSession: &s}
@@ -647,15 +628,11 @@ func stripANSI(s string) string {
 	return ansiRE.ReplaceAllString(s, "")
 }
 
-func TestToolResultHidesPTYMetadata(t *testing.T) {
-	b := eventBlock(domain.Event{Kind: domain.EventToolResult, Text: "Chunk ID: abc\nWall time: 0.1 seconds\nProcess exited with code 0\nOriginal token count: 10\nOutput:\nreal output\n{\"chunk_id\":\"def\",\"output\":\"json output\\n\"}"})
-	body := strings.Join(b.Body, "\n")
-	for _, bad := range []string{"Chunk ID:", "chunk_id", "Wall time:", "Process exited", "Original token count", "Output:"} {
-		if strings.Contains(body, bad) {
-			t.Fatalf("metadata %q should be hidden in %q", bad, body)
-		}
-	}
-	if !strings.Contains(body, "real output") || !strings.Contains(body, "json output") {
-		t.Fatalf("tool output lost: %q", body)
+// A tool result renders the plugin-normalized ToolDetail (already cleaned of
+// agent-specific metadata) when present, and its line count drives the label.
+func TestToolResultUsesToolDetail(t *testing.T) {
+	b := eventBlock(domain.Event{Kind: domain.EventToolResult, Text: "Chunk ID: abc\nraw", ToolDetail: "real output\njson output"})
+	if strings.Join(b.Body, "\n") != "real output\njson output" || b.Label != "result (2 lines)" {
+		t.Fatalf("result block=%#v", b)
 	}
 }

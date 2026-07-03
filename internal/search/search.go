@@ -37,7 +37,9 @@ func (i *Index) Build(ctx context.Context, s domain.Session, l plugin.Conversati
 	count := 0
 	for _, nid := range c.ActivePath() {
 		for _, ev := range c.Nodes[nid].Events {
-			if ev.Kind == domain.EventUser || ev.Kind == domain.EventQueued || ev.Kind == domain.EventAssistant {
+			// EventTask is included because task notices were previously user
+			// events; their summaries/results stay searchable.
+			if ev.Kind == domain.EventUser || ev.Kind == domain.EventQueued || ev.Kind == domain.EventAssistant || ev.Kind == domain.EventTask {
 				count++
 				if b.Len() >= i.MaxChars {
 					break

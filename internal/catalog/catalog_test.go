@@ -104,32 +104,46 @@ func TestScanReuseAndDeadCache(t *testing.T) {
 	}
 }
 
-func TestBackfillCopilotUnknownCWDFromNearbySession(t *testing.T) {
+func TestBackfillInferredCWDFromNearbySession(t *testing.T) {
 	t0 := time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC)
 	sessions := []domain.Session{
-		{PluginID: "copilot-jb", AgentType: "copilot-jb", SessionID: "copilot-inline", CWD: "(unknown)", StartedAt: t0},
+		{PluginID: "copilot-jb", AgentType: "copilot-jb", SessionID: "copilot-inline", CWD: "(unknown)", InferCWD: true, StartedAt: t0},
 		{PluginID: "codex", SessionID: "nearby", CWD: "/repo", StartedAt: t0.Add(5 * time.Minute)},
 		{PluginID: "codex", SessionID: "far", CWD: "/other", StartedAt: t0.Add(24 * time.Hour)},
 	}
 
-	backfillCopilotUnknownCWD(sessions, 6*time.Hour)
+	backfillInferredCWD(sessions, 6*time.Hour)
 
 	if sessions[0].CWD != "/repo" {
 		t.Fatalf("cwd=%q want /repo", sessions[0].CWD)
 	}
 }
 
-func TestBackfillCopilotUnknownCWDIgnoresDistantSession(t *testing.T) {
+func TestBackfillInferredCWDIgnoresDistantSession(t *testing.T) {
 	t0 := time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC)
 	sessions := []domain.Session{
-		{PluginID: "copilot-jb", AgentType: "copilot-jb", SessionID: "copilot-inline", CWD: "(unknown)", StartedAt: t0},
+		{PluginID: "copilot-jb", AgentType: "copilot-jb", SessionID: "copilot-inline", CWD: "(unknown)", InferCWD: true, StartedAt: t0},
 		{PluginID: "codex", SessionID: "far", CWD: "/other", StartedAt: t0.Add(24 * time.Hour)},
 	}
 
-	backfillCopilotUnknownCWD(sessions, 6*time.Hour)
+	backfillInferredCWD(sessions, 6*time.Hour)
 
 	if sessions[0].CWD != "(unknown)" {
 		t.Fatalf("cwd=%q want (unknown)", sessions[0].CWD)
+	}
+}
+
+func TestBackfillSkipsUnflaggedUnknownCWD(t *testing.T) {
+	t0 := time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC)
+	sessions := []domain.Session{
+		{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "(unknown)", StartedAt: t0},
+		{PluginID: "codex", SessionID: "nearby", CWD: "/repo", StartedAt: t0.Add(5 * time.Minute)},
+	}
+
+	backfillInferredCWD(sessions, 6*time.Hour)
+
+	if sessions[0].CWD != "(unknown)" {
+		t.Fatalf("cwd=%q want (unknown): only InferCWD sessions may borrow", sessions[0].CWD)
 	}
 }
 

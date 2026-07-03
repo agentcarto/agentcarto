@@ -138,7 +138,7 @@ func (a *App) conversationWithForks(ctx context.Context, s domain.Session, forks
 		grafted := map[string]string{} // grafted (renamed) ID -> ID in the child tree
 		var mapped string
 		if child.ForkAt != "" {
-			mapped = graftClaudeFork(conv, *childConv, child.ForkAt, i, want, grafted)
+			mapped = graftAnchoredFork(conv, *childConv, child.ForkAt, i, want, grafted)
 		} else {
 			mapped = graftFork(conv, *childConv, i, want, grafted)
 		}
@@ -168,13 +168,12 @@ func identityOrigins(c *domain.Conversation, s domain.Session) map[string]NodeOr
 	return out
 }
 
-// MarkEmptyForks handles forks from plugins that do not record a fork point
-// (codex/grok etc., where ForkAt is empty). It compares conversations to decide
-// whether the child's active path is a strict prefix of the parent's (truncated and
-// never continued, with zero unique content) and sets EmptyFork. claude forks carry
-// ForkAt (the parent's last uuid) and are decided cheaply during Scan, so they are
-// excluded here, which avoids re-reading large parent conversations. Forks marked
-// EmptyFork are excluded from the listing.
+// MarkEmptyForks handles forks whose plugin does not record a fork point (ForkAt
+// is empty). It compares conversations to decide whether the child's active path
+// is a strict prefix of the parent's (truncated and never continued, with zero
+// unique content) and sets EmptyFork. Forks that carry ForkAt are decided cheaply
+// by their plugin during Scan, so they are excluded here, which avoids re-reading
+// large parent conversations. Forks marked EmptyFork are excluded from the listing.
 func (a *App) MarkEmptyForks(ctx context.Context, sessions []domain.Session) []domain.Session {
 	byKey := make(map[string]domain.Session, len(sessions))
 	for _, s := range sessions {
@@ -290,13 +289,14 @@ func graftFork(parent *domain.Conversation, child domain.Conversation, idx int, 
 	return ""
 }
 
-// graftClaudeFork grafts child (a claude fork that records its fork point, attach)
-// onto parent. Nodes already present in parent are skipped, so the shared base is not
-// duplicated. If want is a node ID within child, it returns the corresponding ID
-// within parent after the graft (used to locate the focused branch; returns "" if
-// want is empty). Every renamed node is recorded in grafted (new ID -> child ID);
-// nodes inherited from parent keep their IDs and their parent origin.
-func graftClaudeFork(parent *domain.Conversation, child domain.Conversation, attach string, idx int, want string, grafted map[string]string) string {
+// graftAnchoredFork grafts child (a fork whose ForkAt records its fork point,
+// attach) onto parent. Nodes already present in parent are skipped, so the shared
+// base is not duplicated. If want is a node ID within child, it returns the
+// corresponding ID within parent after the graft (used to locate the focused
+// branch; returns "" if want is empty). Every renamed node is recorded in grafted
+// (new ID -> child ID); nodes inherited from parent keep their IDs and their
+// parent origin.
+func graftAnchoredFork(parent *domain.Conversation, child domain.Conversation, attach string, idx int, want string, grafted map[string]string) string {
 	if _, ok := parent.Nodes[attach]; !ok || len(child.Nodes) == 0 {
 		return ""
 	}
