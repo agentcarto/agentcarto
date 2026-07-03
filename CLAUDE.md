@@ -112,6 +112,12 @@ boundaries, headlines and titles. If an agent introduces new wrapper tags, exten
 classifier (`classify.go` / `promptText`) — never core. Changing a classifier changes parse output:
 bump the plugin's `ParserVersion`.
 
+The same contract covers rendering: plugins normalize tool calls into `Event.ToolArg` (one-line
+label argument) / `Event.ToolDetail` (expanded body), file edits into `Event.Changes`
+(structured per-file apply_patch hunks; an applied `EventFileChange` supersedes the requesting
+tool call within a turn), and background-task notices into `EventTask`. The TUI renders these
+fields generically and must never inspect `Event.Text` with agent-specific format knowledge.
+
 ### Host-side UI and search (`internal/tui`, `internal/search`)
 `internal/tui` is the Bubble Tea program (Elm-style model/update/view) for the list and detail
 screens; it calls `internal/app` for every operation and never touches plugins directly. `internal/search`
