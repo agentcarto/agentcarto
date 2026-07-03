@@ -704,6 +704,16 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "c":
+		if m.detailSession != nil {
+			if c, e := m.app.ShellCommand(m.detailSession.CWD); e != nil {
+				m.flash = e.Error()
+			} else {
+				m.launch = &c
+				return m, tea.Quit
+			}
+		}
+		return m, nil
 	case "enter", "right", "l":
 		if row, ok := m.selectedDetailRow(); ok && row.Kind == "branch" {
 			m.detailPathStack = append(m.detailPathStack, detailFrame{path: convlogic.DeepestPath(*m.detail, row.Root), label: m.branchFrameLabel(row.Root)})
@@ -1056,6 +1066,15 @@ func (m Model) updateList(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if m.cursor >= 0 && m.cursor < len(m.rows) {
 			m.flash = "Select a session row to resume (Enter toggles a header)"
 		}
+	case "c":
+		if cwd, ok := m.selectedCWD(); ok {
+			if c, e := m.app.ShellCommand(cwd); e != nil {
+				m.flash = e.Error()
+			} else {
+				m.launch = &c
+				return m, tea.Quit
+			}
+		}
 	case "m":
 		return m.startRelocate()
 	}
@@ -1218,6 +1237,7 @@ func shortCWD(s string, w int) string {
 	right := w - 1 - left
 	return runewidth.Truncate(s, left, "") + "…" + tailWidth(s, right)
 }
+
 // relCWD returns path relative to the session's working directory when it is
 // inside it; paths outside cwd (or already relative) are returned unchanged.
 func relCWD(path, cwd string) string {
@@ -1263,6 +1283,7 @@ func colorName(name string) lipgloss.Color {
 	}
 	return lipgloss.Color("")
 }
+
 // pluginColor colors a session by its plugin's configured color (config.yaml
 // carries per-agent defaults); a session whose plugin is gone falls back to a
 // neutral color.
@@ -1665,7 +1686,7 @@ func (m Model) View() string {
 	if m.flash != "" {
 		b.WriteString(flashBar(padCol(clip(m.flash, max(1, m.width-1)), max(1, m.width-1))))
 	} else {
-		foot := " ↑↓/jk move  Enter open/toggle  o resume  m move  v view  a active  / search  r reload  q quit "
+		foot := " ↑↓/jk move  Enter open/toggle  o resume  c cd  m move  v view  a active  / search  r reload  q quit "
 		b.WriteString(footer(padCol(clip(foot, max(1, m.width-1)), max(1, m.width-1))))
 	}
 	return b.String()
@@ -1879,7 +1900,7 @@ func (m Model) detailFooter(s *domain.Session) string {
 	if m.turnSearching || m.turnQuery != "" {
 		return m.searchFooter(" Search > "+m.turnQuery, len(m.turnListHits()), m.turnSearchPos)
 	}
-	foot := " ↑↓/jk move  Enter open  o resume  / search  f fork"
+	foot := " ↑↓/jk move  Enter open  o resume  c cd  / search  f fork"
 	if s.ParentSessionID != "" {
 		foot += "  p parent"
 	}
@@ -2821,6 +2842,7 @@ func turnSpan(events []domain.Event) string {
 	}
 	return out
 }
+
 // turnChanges collects the turn's normalized file changes. Applied changes
 // (EventFileChange, the result) supersede requested ones (EventToolCall) in
 // the same turn, so the same edit is never counted twice.

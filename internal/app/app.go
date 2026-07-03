@@ -82,6 +82,14 @@ func (a *App) ResumeCommand(s domain.Session) (domain.Command, error) {
 	p, _ := a.Catalog.Plugin(s.PluginID)
 	return p.Impl.(plugin.Resumer).ResumeCommand(s)
 }
+
+// ShellCommand builds the launch command that opens the user's shell in the
+// session's working directory, handed off after the TUI exits like a resume.
+// It is plugin-independent and deliberately skips the resume Availability
+// guards: a running or unresumable session's directory is still reachable.
+func (a *App) ShellCommand(cwd string) (domain.Command, error) {
+	return platform.ShellCommand(cwd)
+}
 func (a *App) Fork(ctx context.Context, s domain.Session, t domain.ForkTarget) (domain.MutationPlan, domain.Command, error) {
 	if x := a.Availability(s, "fork"); !x.Enabled {
 		return domain.MutationPlan{}, domain.Command{}, fmt.Errorf("%s", x.Reason)
