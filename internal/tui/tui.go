@@ -1714,6 +1714,7 @@ func (m Model) detailView() string {
 	}
 	end := min(len(m.detailRows), offset+bodyRows)
 	colW := m.detailColWidths(s, offset, end)
+	modelW := m.detailModelWidth(s, offset, end)
 	b.WriteString(clip(m.detailLead(s), max(20, m.width-1)) + "\n")
 	b.WriteString(m.detailSubLine(s) + "\n")
 	bodyLines := []string{}
@@ -1723,7 +1724,7 @@ func (m Model) detailView() string {
 		if rowData.Kind == "branch" {
 			bodyLines = append(bodyLines, m.detailBranchLine(rowData, selected))
 		} else {
-			bodyLines = append(bodyLines, m.detailTurnLine(s, rowData, selected, colW))
+			bodyLines = append(bodyLines, m.detailTurnLine(s, rowData, selected, colW, modelW))
 		}
 	}
 	if len(bodyLines) > bodyRows {
@@ -1764,18 +1765,48 @@ func (m Model) detailColWidths(s *domain.Session, offset, end int) [9]int {
 	return colW
 }
 
-// detailLead builds the first header line: status mark, agent/session/model, the
-// started→updated span, and the turn and branch counts.
+// detailModelColMax caps the per-turn model column so a long model name cannot
+// crowd out the headline on a narrow terminal.
+const detailModelColMax = 22
+
+// turnModel returns the model to show for a turn: the first event that names
+// one, falling back to the session-level model when no event carries one (the
+// fallback the plugins document on Event.Model).
+func turnModel(events []domain.Event, s *domain.Session) string {
+	for _, e := range events {
+		if e.Model != "" {
+			return e.Model
+		}
+	}
+	return s.Model
+}
+
+// detailModelWidth returns the display width of the per-turn model column across
+// the visible turn rows (capped) so the column lines up.
+func (m Model) detailModelWidth(s *domain.Session, offset, end int) int {
+	w := 0
+	for i := offset; i < end; i++ {
+		if m.detailRows[i].Kind != "turn" {
+			continue
+		}
+		if mw := runewidth.StringWidth(turnModel(m.turnEvents(m.detailRows[i].Turn), s)); mw > w {
+			w = mw
+		}
+	}
+	return min(w, detailModelColMax)
+}
+
+// detailLead builds the first header line: status mark, agent/session, the
+// started→updated span, and the turn and branch counts. The model is not shown
+// here; it is rendered per turn (see detailTurnLine) because it can differ
+// between turns.
 func (m Model) detailLead(s *domain.Session) string {
 	lead := " "
 	if mk := strings.TrimSpace(statusMark(*s)); mk != "" {
 		lead += statusStyled(mk+" ", *s, false, true)
 	}
 	lead += styled(s.AgentType+"  ", m.pluginColor(*s), false, true) + styled(shortID(s.SessionID)+"   ", lipgloss.Color("3"), false, false)
-	if s.Model != "" {
-		lead += s.Model + "   "
-	}
-	lead += s.StartedAt.Local().Format("01-02 15:04") + "→" + s.UpdatedAt.Local().Format("01-02 15:04") + "   "
+	lead += s.StartedAt.Local().Format("2006-01-02 15:04") + " → " + s.UpdatedAt.Local().Format("2006-01-02 15:04") + "   "
 	lead += fmt.Sprintf("turns:%d", len(m.detailTurns))
 	nbranch := 0
 	for _, r := range m.detailRows {
@@ -1831,7 +1862,7 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool) string {
 
 // detailTurnLine renders a turn row: the leading marker, turn number, timestamp, the
 // turn-mark columns (reply/tool/edit counts), and the headline.
-func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected bool, colW [9]int) string {
+func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected bool, colW [9]int, modelW int) string {
 	turn := rowData.Turn
 	chronIndex := rowData.TurnIndex
 	events := m.turnEvents(turn)
@@ -1880,6 +1911,13 @@ func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected boo
 			continue
 		}
 		row.WriteString(styled(content, roleColor(roles[j]), selected, false))
+	}
+	// Per-turn model column, replacing the session-level model that used to sit
+	// in the header. Placed after the time/count columns (so the start time and
+	// elapsed-time columns stay adjacent) and before the headline; fixed width
+	// (padCol) so it lines up across rows.
+	if modelW > 0 {
+		row.WriteString(styled(padCol(turnModel(events, s), modelW)+"  ", lipgloss.Color("3"), selected, false))
 	}
 	remain := max(1, m.width-1-lipgloss.Width(row.String()))
 	headColor := lipgloss.Color("")
@@ -2514,9 +2552,19 @@ func (m Model) turnFullView() string {
 		}
 		head += styled(s.AgentType+"  ", m.pluginColor(*s), false, true) + styled(shortID(s.SessionID)+"   ", lipgloss.Color("3"), false, false)
 	}
-	head += fmt.Sprintf("turn #%d/%d", turnNo, len(m.detailTurns))
+	// Keep the element order consistent with the turn-list header (detailLead):
+	// agent, id, time span, count, then model. detailLead shows the session span
+	// and turn count; here it is this turn's span and its position.
 	if len(events) > 0 {
-		head += "   " + turnSpan(events)
+		head += turnSpan(events) + "   "
+	}
+	head += fmt.Sprintf("turn #%d/%d", turnNo, len(m.detailTurns))
+	// The model that produced this turn, matching the per-turn model column in
+	// the turn list.
+	if s != nil {
+		if mdl := turnModel(events, s); mdl != "" {
+			head += "   " + styled(mdl, lipgloss.Color("3"), false, false)
+		}
 	}
 	b.WriteString(clip(head, max(20, m.width-1)) + "\n")
 	for i := offset; i < end; i++ {
@@ -2836,9 +2884,11 @@ func turnSpan(events []domain.Event) string {
 	if a.IsZero() {
 		return ""
 	}
-	out := a.Local().Format("01-02 15:04")
+	out := a.Local().Format("2006-01-02 15:04")
 	if !b.IsZero() && !b.Equal(a) {
-		out += "→" + b.Local().Format("15:04")
+		// Keep the date on the end too, matching the turn-list header
+		// (detailLead) so the date does not vanish from the end of the span.
+		out += " → " + b.Local().Format("2006-01-02 15:04")
 	}
 	return out
 }

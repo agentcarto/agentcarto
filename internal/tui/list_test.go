@@ -181,6 +181,39 @@ func TestDetailViewPrototypeColorsAndMetadata(t *testing.T) {
 	}
 }
 
+// The model is shown per turn (each turn row carries the model that produced it)
+// rather than once in the header, so turns that used different models are told
+// apart. The header line must no longer carry a model.
+func TestDetailPerTurnModelInRowsNotHeader(t *testing.T) {
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "12345678-x", CWD: "/repo", Title: "title", Model: "sess-model"}
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: "q1", Prompt: "q1", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local)}}},
+		{ID: "a1", Parent: "u1", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "ans1", Model: "model-alpha"}}},
+		{ID: "u2", Parent: "a1", Events: []domain.Event{{Kind: domain.EventUser, Text: "q2", Prompt: "q2", Timestamp: time.Date(2026, 6, 23, 1, 1, 0, 0, time.Local)}}},
+		{ID: "a2", Parent: "u2", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "ans2", Model: "model-beta"}}},
+	})
+	m := Model{width: 120, detailSession: &s, detail: &c, detailTurns: [][]string{{"u1", "a1"}, {"u2", "a2"}}}
+	out := stripANSI(m.detailView())
+	for _, want := range []string{"model-alpha", "model-beta"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing per-turn model %q in %q", want, out)
+		}
+	}
+	header := strings.SplitN(out, "\n", 2)[0]
+	for _, bad := range []string{"model-alpha", "model-beta", "sess-model"} {
+		if strings.Contains(header, bad) {
+			t.Fatalf("list header must not show a model, found %q in %q", bad, header)
+		}
+	}
+	// The single-turn detail view (turnFullView) header does show the turn's model.
+	m.detailCursor = 0
+	m.openCurrentTurn(true)
+	fullHeader := strings.SplitN(stripANSI(m.detailView()), "\n", 2)[0]
+	if !strings.Contains(fullHeader, "model-") {
+		t.Fatalf("turn detail header must show the turn's model, got %q", fullHeader)
+	}
+}
+
 func TestEventBlockPrototypeTaskAndPseudoUser(t *testing.T) {
 	task := eventBlock(domain.Event{Kind: domain.EventTask, ToolArg: "abcdef12 [done]", ToolDetail: "sum\n\nresult line"})
 	if task.Sym != "⤤" || task.Style != "task" || !strings.Contains(task.Label, "TASK abcdef12 [done]") {
