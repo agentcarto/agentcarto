@@ -223,6 +223,10 @@ func TestEventBlockPrototypeTaskAndPseudoUser(t *testing.T) {
 	if pseudo.Sym != "#" || pseudo.Style != "meta" || !strings.HasPrefix(pseudo.Label, "system: ") {
 		t.Fatalf("pseudo block=%#v", pseudo)
 	}
+	att := eventBlock(domain.Event{Kind: domain.EventAttachment, ToolArg: "/w/notes.md", Text: "# Notes\nbody"})
+	if att.Sym != "@" || att.Style != "meta" || att.Label != "attachment /w/notes.md" || len(att.Body) != 2 {
+		t.Fatalf("attachment block=%#v", att)
+	}
 }
 
 // Changes-bearing events (edit tool calls, file changes) are surfaced by the

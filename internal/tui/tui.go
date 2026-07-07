@@ -2421,6 +2421,8 @@ func eventBlock(e domain.Event) turnBlock {
 		return turnBlock{Sym: "└", Style: "tool", Label: fmt.Sprintf("result (%d lines)", len(lines)), Body: lines}
 	case domain.EventSystem:
 		return turnBlock{Sym: "#", Style: "meta", Label: "system: " + one, Body: lines}
+	case domain.EventAttachment:
+		return turnBlock{Sym: "@", Style: "meta", Label: strings.TrimSpace("attachment " + fit(e.ToolArg, 70)), Body: lines}
 	default:
 		return turnBlock{Sym: "#", Style: "meta", Label: string(e.Kind) + ": " + one, Body: lines}
 	}
