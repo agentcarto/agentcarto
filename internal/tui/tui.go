@@ -2413,6 +2413,11 @@ func eventBlock(e domain.Event) turnBlock {
 	case domain.EventAssistant:
 		return turnBlock{Sym: "●", Style: "assistant", Label: "ASSISTANT", Body: lines, Open: true}
 	case domain.EventReasoning:
+		// Reasoning the agent recorded without plaintext (e.g. encrypted thinking)
+		// carries no Text; the plugin describes it in ToolArg/ToolDetail instead.
+		if strings.TrimSpace(text) == "" && e.ToolDetail != "" {
+			return turnBlock{Sym: "◇", Style: "meta", Label: strings.TrimSpace("thinking " + e.ToolArg), Body: strings.Split(e.ToolDetail, "\n")}
+		}
 		return turnBlock{Sym: "◇", Style: "meta", Label: fmt.Sprintf("thinking (%d lines)", len(lines)), Body: lines}
 	case domain.EventToolCall:
 		return turnBlock{Sym: "◆", Style: "tool", Label: toolCallLabel(e), Body: toolBody(e, lines)}

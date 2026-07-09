@@ -304,6 +304,22 @@ func TestEventBlockLineCounts(t *testing.T) {
 	}
 }
 
+// Reasoning with no plaintext is labelled from the plugin's ToolArg/ToolDetail
+// rather than counting the (nonexistent) body lines.
+func TestEventBlockRedactedReasoning(t *testing.T) {
+	b := eventBlock(domain.Event{
+		Kind:       domain.EventReasoning,
+		ToolArg:    "[redacted]",
+		ToolDetail: "redacted thinking · 4.2 KB · 948 tok",
+	})
+	if b.Label != "thinking [redacted]" {
+		t.Fatalf("label=%q", b.Label)
+	}
+	if len(b.Body) != 1 || b.Body[0] != "redacted thinking · 4.2 KB · 948 tok" {
+		t.Fatalf("body=%#v", b.Body)
+	}
+}
+
 func TestEventBlockTaskBodyFromToolDetail(t *testing.T) {
 	// Intentional Japanese (multibyte) test data ("調査" = investigation;
 	// "結果本文\n2行目" = result body / line 2): the plugin-normalized label and
