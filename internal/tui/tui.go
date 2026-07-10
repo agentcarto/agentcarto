@@ -131,6 +131,10 @@ type turnBlock struct {
 	// NoGutter renders the block flush left, without the timestamp gutter.
 	// Used for the synthetic edited-files section, which carries no event time.
 	NoGutter bool
+	// Path is the absolute path of the file an edited-files block stands for, so
+	// the block can be opened in an editor. The label holds only a shortened,
+	// cwd-relative rendering of it. Empty on every other kind of block.
+	Path string
 }
 
 // labelSpan is one segment of a header line with its own style.
@@ -480,6 +484,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashAt = time.Time{}
 		}
 		return m, nil
+	case editorFinishedMsg:
+		// A successful edit needs no announcement; the restored turn view is enough.
+		if x.err != nil {
+			m.flash = x.err.Error()
+		}
+		return m, nil
 	case convMsg:
 		return m.handleConvMsg(x)
 	case tea.KeyMsg:
@@ -775,6 +785,13 @@ func (m Model) updateTurnFull(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.turnCursor > 0 {
 			m.turnCursor--
 			m.ensureTurnOffset()
+		}
+		return m, nil
+	case "e":
+		// "o" already means resume on the list screen, so edit-in-editor takes "e".
+		// Only the edited-files blocks stand for a file; elsewhere "e" does nothing.
+		if blk := m.blockAtCursor(); blk >= 0 && m.turnBlocks[blk].Path != "" {
+			return m, openInEditor(m.turnBlocks[blk].Path)
 		}
 		return m, nil
 	case "pgdown":
@@ -1249,6 +1266,17 @@ func relCWD(path, cwd string) string {
 		return path
 	}
 	return rel
+}
+// absCWD resolves a change's path against the session's working directory.
+// Plugins report a mix of absolute and cwd-relative paths; opening a file needs
+// the absolute one. A relative path with no cwd to anchor it stays as it is, and
+// fails the existence check later rather than resolving against agentcarto's own
+// working directory, which has nothing to do with the session.
+func absCWD(path, cwd string) string {
+	if path == "" || filepath.IsAbs(path) || cwd == "" {
+		return path
+	}
+	return filepath.Join(cwd, path)
 }
 func tailWidth(s string, w int) string {
 	r := []rune(s)
@@ -2379,7 +2407,7 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 			for _, sp := range spans {
 				label += sp.text
 			}
-			out = append(out, turnBlock{Sym: "*", Style: style, Label: label, LabelSpans: spans, Body: fe.body(), NoGutter: true})
+			out = append(out, turnBlock{Sym: "*", Style: style, Label: label, LabelSpans: spans, Body: fe.body(), NoGutter: true, Path: absCWD(fe.Path, cwd)})
 		}
 	}
 	for _, e := range events {
@@ -2595,6 +2623,12 @@ func (m Model) turnFullView() string {
 	for i := end - offset; i < bodyRows; i++ {
 		b.WriteString("\n")
 	}
+	// A flash takes priority over the normal/search footer, as it does on the list
+	// and detail screens; it reports why an editor could not be opened.
+	if m.flash != "" {
+		b.WriteString(flashBar(padCol(clip(m.flash, max(1, m.width-1)), max(1, m.width-1))))
+		return b.String()
+	}
 	var foot string
 	if m.turnFullSearching || m.turnFullQuery != "" {
 		hits := m.turnFullHits()
@@ -2607,7 +2641,7 @@ func (m Model) turnFullView() string {
 		}
 		foot = m.searchFooter(" Search > "+m.turnFullQuery, len(hits), pos)
 	} else {
-		foot = " ↑↓/jk move  Tab/[ ] block  →/← unfold/fold  z all  / search  q/← back "
+		foot = " ↑↓/jk move  Tab/[ ] block  →/← unfold/fold  z all  e open file  / search  q/← back "
 	}
 	b.WriteString(footer(padCol(clip(foot, max(1, m.width-1)), max(1, m.width-1))))
 	return b.String()
