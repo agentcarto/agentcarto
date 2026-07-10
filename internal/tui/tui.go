@@ -1720,8 +1720,13 @@ func (m Model) View() string {
 	return b.String()
 }
 func (m Model) detailView() string {
+	// openCurrentTurn keeps turnOpen and the cursor in step, so the row is a turn
+	// whenever the turn view is open. Check it here anyway: a render that finds
+	// otherwise falls back to the turn list instead of recursing.
 	if m.turnOpen {
-		return m.turnFullView()
+		if row, ok := m.selectedDetailRow(); ok && row.Kind == "turn" {
+			return m.turnFullView(row)
+		}
 	}
 	if len(m.detailRows) == 0 && len(m.detailTurns) > 0 {
 		path := m.currentDetailPath()
@@ -2340,6 +2345,10 @@ func (m *Model) openCurrentTurn(reset bool) {
 	m.ensureDetailRowsBuilt()
 	row, ok := m.selectedDetailRow()
 	if m.detail == nil || !ok || row.Kind != "turn" {
+		// Also reached from a reload (reset=false) that rebuilt the rows under an
+		// already-open turn and left the cursor off a turn row. There is no turn to
+		// render, so close the view rather than leave turnOpen pointing at nothing.
+		m.turnOpen = false
 		return
 	}
 	m.turnBlocks = m.turnBlocksOf(row.Turn)
@@ -2567,17 +2576,17 @@ func (m Model) turnFullLines() []turnLine {
 	}
 	return out
 }
-func (m Model) turnFullView() string {
+// turnFullView renders the turn named by row, which the caller must have taken
+// from the cursor and checked to be a turn row. It takes the row rather than
+// looking it up so it cannot fall back to detailView, which would call straight
+// back here whenever turnOpen was set — an unbounded recursion, not a fallback.
+func (m Model) turnFullView(row detailRow) string {
 	lines := m.turnFullLines()
 	bodyRows := m.turnBodyRows()
 	offset := max(0, min(m.turnOffset, max(0, len(lines)-bodyRows)))
 	end := min(len(lines), offset+bodyRows)
 	var b strings.Builder
 	s := m.detailSession
-	row, ok := m.selectedDetailRow()
-	if !ok || row.Kind != "turn" {
-		return m.detailView()
-	}
 	turnNo := row.TurnIndex + 1
 	events := m.turnEvents(row.Turn)
 	head := " "

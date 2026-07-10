@@ -204,7 +204,7 @@ func TestEditorFinishedFlash(t *testing.T) {
 	if m2.flash != errNoEditor.Error() {
 		t.Fatalf("flash = %q", m2.flash)
 	}
-	if !strings.Contains(m2.turnFullView(), "set $EDITOR") {
+	if !strings.Contains(m2.detailView(), "set $EDITOR") {
 		t.Fatal("the turn view does not render the flash")
 	}
 	if u, _ := m.Update(editorFinishedMsg{}); u.(Model).flash != "" {
