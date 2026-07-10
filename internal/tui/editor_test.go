@@ -2,7 +2,6 @@ package tui
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,7 +75,12 @@ func TestOpenInEditorFailures(t *testing.T) {
 }
 
 func TestAbsCWD(t *testing.T) {
-	abs := filepath.Join(string(os.PathSeparator), "x", "foo.go")
+	// Built with filepath.Abs, not by prefixing a separator: on Windows a path
+	// needs a volume name ("C:\x") to be absolute, so "\x" would not be.
+	abs, err := filepath.Abs(filepath.Join("x", "foo.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, c := range []struct{ path, cwd, want string }{
 		{abs, "/proj", abs}, // already absolute: left alone
 		{"sub/foo.go", "/proj", filepath.Join("/proj", "sub/foo.go")}, // anchored to the session cwd
