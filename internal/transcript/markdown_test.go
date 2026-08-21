@@ -215,11 +215,11 @@ func TestToolsNoneKeepsTheConversationAndTheEdits(t *testing.T) {
 		{ID: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
 		{ID: "a1", Parent: "u1", Events: []domain.Event{
 			{Kind: domain.EventToolCall, ToolName: "Read", ToolArg: "a.go"},
-			{Kind: domain.EventFileChange, Changes: []domain.FileChange{{Path: "/repo/a.go", Op: "update", Added: 1, Removed: 1}}},
+			{Kind: domain.EventFileChange, Changes: []domain.FileChange{{Path: abs("/repo/a.go"), Op: "update", Added: 1, Removed: 1}}},
 			{Kind: domain.EventAssistant, Text: "できた"},
 		}},
 	})
-	s := domain.Session{AgentType: "claude", SessionID: "x", CWD: "/repo", Title: "t"}
+	s := domain.Session{AgentType: "claude", SessionID: "x", CWD: abs("/repo"), Title: "t"}
 	got, _ := Markdown(s, c, Turns(c, c.ActivePath()), Options{Tools: ToolsNone})
 	if strings.Contains(got, "- Read a.go") {
 		t.Errorf("a tool call survived ToolsNone:\n%s", got)
@@ -320,7 +320,7 @@ func TestOutlineSizesMatchWhatMarkdownPrints(t *testing.T) {
 		}},
 		{ID: "u2", Parent: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: long, Prompt: long}}},
 	})
-	s := domain.Session{AgentType: "claude", SessionID: "x", CWD: "/repo", Title: "t"}
+	s := domain.Session{AgentType: "claude", SessionID: "x", CWD: abs("/repo"), Title: "t"}
 	turns := Turns(c, c.ActivePath())
 	for _, mode := range []ToolMode{ToolsFull, ToolsLabel, ToolsNone} {
 		o := Options{Tools: mode}

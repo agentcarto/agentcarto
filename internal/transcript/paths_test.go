@@ -6,18 +6,20 @@ import (
 	"testing"
 )
 
-// Edited-file paths render relative to the session's working directory;
-// paths outside it (or already relative) stay as-is. Absolute paths are
-// built per-platform: on Windows "/repo/app" is not absolute (no drive),
-// so the fixtures get a volume prefix there.
-func TestRelCWD(t *testing.T) {
-	abs := func(slash string) string {
-		p := filepath.FromSlash(slash)
-		if runtime.GOOS == "windows" {
-			p = `C:` + p
-		}
-		return p
+// abs builds an absolute path for the platform the test runs on: "/repo/app"
+// is not absolute on Windows, where a path needs a volume, and a fixture that
+// forgets it silently stops being a path the code under test treats as one.
+func abs(slash string) string {
+	p := filepath.FromSlash(slash)
+	if runtime.GOOS == "windows" {
+		p = `C:` + p
 	}
+	return p
+}
+
+// Edited-file paths render relative to the session's working directory;
+// paths outside it (or already relative) stay as-is.
+func TestRelCWD(t *testing.T) {
 	rel := func(slash string) string { return filepath.FromSlash(slash) }
 	cases := []struct{ path, cwd, want string }{
 		{abs("/repo/app/internal/x.go"), abs("/repo/app"), rel("internal/x.go")},

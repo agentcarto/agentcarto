@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,17 @@ import (
 	"github.com/agentcarto/core/domain"
 	"github.com/agentcarto/core/plugin"
 )
+
+// absPath builds an absolute path for the platform the test runs on: on Windows
+// "/repo/app" has no volume and is not absolute, so a fixture that leaves it
+// that way stops being a path the filters treat as one.
+func absPath(slash string) string {
+	p := filepath.FromSlash(slash)
+	if runtime.GOOS == "windows" {
+		p = `C:` + p
+	}
+	return p
+}
 
 // scanStub is a plugin that reports a fixed set of sessions and serves one
 // conversation per session, which is enough to drive the commands end to end
@@ -48,9 +61,9 @@ func talk(prompt, reply string) []domain.Event {
 func commandApp() (*app.App, config.Config) {
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	sessions := []domain.Session{
-		{PluginID: "claude", AgentType: "claude", SessionID: "aaaa1111-2222", CWD: "/repo/app", Title: "handoff の順序",
+		{PluginID: "claude", AgentType: "claude", SessionID: "aaaa1111-2222", CWD: absPath("/repo/app"), Title: "handoff の順序",
 			UpdatedAt: now, StartedAt: now.Add(-time.Hour), SourceRef: domain.SessionRef{Source: "/logs/a.jsonl"}},
-		{PluginID: "claude", AgentType: "claude", SessionID: "bbbb3333-4444", CWD: "/elsewhere", Title: "別の話",
+		{PluginID: "claude", AgentType: "claude", SessionID: "bbbb3333-4444", CWD: absPath("/elsewhere"), Title: "別の話",
 			UpdatedAt: now.Add(-48 * time.Hour), SourceRef: domain.SessionRef{Source: "/logs/b.jsonl"}},
 	}
 	convs := map[string]domain.Conversation{
@@ -101,7 +114,7 @@ func TestSearchCommandEndToEnd(t *testing.T) {
 }
 
 func TestSearchCommandFilters(t *testing.T) {
-	if got := runSearch(t, "--cwd", "/repo/app", "handoff"); got.Matched != 1 || got.Sessions[0].CWD != "/repo/app" {
+	if got := runSearch(t, "--cwd", absPath("/repo/app"), "handoff"); got.Matched != 1 || got.Sessions[0].CWD != absPath("/repo/app") {
 		t.Errorf("--cwd kept %+v", got.Sessions)
 	}
 	if got := runSearch(t, "--since", "24h", "handoff"); got.Matched != 1 {
@@ -120,11 +133,11 @@ func TestSearchCommandFilters(t *testing.T) {
 // A filtered search that finds nothing says where the matches are instead, with
 // the directory that contains the searched one named first.
 func TestSearchCommandReportsMatchesOutsideTheFilter(t *testing.T) {
-	got := runSearch(t, "--cwd", "/repo/app/sub", "handoff")
+	got := runSearch(t, "--cwd", absPath("/repo/app/sub"), "handoff")
 	if got.Matched != 0 || got.Elsewhere != 2 {
 		t.Fatalf("matched=%d elsewhere=%d", got.Matched, got.Elsewhere)
 	}
-	if !strings.HasPrefix(strings.SplitN(got.Note, "(", 2)[1], "/repo/app: 1") {
+	if !strings.HasPrefix(strings.SplitN(got.Note, "(", 2)[1], absPath("/repo/app")+": 1") {
 		t.Errorf("note should name the enclosing directory first: %q", got.Note)
 	}
 }
@@ -195,10 +208,10 @@ func TestListCommand(t *testing.T) {
 	if len(out.Sessions) != 2 || out.Sessions[0].SessionID != "aaaa1111-2222" {
 		t.Fatalf("sessions=%+v", out.Sessions)
 	}
-	if err := json.Unmarshal([]byte(runList(t, "--json", "--cwd", "/repo/app", "--limit", "1")), &out); err != nil {
+	if err := json.Unmarshal([]byte(runList(t, "--json", "--cwd", absPath("/repo/app"), "--limit", "1")), &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Sessions) != 1 || out.Sessions[0].CWD != "/repo/app" {
+	if len(out.Sessions) != 1 || out.Sessions[0].CWD != absPath("/repo/app") {
 		t.Fatalf("filtered=%+v", out.Sessions)
 	}
 	// The column form stays the default: a person running "list" gets a table.

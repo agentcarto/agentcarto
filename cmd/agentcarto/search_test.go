@@ -149,20 +149,20 @@ func TestParseSinceRejectsNegativeAges(t *testing.T) {
 // being looked for.
 func TestTopDirsPutsTheEnclosingDirectoryFirst(t *testing.T) {
 	byDir := map[string]int{
-		"/home/u/repo":       1, // encloses the searched directory
-		"/home/u/other":      5,
-		"/home/u/repo/sub":   3, // a sibling branch, not on the path
-		"/home/u/repo/sub/x": 2,
+		absPath("/home/u/repo"):       1, // encloses the searched directory
+		absPath("/home/u/other"):      5,
+		absPath("/home/u/repo/sub"):   3, // a sibling branch, not on the path
+		absPath("/home/u/repo/sub/x"): 2,
 	}
-	got := topDirs(byDir, "/home/u/repo/app", 3)
-	if !strings.HasPrefix(got, "/home/u/repo: 1") {
+	got := topDirs(byDir, absPath("/home/u/repo/app"), 3)
+	if !strings.HasPrefix(got, absPath("/home/u/repo")+": 1") {
 		t.Fatalf("topDirs=%q, want the enclosing directory first", got)
 	}
 	if !strings.Contains(got, "and 1 more directories") {
 		t.Errorf("topDirs=%q, want the remainder counted", got)
 	}
 	// Without a searched directory it is a plain popularity order.
-	if got := topDirs(byDir, "", 2); !strings.HasPrefix(got, "/home/u/other: 5") {
+	if got := topDirs(byDir, "", 2); !strings.HasPrefix(got, absPath("/home/u/other")+": 5") {
 		t.Fatalf("topDirs=%q", got)
 	}
 	// A session with no recorded directory is named rather than shown blank.
