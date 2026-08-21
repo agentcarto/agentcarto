@@ -132,7 +132,8 @@ Global flags go before the subcommand, e.g. `agentcarto --config ./config.yaml l
 
 **Keys** — List: `j`/`k` move, `g`/`G` top/bottom, `Enter` open, `/` search, `v` switch
 time/project view, `a` active-only, `o` resume, `m` relocate, `q` quit. Detail: `j`/`k`
-select turn, `Enter` expand, `f` fork from a turn, `q`/`←` back.
+select turn, `Enter` expand, `y` copy the turn's prompt and reply (inside an expanded
+turn, `y` copies the block under the cursor), `f` fork from a turn, `q`/`←` back.
 
 ## Configuration
 

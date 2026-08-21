@@ -724,6 +724,8 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "y":
+		return m.copyTurnExchange()
 	case "enter", "right", "l":
 		if row, ok := m.selectedDetailRow(); ok && row.Kind == "branch" {
 			m.detailPathStack = append(m.detailPathStack, detailFrame{path: convlogic.DeepestPath(*m.detail, row.Root), label: m.branchFrameLabel(row.Root)})
@@ -832,6 +834,8 @@ func (m Model) updateTurnFull(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "z":
 		m.toggleAllTurnBlocks()
 		return m, nil
+	case "y":
+		return m.copyTurnBlock()
 	case "esc":
 		if m.turnFullQuery != "" {
 			m.turnFullQuery = ""
@@ -1971,7 +1975,7 @@ func (m Model) detailFooter(s *domain.Session) string {
 	if m.turnSearching || m.turnQuery != "" {
 		return m.searchFooter(" Search > "+m.turnQuery, len(m.turnListHits()), m.turnSearchPos)
 	}
-	foot := " ↑↓/jk move  Enter open  o resume  c cd  / search  f fork"
+	foot := " ↑↓/jk move  Enter open  y copy  o resume  c cd  / search  f fork"
 	if s.ParentSessionID != "" {
 		foot += "  p parent"
 	}
@@ -2650,7 +2654,7 @@ func (m Model) turnFullView(row detailRow) string {
 		}
 		foot = m.searchFooter(" Search > "+m.turnFullQuery, len(hits), pos)
 	} else {
-		foot = " ↑↓/jk move  Tab/[ ] block  →/← unfold/fold  z all  e open file  / search  q/← back "
+		foot = " ↑↓/jk move  Tab/[ ] block  →/← unfold/fold  z all  y copy  e open file  / search  q/← back "
 	}
 	b.WriteString(footer(padCol(clip(foot, max(1, m.width-1)), max(1, m.width-1))))
 	return b.String()
