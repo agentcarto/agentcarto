@@ -155,7 +155,7 @@ view), the event kind, and a one-line snippet. `show` takes that number.
 | Flag | Meaning |
 |---|---|
 | `--cwd PATH` | only sessions that ran in `PATH` or below it (`.` for the current directory) |
-| `--agent ID` | only one agent (`claude`, `codex`, `grok`, `copilot`) |
+| `--agent ID` | only one agent (`claude`, `codex`, `grok`, `copilot` — or one editor of it, `copilot-vc` / `copilot-jb`) |
 | `--since` | `7d`, `2w`, `12h`, or a date (`2026-08-01`) |
 | `--limit N` | most sessions to list (default 10, newest first) |
 | `--hits-per-session N` | most hits per session (default 3, newest kept) |
@@ -181,6 +181,27 @@ An id can be given as a prefix (`8f3a2b1c`), the way the list and the search res
 A search narrowed with `--cwd` that finds nothing reports how many sessions match outside the
 filter and where they are, with the directory containing yours named first — the work is often
 one level up, and an unexplained zero reads as "never discussed".
+
+#### Teaching Claude Code to use it
+
+The commands are only useful if an agent thinks of them at the right moment. `skills/past-sessions`
+is a skill that does that: it costs one line of context until the model needs it, and then it
+carries the workflow above, the flags, and what the search does not cover.
+
+```sh
+mkdir -p ~/.claude/skills/past-sessions
+curl -fsSL https://raw.githubusercontent.com/agentcarto/agentcarto/main/skills/past-sessions/SKILL.md \
+  -o ~/.claude/skills/past-sessions/SKILL.md
+```
+
+Put it in `.claude/skills/past-sessions/` inside a repository instead to install it for that
+project alone. Nothing else is needed — the skill calls the `agentcarto` on your PATH.
+
+Agents without a skill mechanism reach the same commands through their own instruction file
+(`AGENTS.md`, `~/.codex/rules/`, and so on). One line is usually enough:
+
+> To recall earlier work — yours or another agent's — use `agentcarto search` / `agentcarto show`
+> rather than grepping the raw session logs.
 
 A query of several words means **all of them**, in any order and anywhere in the session
 (`"fork relocate"` finds the session that discussed both). Matching is a case-folded
