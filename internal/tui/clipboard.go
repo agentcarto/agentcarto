@@ -31,12 +31,7 @@ func copyToClipboard(text string) tea.Cmd {
 // of its own, and OSC 52 cannot be confirmed, so this is the only sign the key
 // did anything.
 func copiedFlash(text string) string {
-	n := len(strings.Split(text, "\n"))
-	unit := "lines"
-	if n == 1 {
-		unit = "line"
-	}
-	return fmt.Sprintf("Copied %d %s to the clipboard", n, unit)
+	return fmt.Sprintf("Copied %s to the clipboard", plural(len(strings.Split(text, "\n")), "line"))
 }
 
 // turnCopyText is the exchange of a turn: what the user asked and what the agent

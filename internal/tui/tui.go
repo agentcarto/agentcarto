@@ -1226,6 +1226,14 @@ func statusMark(s domain.Session) string {
 	}
 	return strings.Repeat(" ", 8)
 }
+// plural renders a count with its unit, adding the "s" when there is not exactly
+// one ("1 turn", "3 turns").
+func plural(n int, unit string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, unit)
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
+}
 func padCol(s string, w int) string {
 	s = runewidth.Truncate(s, w, "")
 	return s + strings.Repeat(" ", max(0, w-runewidth.StringWidth(s)))
