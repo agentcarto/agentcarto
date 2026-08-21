@@ -13,10 +13,13 @@ import (
 	"github.com/agentcarto/core/domain"
 	"github.com/agentcarto/core/plugin"
 	"gopkg.in/yaml.v3"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 func fail(e error) { fmt.Fprintln(os.Stderr, "agentcarto:", e); os.Exit(1) }
@@ -54,49 +57,216 @@ func main() {
 	case "doctor":
 		doctor(a)
 	case "list", "active":
-		listCmd(ctx, a, cmd == "active")
-	default:
+		db := openCache(ctx, c, *noCache)
+		defer closeCache(db)
+		listCmd(ctx, a, c, db, args[1:], cmd == "active", os.Stdout)
+	case "search":
+		db := openCache(ctx, c, *noCache)
+		defer closeCache(db)
+		searchCmd(ctx, a, c, db, args[1:], os.Stdout)
+	case "show":
+		db := openCache(ctx, c, *noCache)
+		defer closeCache(db)
+		showCmd(ctx, a, c, db, args[1:], os.Stdout)
+	case "help":
+		usage(os.Stdout)
+	case "":
 		runTUI(ctx, a, c, host, *noCache)
+	default:
+		// Without this a mistyped subcommand starts the TUI, which fails with
+		// "could not open a new TTY" wherever there is no terminal — a puzzle to
+		// anyone (or anything) that just misspelled "show".
+		fmt.Fprintf(os.Stderr, "agentcarto: unknown command %q\n\n", cmd)
+		usage(os.Stderr)
+		os.Exit(1)
 	}
 }
 
-// listCmd prints the scanned sessions. When active is true it also runs active
-// detection and limits output to sessions with a non-blank status.
-func listCmd(ctx context.Context, a *app.App, active bool) {
-	snap := a.Scan(ctx, nil, nil)
+// listCmd prints the scanned sessions, as columns for a person or as JSON for a
+// program. The filters are the ones search takes, because the question behind
+// "what was I doing here" is the same one — only without a query, which is why
+// it cannot be answered by search.
+//
+// When active is true it also runs active detection and keeps only the sessions
+// an agent is working on right now.
+func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, args []string, active bool, w io.Writer) {
+	name := "list"
+	if active {
+		name = "active"
+	}
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "print JSON instead of columns")
+	dir := fs.String("cwd", "", `only sessions that ran in this directory or below it ("." for the current one)`)
+	agent := fs.String("agent", "", "only this agent (plugin id or agent type)")
+	since := fs.String("since", "", "only sessions updated since then (7d, 12h, 2026-08-01)")
+	limit := fs.Int("limit", 0, "most sessions to print, newest first (0: all of them)")
+	if rest := parseFlags(fs, args); len(rest) > 0 {
+		fail(fmt.Errorf("%s: unexpected argument %q", name, rest[0]))
+	}
+	if *limit < 0 {
+		fail(fmt.Errorf("%s: --limit %d: a count cannot be negative", name, *limit))
+	}
+	filter := app.SessionFilter{Agent: *agent, IncludeEmptyForks: true}
+	if *dir != "" {
+		abs, err := filepath.Abs(*dir)
+		if err != nil {
+			fail(fmt.Errorf("--cwd %q: %w", *dir, err))
+		}
+		filter.CWD = abs
+	}
+	if *since != "" {
+		t, err := parseSince(*since, time.Now())
+		if err != nil {
+			fail(err)
+		}
+		filter.Since = t
+	}
+
+	sessions := app.FilterSessions(scanSessions(ctx, a, c, db), filter)
 	if active {
 		var e error
-		snap.Sessions, e = a.DetectActive(ctx, snap.Sessions)
+		sessions, e = a.DetectActive(ctx, sessions)
 		if e != nil {
 			fmt.Fprintln(os.Stderr, "active detection:", e)
 		}
-	}
-	for _, s := range snap.Sessions {
-		if active && s.Status == "" {
-			continue
+		var running []domain.Session
+		for _, s := range sessions {
+			if s.Status != "" {
+				running = append(running, s)
+			}
 		}
-		fmt.Printf("%-8s %-8s %-20s %-30s %s\n", s.PluginID, s.Status, short(s.SessionID, 20), short(s.CWD, 30), s.Title)
+		sessions = running
 	}
+	// The scan already returns them newest first; sorting here is what makes
+	// --limit mean "the newest N" rather than "whatever the scan happened to
+	// return first".
+	sort.SliceStable(sessions, func(i, j int) bool { return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt) })
+	if *limit > 0 && len(sessions) > *limit {
+		sessions = sessions[:*limit]
+	}
+	if *asJSON {
+		rows := make([]listedSession, 0, len(sessions))
+		for _, s := range sessions {
+			rows = append(rows, listedSession{
+				SessionID: s.SessionID, PluginID: s.PluginID, AgentType: s.AgentType,
+				Title: s.Title, CWD: s.CWD, StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
+				Source: s.SourceRef.Source, Status: string(s.Status),
+			})
+		}
+		printJSON(w, struct {
+			Sessions []listedSession `json:"sessions"`
+		}{rows})
+		return
+	}
+	for _, s := range sessions {
+		fmt.Fprintf(w, "%-8s %-8s %-20s %-30s %s\n", s.PluginID, s.Status, short(s.SessionID, 20), short(s.CWD, 30), s.Title)
+	}
+}
+
+// listedSession is a session without the hits: what `list --json` prints, with
+// the same field names search uses so the two can be read by one reader.
+type listedSession struct {
+	SessionID string    `json:"session_id"`
+	PluginID  string    `json:"plugin_id"`
+	AgentType string    `json:"agent_type"`
+	Title     string    `json:"title,omitempty"`
+	CWD       string    `json:"cwd,omitempty"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+	Source    string    `json:"source"`
+	Status    string    `json:"status,omitempty"`
+}
+
+// usage lists the commands. The TUI is what agentcarto does when it is given
+// nothing; the rest is for scripts and agents.
+func usage(w io.Writer) {
+	fmt.Fprint(w, `usage: agentcarto [--config FILE] [--no-cache] [command]
+
+  (no command)              launch the TUI
+  list [flags]              list sessions (--json, --cwd, --agent, --since, --limit)
+  active [flags]            list running sessions (same flags)
+  search [flags] QUERY      search sessions, printing JSON hits
+  show [flags] SESSION      print a session's outline, or the turns asked for
+  config validate           validate the config and list enabled plugins
+  plugins list              list plugins and their capabilities
+  doctor                    diagnose config, executables and storage
+  cache stats|clear         inspect or drop the local cache
+  help                      print this
+
+Run "agentcarto search -h" or "agentcarto show -h" for their flags.
+`)
+}
+
+// openCache opens the local cache unless it is switched off, degrading to no
+// cache (and saying so) rather than failing: the cache only saves work.
+func openCache(ctx context.Context, c config.Config, noCache bool) *cache.DB {
+	if noCache || !c.Cache.Enabled {
+		return nil
+	}
+	db, err := cache.Open("")
+	if err != nil {
+		// Say it out loud: silently losing the cache makes every run re-parse
+		// everything, which looks like the command being slow for no reason.
+		fmt.Fprintf(os.Stderr, "warning: cache disabled (open failed: %v)\n", err)
+		return nil
+	}
+	return db
+}
+
+func closeCache(db *cache.DB) {
+	if db != nil {
+		_ = db.Close()
+	}
+}
+
+// artifactStore hands the cache to app.BuildIndex without letting a nil *cache.DB
+// through as a non-nil interface, which would panic on first use.
+func artifactStore(db *cache.DB) app.ArtifactStore {
+	if db == nil {
+		return nil
+	}
+	return db
+}
+
+// scanSessions lists every session the plugins can see, warmed from the cache so
+// a command does not re-parse sessions that have not changed. Empty forks are
+// marked (not dropped) so each caller decides whether they belong in its answer.
+func scanSessions(ctx context.Context, a *app.App, c config.Config, db *cache.DB) []domain.Session {
+	var warm []domain.Session
+	if db != nil {
+		warm, _ = db.Load(ctx)
+	}
+	snap := a.Scan(ctx, warm, nil)
 	for _, x := range snap.Errors {
 		fmt.Fprintf(os.Stderr, "%s: %s: %v\n", x.PluginID, x.Reason, x.Err)
 	}
+	if db != nil {
+		_ = db.Save(ctx, snap.Sessions)
+		// The same housekeeping the TUI does after a scan. Without it, a machine
+		// where agentcarto is only ever called from the command line keeps every
+		// session it has ever seen and honours neither cache.max_age nor max_size.
+		failed := map[string]bool{}
+		for _, e := range snap.Errors {
+			failed[e.PluginID] = true
+		}
+		successful := map[string]bool{}
+		for _, p := range a.Catalog.Plugins {
+			successful[p.ID] = !failed[p.ID]
+		}
+		_ = db.Prune(ctx, snap.Sessions, successful, time.Duration(c.Cache.MaxAge))
+		_ = db.Enforce(ctx, int64(c.Cache.MaxSize))
+	}
+	return a.MarkEmptyForks(ctx, snap.Sessions)
 }
 
 // runTUI loads any cached sessions, runs the interactive TUI, and, if the TUI
 // returns a launch command, hands off to it after shutting the plugin host down.
 func runTUI(ctx context.Context, a *app.App, c config.Config, host *pluginhost.Hosted, noCache bool) {
 	var cached []domain.Session
-	var db *cache.DB
-	if !noCache && c.Cache.Enabled {
-		if d, err := cache.Open(""); err == nil {
-			db = d
-			defer db.Close()
-			cached, _ = db.Load(ctx)
-		} else {
-			// Degrade to running without a cache, but say so: silently losing the
-			// cache makes every launch re-parse everything.
-			fmt.Fprintf(os.Stderr, "warning: cache disabled (open failed: %v)\n", err)
-		}
+	db := openCache(ctx, c, noCache)
+	defer closeCache(db)
+	if db != nil {
+		cached, _ = db.Load(ctx)
 	}
 	if db != nil && len(cached) == 0 {
 		snap := a.Scan(ctx, nil, nil)
