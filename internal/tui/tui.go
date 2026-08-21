@@ -726,6 +726,8 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "y":
 		return m.copyTurnExchange()
+	case "x":
+		return m.exportSession()
 	case "enter", "right", "l":
 		if row, ok := m.selectedDetailRow(); ok && row.Kind == "branch" {
 			m.detailPathStack = append(m.detailPathStack, detailFrame{path: convlogic.DeepestPath(*m.detail, row.Root), label: m.branchFrameLabel(row.Root)})
@@ -1983,7 +1985,7 @@ func (m Model) detailFooter(s *domain.Session) string {
 	if m.turnSearching || m.turnQuery != "" {
 		return m.searchFooter(" Search > "+m.turnQuery, len(m.turnListHits()), m.turnSearchPos)
 	}
-	foot := " ↑↓/jk move  Enter open  y copy  o resume  c cd  / search  f fork"
+	foot := " ↑↓/jk move  Enter open  y copy  x export  o resume  c cd  / search  f fork"
 	if s.ParentSessionID != "" {
 		foot += "  p parent"
 	}
