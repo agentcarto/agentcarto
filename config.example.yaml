@@ -21,7 +21,7 @@ ui:
   default_view: time        # 一覧の既定ビュー: time | folder
 
 index:
-  max_chars_per_session: 131072  # 全文検索インデックスの1セッションあたり最大文字数
+  max_chars_per_session: 131072  # 全文検索インデックスの1セッションあたり最大バイト数（日本語なら約1/3の文字数）
 
 cache:
   enabled: true

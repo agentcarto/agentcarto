@@ -63,7 +63,7 @@ No CGO (modernc.org/sqlite is pure Go). Requires Go 1.24+ (workspace declares 1.
 
 ### Host request flow
 `cmd/agentcarto/main.go` parses global flags (`--config`, `--no-cache`) and dispatches a subcommand
-(`list`, `active`, `config`, `plugins`, `cache`, `doctor`) or, by default, launches the TUI.
+(`list`, `active`, `search`, `show`, `config`, `plugins`, `cache`, `doctor`, `help`) or, by default, launches the TUI.
 Startup: `config.Load` → `pluginhost.Launch` (starts each enabled plugin subprocess, builds a
 `plugin.Instance` whose `Impl` is the RPC client) → `app.Build` (wraps instances in a `catalog`).
 `internal/app/app.go` is the host-side facade: it routes each operation to the right plugin by
@@ -118,11 +118,15 @@ label argument) / `Event.ToolDetail` (expanded body), file edits into `Event.Cha
 tool call within a turn), and background-task notices into `EventTask`. The TUI renders these
 fields generically and must never inspect `Event.Text` with agent-specific format knowledge.
 
-### Host-side UI and search (`internal/tui`, `internal/search`)
+### Host-side UI, search and transcript (`internal/tui`, `internal/search`, `internal/transcript`)
 `internal/tui` is the Bubble Tea program (Elm-style model/update/view) for the list and detail
 screens; it calls `internal/app` for every operation and never touches plugins directly. `internal/search`
-is the in-process full-text engine over titles, working dirs, agent names, and conversation bodies.
-Both are host-only — keep agent-specific logic in plugins, not here.
+is the in-process full-text engine over titles, working dirs, agent names, and conversation bodies;
+`Index` decides which sessions match, `Hits` locates the match inside one session's turns.
+`internal/transcript` turns a parsed conversation into what a reader sees — the turns of one branch
+(`Turns`, whose `Turn.Index` is the `turn #N` both the TUI and the CLI show), the files a turn
+changed, and the Markdown rendering used by the TUI's `x` export and by the CLI.
+All three are host-only — keep agent-specific logic in plugins, not here.
 
 ## Releasing
 
