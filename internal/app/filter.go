@@ -14,7 +14,8 @@ type SessionFilter struct {
 	// compared as a cleaned path, so a trailing separator or a "." segment does
 	// not change the answer.
 	CWD string
-	// Agent keeps one agent, by plugin id ("claude") or by agent type. The two
+	// Agent keeps one agent, by plugin id ("claude"), by agent type, or by the
+	// family the two share ("copilot" for copilot-vc and copilot-jb). The three
 	// are the same for most plugins, and telling a user they differ is not worth
 	// a second flag.
 	Agent string
@@ -40,7 +41,7 @@ func FilterSessions(sessions []domain.Session, f SessionFilter) []domain.Session
 		if cwd != "" && !UnderDir(s.CWD, cwd) {
 			continue
 		}
-		if agent != "" && strings.ToLower(s.PluginID) != agent && strings.ToLower(s.AgentType) != agent {
+		if agent != "" && !isAgent(s, agent) {
 			continue
 		}
 		if !f.Since.IsZero() && s.UpdatedAt.Before(f.Since) {
@@ -49,6 +50,20 @@ func FilterSessions(sessions []domain.Session, f SessionFilter) []domain.Session
 		out = append(out, s)
 	}
 	return out
+}
+
+// isAgent reports whether the session belongs to the named agent. A name that
+// is the family of several plugins matches all of them: nobody asking for
+// "copilot" means one of its two editors and not the other, and being told to
+// write "copilot-vc" for a session the list already labels "copilot-vc" is a
+// worse answer than matching both.
+func isAgent(s domain.Session, want string) bool {
+	for _, name := range []string{strings.ToLower(s.PluginID), strings.ToLower(s.AgentType)} {
+		if name == want || strings.HasPrefix(name, want+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 // UnderDir reports whether path is dir or sits inside it. A plain string prefix

@@ -41,14 +41,26 @@ func TestFilterSessionsByAgentAndTime(t *testing.T) {
 	sessions := []domain.Session{
 		session(abs("/x"), "claude", "claude", recent),
 		session(abs("/x"), "codex", "codex", recent),
-		session(abs("/x"), "copilot-vc", "copilot", old),
+		session(abs("/x"), "copilot-vc", "copilot-vc", old),
 	}
 	if got := FilterSessions(sessions, SessionFilter{Agent: "CODEX"}); len(got) != 1 || got[0].PluginID != "codex" {
 		t.Fatalf("agent filter kept %+v", got)
 	}
-	// The agent type matches too: a copilot session is reachable by either name.
+	// The agent type matches too, and so does the family two plugins share: a
+	// copilot session is reachable by "copilot" without naming its editor.
 	if got := FilterSessions(sessions, SessionFilter{Agent: "copilot"}); len(got) != 1 || got[0].PluginID != "copilot-vc" {
-		t.Fatalf("agent type filter kept %+v", got)
+		t.Fatalf("agent family filter kept %+v", got)
+	}
+	both := append(sessions, session(abs("/x"), "copilot-jb", "copilot-jb", recent))
+	if got := FilterSessions(both, SessionFilter{Agent: "copilot"}); len(got) != 2 {
+		t.Fatalf("both copilot editors should answer to \"copilot\": %+v", got)
+	}
+	if got := FilterSessions(both, SessionFilter{Agent: "copilot-jb"}); len(got) != 1 || got[0].PluginID != "copilot-jb" {
+		t.Fatalf("naming one editor should keep only it: %+v", got)
+	}
+	// A name that is merely a prefix of another is not a family.
+	if got := FilterSessions(both, SessionFilter{Agent: "cop"}); len(got) != 0 {
+		t.Fatalf("a partial name matched: %+v", got)
 	}
 	if got := FilterSessions(sessions, SessionFilter{Since: time.Now().Add(-24 * time.Hour)}); len(got) != 2 {
 		t.Fatalf("since filter kept %d sessions", len(got))
