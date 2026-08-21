@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -49,13 +50,21 @@ func Open(path string) (*DB, error) {
 	// otherwise apply to only one connection of the pool, and SQLite serializes
 	// writers anyway, so a pool buys nothing here.
 	d.SetMaxOpenConns(1)
-	// Configure the connection (WAL + a short busy timeout) and create the schema:
+	// Configure the connection (WAL + a busy timeout that outlasts another
+	// process's write) and create the schema:
 	// sessions holds one JSON-encoded session per (plugin_id, session_id); artifacts caches
 	// derived data (e.g. parsed conversations) per (plugin_id, session_id, kind), keyed also
 	// by the session fingerprint and parser_version so stale entries are ignored on read.
 	for _, q := range []string{
+		// Patience first: switching the journal mode and creating the schema both
+		// take the write lock, so a timeout set after them would come too late.
+		// Several agentcarto processes share this file — a TUI left open, a couple of
+		// agents running "search" at once — and a writer holds the lock for as long
+		// as its transaction. A second's patience was not enough: a concurrent open
+		// would give up with SQLITE_BUSY, and the run it belonged to fell back to no
+		// cache and reparsed everything.
+		"PRAGMA busy_timeout=5000",
 		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=1000",
 		"CREATE TABLE IF NOT EXISTS sessions (plugin_id TEXT, session_id TEXT, data BLOB NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id))",
 		"CREATE TABLE IF NOT EXISTS artifacts (plugin_id TEXT, session_id TEXT, fingerprint TEXT, parser_version TEXT, kind TEXT, data BLOB NOT NULL, accessed INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,kind))",
 	} {
@@ -65,8 +74,10 @@ func Open(path string) (*DB, error) {
 		}
 	}
 	// Enforce reclaims space with incremental_vacuum, which is a no-op unless
-	// auto_vacuum=incremental. The setting only takes effect on a fresh database
-	// or after a full VACUUM, so migrate existing files once here.
+	// auto_vacuum=incremental. The setting only takes effect on an empty database
+	// or after a full VACUUM, so migrate existing files once here. On a database
+	// that holds nothing yet the VACUUM is instant, but it still takes an
+	// exclusive lock, which is why it is not left to run while others wait.
 	var av int
 	if e := d.QueryRow("PRAGMA auto_vacuum").Scan(&av); e == nil && av != 2 {
 		if _, e = d.Exec("PRAGMA auto_vacuum=incremental"); e == nil {
@@ -97,6 +108,24 @@ func (d *DB) PutArtifact(ctx context.Context, s domain.Session, kind string, v a
 	_, e = d.db.ExecContext(ctx, "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?) ON CONFLICT(plugin_id,session_id,kind) DO UPDATE SET fingerprint=excluded.fingerprint,parser_version=excluded.parser_version,data=excluded.data,accessed=excluded.accessed", s.PluginID, s.SessionID, s.Fingerprint, s.ParserVersion, kind, b, time.Now().Unix())
 	return e
 }
+
+// DropArtifactsExcept deletes cached artifacts of every other kind. An artifact
+// kind carries a version ("search-v4"), so a change to what is cached leaves the
+// previous generation behind — for sessions that still exist, nothing else ever
+// collects it, and each bump adds another copy of the whole index.
+func (d *DB) DropArtifactsExcept(ctx context.Context, kinds ...string) error {
+	if len(kinds) == 0 {
+		return nil
+	}
+	holes := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
+	args := make([]any, len(kinds))
+	for i, k := range kinds {
+		args[i] = k
+	}
+	_, e := d.db.ExecContext(ctx, "DELETE FROM artifacts WHERE kind NOT IN ("+holes+")", args...)
+	return e
+}
+
 func (d *DB) Close() error { return d.db.Close() }
 func (d *DB) Load(ctx context.Context) ([]domain.Session, error) {
 	rows, e := d.db.QueryContext(ctx, "SELECT data FROM sessions ORDER BY seen DESC")

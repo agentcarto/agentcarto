@@ -172,3 +172,37 @@ func TestOpenMigratesAutoVacuum(t *testing.T) {
 		t.Fatalf("auto_vacuum=%d want 2 (incremental)", av)
 	}
 }
+
+// A bump of the artifact kind leaves the previous generation behind: nothing
+// else deletes artifacts of a session that still exists.
+func TestDropArtifactsExcept(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	s := domain.Session{PluginID: "claude", SessionID: "s1", Fingerprint: "fp", ParserVersion: "1"}
+	for _, kind := range []string{"search-v3", "search-v4"} {
+		if err := db.PutArtifact(ctx, s, kind, map[string]string{"Text": kind}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.DropArtifactsExcept(ctx, "search-v4"); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]string
+	if db.GetArtifact(ctx, s, "search-v3", &got) {
+		t.Error("the superseded artifact survived")
+	}
+	if !db.GetArtifact(ctx, s, "search-v4", &got) || got["Text"] != "search-v4" {
+		t.Errorf("the current artifact was dropped: %v", got)
+	}
+	// Dropping nothing is a no-op rather than a table wipe.
+	if err := db.DropArtifactsExcept(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !db.GetArtifact(ctx, s, "search-v4", &got) {
+		t.Error("an empty keep list emptied the table")
+	}
+}
