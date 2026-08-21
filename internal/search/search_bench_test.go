@@ -12,6 +12,6 @@ func BenchmarkMatch(b *testing.B) {
 	idx.Set(s, "needle"+fmt.Sprint(make([]byte, 100000)), 0)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = idx.Match(s, "needle")
+		_ = idx.Match(s, NewQuery("needle"))
 	}
 }

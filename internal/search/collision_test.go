@@ -17,10 +17,10 @@ func TestIndexDistinguishesSameKeyDifferentSource(t *testing.T) {
 	i.Set(fork, "beta haystack", 7)
 
 	// Bodies do not bleed into each other.
-	if !i.Match(parent, "alpha") || i.Match(parent, "beta") {
+	if !i.Match(parent, NewQuery("alpha")) || i.Match(parent, NewQuery("beta")) {
 		t.Fatal("parent index leaked into/from fork")
 	}
-	if !i.Match(fork, "beta") || i.Match(fork, "alpha") {
+	if !i.Match(fork, NewQuery("beta")) || i.Match(fork, NewQuery("alpha")) {
 		t.Fatal("fork index leaked into/from parent")
 	}
 	// Message counts are independent too.

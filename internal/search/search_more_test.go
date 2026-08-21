@@ -41,12 +41,16 @@ func sessionAt(source string) domain.Session {
 
 func TestBuildCountsAllButTruncatesText(t *testing.T) {
 	conv := linear(
-		domain.Event{Kind: domain.EventUser, Text: "alpha"},
+		domain.Event{Kind: domain.EventUser, Text: "alpha", Prompt: "alpha"},
 		domain.Event{Kind: domain.EventAssistant, Text: "beta"},
 		domain.Event{Kind: domain.EventMeta, Text: "ignored"}, // not a counted kind
-		domain.Event{Kind: domain.EventUser, Text: "gamma"},
+		domain.Event{Kind: domain.EventUser, Text: "gamma", Prompt: "gamma"},
 	)
-	i := New(1) // tiny budget: only the first message's text is stored
+	// A budget with room for the first message and nothing after it. (It used to
+	// be 1 byte, back when the first event was written whole however large it
+	// was; the budget is a real bound now, so the fixture has to leave room for
+	// what it expects to find.)
+	i := New(len("alpha\n"))
 	s := sessionAt("/s/1")
 	if err := i.Build(context.Background(), s, fakeLoader{c: conv}); err != nil {
 		t.Fatal(err)
@@ -56,10 +60,10 @@ func TestBuildCountsAllButTruncatesText(t *testing.T) {
 	if n, ok := i.Count(s); !ok || n != 3 {
 		t.Errorf("count = %d (ok=%v), want 3", n, ok)
 	}
-	if !i.Match(s, "alpha") {
+	if !i.Match(s, NewQuery("alpha")) {
 		t.Error("first message should be searchable")
 	}
-	if i.Match(s, "gamma") {
+	if i.Match(s, NewQuery("gamma")) {
 		t.Error("text beyond MaxChars must not be indexed")
 	}
 }
@@ -93,7 +97,7 @@ func TestMatch(t *testing.T) {
 		{"missing", false},
 	}
 	for _, c := range cases {
-		if got := i.Match(s, c.q); got != c.want {
+		if got := i.Match(s, NewQuery(c.q)); got != c.want {
 			t.Errorf("Match(%q) = %v, want %v", c.q, got, c.want)
 		}
 	}

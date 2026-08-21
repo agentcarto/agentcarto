@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 )
 
@@ -32,11 +33,11 @@ func TestTurnDurationOutOfOrder(t *testing.T) {
 	}
 }
 
-// turnTime/turnEndTime return the min/max regardless of order.
+// TurnTime/turnEndTime return the min/max regardless of order.
 func TestTurnTimeEndTimeAreMinMax(t *testing.T) {
 	turn := []domain.Event{ev(ts(145)), ev(ts(100)), ev(ts(130))}
-	if got := turnTime(turn); !got.Equal(ts(100)) {
-		t.Fatalf("turnTime = %v, want %v", got, ts(100))
+	if got := transcript.TurnTime(turn); !got.Equal(ts(100)) {
+		t.Fatalf("TurnTime = %v, want %v", got, ts(100))
 	}
 	if got := turnEndTime(turn); !got.Equal(ts(145)) {
 		t.Fatalf("turnEndTime = %v, want %v", got, ts(145))

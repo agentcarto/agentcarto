@@ -6,9 +6,9 @@ import (
 	"github.com/agentcarto/agentcarto/internal/app"
 	"github.com/agentcarto/agentcarto/internal/cache"
 	searchpkg "github.com/agentcarto/agentcarto/internal/search"
+	"github.com/agentcarto/agentcarto/internal/transcript"
 	convlogic "github.com/agentcarto/core/conversation"
 	"github.com/agentcarto/core/domain"
-	"github.com/agentcarto/core/plugin"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -192,38 +192,14 @@ func (m Model) scan() tea.Cmd {
 		// point) so they can be excluded from the list. (For claude this is already
 		// determined via ForkAt during Scan.)
 		snap.Sessions = m.app.MarkEmptyForks(ctx, snap.Sessions)
-		old, oldFP := m.index, m.indexFP
-		idx := searchpkg.New(m.app.Config.Index.MaxCharsPerSession)
-		fp := make(map[string]string, len(snap.Sessions))
-		for _, s := range snap.Sessions {
-			src := s.SourceRef.Source
-			// Reuse the previous index entry for unchanged sessions (no cache lookup or parse needed).
-			if old != nil && s.Fingerprint != "" && oldFP[src] == s.Fingerprint && idx.CopyFrom(old, s) {
-				fp[src] = s.Fingerprint
-				continue
-			}
-			p, ok := m.app.Catalog.Plugin(s.PluginID)
-			if !ok {
-				continue
-			}
-			if l, ok := p.Impl.(plugin.ConversationLoader); ok {
-				var cached struct {
-					Text  string
-					Count int
-				}
-				if m.cache != nil && m.cache.GetArtifact(ctx, s, "search-v2", &cached) {
-					idx.Set(s, cached.Text, cached.Count)
-				} else if idx.Build(ctx, s, l) == nil && m.cache != nil {
-					if t, n, ok := idx.Lookup(s); ok {
-						_ = m.cache.PutArtifact(ctx, s, "search-v2", struct {
-							Text  string
-							Count int
-						}{t, n})
-					}
-				}
-				fp[src] = s.Fingerprint
-			}
+		// A nil *cache.DB must not be handed over as the interface value: it would
+		// be a non-nil ArtifactStore holding a nil pointer, and every call on it
+		// would panic.
+		var store app.ArtifactStore
+		if m.cache != nil {
+			store = m.cache
 		}
+		idx, fp := m.app.BuildIndex(ctx, snap.Sessions, store, m.index, m.indexFP)
 		return scanMsg{snap, idx, fp}
 	}
 }
@@ -240,6 +216,9 @@ func (m *Model) filter() {
 	// session order. It is the tie-breaker for folder-group ordering when the latest
 	// timestamps are equal, preserving first-seen order via a stable sort.
 	firstSeen := map[string]int{}
+	// The query is read once, not once per session: splitting it into words is
+	// the same work every time.
+	query := searchpkg.NewQuery(q)
 	for i, s := range m.sessions {
 		if s.EmptyFork {
 			continue // unstarted empty fork (same prefix as its parent): not shown in the list
@@ -247,7 +226,7 @@ func (m *Model) filter() {
 		if m.activeOnly && s.Status == "" {
 			continue
 		}
-		if q != "" && m.index != nil && !m.index.Match(s, q) {
+		if !query.Empty() && m.index != nil && !m.index.Match(s, query) {
 			continue
 		}
 		if _, ok := firstSeen[s.CWD]; !ok {
@@ -519,6 +498,9 @@ func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 		}
 		_ = m.cache.Prune(context.Background(), x.snap.Sessions, successful, time.Duration(m.app.Config.Cache.MaxAge))
 		_ = m.cache.Enforce(context.Background(), int64(m.app.Config.Cache.MaxSize))
+		// The index that was just written is the only artifact worth keeping; a
+		// previous generation of it would otherwise sit in the cache forever.
+		_ = m.cache.DropArtifactsExcept(context.Background(), app.SearchArtifactKind)
 	}
 	m.scanning = false
 	m.filter()
@@ -1228,6 +1210,7 @@ func statusMark(s domain.Session) string {
 	}
 	return strings.Repeat(" ", 8)
 }
+
 // plural renders a count with its unit, adding the "s" when there is not exactly
 // one ("1 turn", "3 turns").
 func plural(n int, unit string) string {
@@ -1269,18 +1252,6 @@ func shortCWD(s string, w int) string {
 	return runewidth.Truncate(s, left, "") + "…" + tailWidth(s, right)
 }
 
-// relCWD returns path relative to the session's working directory when it is
-// inside it; paths outside cwd (or already relative) are returned unchanged.
-func relCWD(path, cwd string) string {
-	if cwd == "" || !filepath.IsAbs(path) {
-		return path
-	}
-	rel, err := filepath.Rel(cwd, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return path
-	}
-	return rel
-}
 // absCWD resolves a change's path against the session's working directory.
 // Plugins report a mix of absolute and cwd-relative paths; opening a file needs
 // the absolute one. A relative path with no cwd to anchor it stays as it is, and
@@ -2138,9 +2109,10 @@ func (m *Model) setDetailPath(path []string) {
 	m.rebuildDetailRows(path)
 }
 
-// rebuildDetailRows builds the displayed turns (detailTurns) and rows (detailRows) from
-// path. A summary-only compact turn gets no row of its own; its » badge is carried over
-// to the adjacent turn. Rows are ordered newest-first (reverse chronological).
+// rebuildDetailRows builds the displayed turns (detailTurns) and rows (detailRows)
+// from path, newest first. Which turns are shown, their numbering and their »
+// badge come from transcript.Turns, so the list, an export and the CLI all agree
+// on what "turn #N" is; the rows add the branch entries, which are the TUI's own.
 func (m *Model) rebuildDetailRows(path []string) {
 	m.detailTurns = nil
 	m.detailRows = nil
@@ -2152,33 +2124,15 @@ func (m *Model) rebuildDetailRows(path []string) {
 	for _, id := range path {
 		active[id] = true
 	}
-	type entry struct {
-		turn  []string
-		chron int
-		badge bool
-	}
-	var entries []entry
-	carry := false
-	for ci, turn := range convlogic.TurnsOfPath(*m.detail, path) {
-		isCompact := convlogic.TurnIsCompact(*m.detail, turn)
-		if isCompact && !convlogic.TurnHasRealContent(*m.detail, turn) {
-			carry = true // summary only: emit no row, carry the badge to the next turn
-			continue
+	turns := transcript.Turns(*m.detail, path)
+	for i := len(turns) - 1; i >= 0; i-- { // newest first
+		e := turns[i]
+		if e.Index > m.detailNewestChron {
+			m.detailNewestChron = e.Index
 		}
-		entries = append(entries, entry{turn: turn, chron: ci, badge: carry || isCompact})
-		carry = false
-	}
-	if carry && len(entries) > 0 { // trailing summary-only compact -> badge the previous turn
-		entries[len(entries)-1].badge = true
-	}
-	for i := len(entries) - 1; i >= 0; i-- { // newest first
-		e := entries[i]
-		if e.chron > m.detailNewestChron {
-			m.detailNewestChron = e.chron
-		}
-		m.detailTurns = append(m.detailTurns, e.turn)
-		m.detailRows = append(m.detailRows, detailRow{Kind: "turn", Turn: e.turn, TurnIndex: e.chron, Badge: e.badge})
-		_, subs := convlogic.TurnBranches(*m.detail, e.turn, active)
+		m.detailTurns = append(m.detailTurns, e.Nodes)
+		m.detailRows = append(m.detailRows, detailRow{Kind: "turn", Turn: e.Nodes, TurnIndex: e.Index, Badge: e.Compact})
+		_, subs := convlogic.TurnBranches(*m.detail, e.Nodes, active)
 		for j, root := range subs {
 			m.detailRows = append(m.detailRows, detailRow{Kind: "branch", Root: root, LastBranch: j == len(subs)-1})
 		}
@@ -2209,6 +2163,13 @@ func (m Model) detailRowText(r detailRow) string {
 		if e.ToolName != "" {
 			b.WriteByte(' ')
 			b.WriteString(e.ToolName)
+		}
+		// The one-line argument is what the list-level search matches on (a command,
+		// a path). Leaving it out here would find a session by its tool call and
+		// then find nothing inside it.
+		if e.ToolArg != "" {
+			b.WriteByte(' ')
+			b.WriteString(e.ToolArg)
 		}
 	}
 	return strings.ToLower(b.String())
@@ -2401,7 +2362,7 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 	// plus one block per file, labeled "<op> <path>  (+a -r)" with the file's
 	// apply_patch hunks as Body (the "*** ... File:" header would repeat the
 	// label's op/path, so it is not rendered).
-	if fes := turnFileEdits(events); len(fes) > 0 {
+	if fes := transcript.FileEdits(events); len(fes) > 0 {
 		cwd := ""
 		if m.detailSession != nil {
 			cwd = m.detailSession.CWD
@@ -2411,14 +2372,14 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 			// The op/path segment is colored by op (A=green, M=yellow, D=red);
 			// the "diff-" prefix keeps per-line diff styling for the body.
 			style := "diff-mod"
-			switch fe.op() {
+			switch fe.Status() {
 			case "A":
 				style = "diff-add"
 			case "D":
 				style = "diff-del"
 			}
-			spans := []labelSpan{{fmt.Sprintf("  %s %s", fe.op(), shortCWD(relCWD(fe.Path, cwd), 80)), style}}
-			if !fe.noBody || fe.Added != 0 || fe.Removed != 0 {
+			spans := []labelSpan{{fmt.Sprintf("  %s %s", fe.Status(), shortCWD(transcript.RelCWD(fe.Path, cwd), 80)), style}}
+			if !fe.NoBody || fe.Added != 0 || fe.Removed != 0 {
 				spans = append(spans,
 					labelSpan{"  (", "plain"},
 					labelSpan{fmt.Sprintf("+%d ", fe.Added), "add"},
@@ -2430,11 +2391,11 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 			for _, sp := range spans {
 				label += sp.text
 			}
-			out = append(out, turnBlock{Sym: "*", Style: style, Label: label, LabelSpans: spans, Body: fe.body(), NoGutter: true, Path: absCWD(fe.Path, cwd)})
+			out = append(out, turnBlock{Sym: "*", Style: style, Label: label, LabelSpans: spans, Body: fe.Body(), NoGutter: true, Path: absCWD(fe.Path, cwd)})
 		}
 	}
 	for _, e := range events {
-		if e.Kind == domain.EventMeta || skipInFileSection(e) {
+		if e.Kind == domain.EventMeta || transcript.InFileSection(e) {
 			continue
 		}
 		b := eventBlock(e)
@@ -2590,6 +2551,7 @@ func (m Model) turnFullLines() []turnLine {
 	}
 	return out
 }
+
 // turnFullView renders the turn named by row, which the caller must have taken
 // from the cursor and checked to be a turn row. It takes the row rather than
 // looking it up so it cannot fall back to detailView, which would call straight
@@ -2794,11 +2756,7 @@ func (m Model) detailBodyRows() int {
 	return max(1, m.height-3)
 }
 func (m Model) turnEvents(ids []string) []domain.Event {
-	var out []domain.Event
-	for _, id := range ids {
-		out = append(out, m.detail.Nodes[id].Events...)
-	}
-	return out
+	return transcript.EventsOf(*m.detail, ids)
 }
 
 // turnRunningNow returns the current time for an in-progress turn (StatusRunning and the
@@ -2880,21 +2838,6 @@ func alignMark(s string, width int) string {
 	return icon + strings.Repeat(" ", max(0, pad)) + num
 }
 
-// turnTime returns the smallest (earliest) timestamp among a turn's events. It does not
-// depend on the events' order, guaranteeing chronological correctness (min of the times).
-func turnTime(events []domain.Event) time.Time {
-	var t time.Time
-	for _, e := range events {
-		if e.Timestamp.IsZero() {
-			continue
-		}
-		if t.IsZero() || e.Timestamp.Before(t) {
-			t = e.Timestamp
-		}
-	}
-	return t
-}
-
 // turnEndTime returns the largest (latest) timestamp among a turn's events (the max of the times).
 func turnEndTime(events []domain.Event) time.Time {
 	var t time.Time
@@ -2916,7 +2859,7 @@ func turnDuration(events []domain.Event) time.Duration {
 // the end time is max(latest event time, now), extending it live up to the present. When
 // now is zero, it stops at the latest event time (a completed turn).
 func turnElapsed(events []domain.Event, now time.Time) time.Duration {
-	a, b := turnTime(events), turnEndTime(events)
+	a, b := transcript.TurnTime(events), turnEndTime(events)
 	if !now.IsZero() && now.After(b) {
 		b = now
 	}
@@ -2944,7 +2887,7 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dd%02dh", hours/24, hours%24)
 }
 func turnSpan(events []domain.Event) string {
-	a, b := turnTime(events), turnEndTime(events)
+	a, b := transcript.TurnTime(events), turnEndTime(events)
 	if a.IsZero() {
 		return ""
 	}
@@ -2957,34 +2900,10 @@ func turnSpan(events []domain.Event) string {
 	return out
 }
 
-// turnChanges collects the turn's normalized file changes. Applied changes
-// (EventFileChange, the result) supersede requested ones (EventToolCall) in
-// the same turn, so the same edit is never counted twice.
-func turnChanges(events []domain.Event) []domain.FileChange {
-	applied := false
-	for _, e := range events {
-		if e.Kind == domain.EventFileChange && len(e.Changes) > 0 {
-			applied = true
-			break
-		}
-	}
-	var out []domain.FileChange
-	for _, e := range events {
-		if len(e.Changes) == 0 {
-			continue
-		}
-		if applied && e.Kind != domain.EventFileChange {
-			continue
-		}
-		out = append(out, e.Changes...)
-	}
-	return out
-}
-
 func editStats(events []domain.Event) (int, int, int) {
 	files := map[string]bool{}
 	added, removed := 0, 0
-	for _, fc := range turnChanges(events) {
+	for _, fc := range transcript.Changes(events) {
 		files[fc.Path] = true
 		added += fc.Added
 		removed += fc.Removed
@@ -3006,85 +2925,6 @@ func diffLineStyle(ln string) string {
 	default:
 		return "plain"
 	}
-}
-
-// fileEdit is one file's consolidated change within a turn, rendered as an
-// apply_patch body.
-type fileEdit struct {
-	Path           string
-	Op             string // "add" / "update" (default) / "delete"
-	Diff           []string
-	Added, Removed int
-	noBody         bool // aggregate-only source: no real diff body
-}
-
-// op returns the git-style status letter (A/M/D).
-func (fe fileEdit) op() string {
-	switch fe.Op {
-	case "add":
-		return "A"
-	case "delete":
-		return "D"
-	}
-	return "M"
-}
-
-// body returns the hunks to render. Bare "@@" markers carry no line numbers or
-// context, so they render as a blank line between hunks (and not at all at the
-// edges); "@@ <context>" lines are kept.
-func (fe fileEdit) body() []string {
-	out := make([]string, 0, len(fe.Diff))
-	for _, ln := range fe.Diff {
-		if ln == "@@" {
-			if len(out) > 0 && out[len(out)-1] != "" {
-				out = append(out, "")
-			}
-			continue
-		}
-		out = append(out, ln)
-	}
-	for len(out) > 0 && out[len(out)-1] == "" {
-		out = out[:len(out)-1]
-	}
-	return out
-}
-
-// turnFileEdits consolidates the turn's plugin-normalized Changes by file.
-// Files keep first-seen order; repeated edits to one file append their hunks
-// under a single entry. A change without a diff body (aggregate counts only)
-// becomes a body-less entry.
-func turnFileEdits(events []domain.Event) []fileEdit {
-	var out []fileEdit
-	idx := map[string]int{}
-	for _, fc := range turnChanges(events) {
-		i, ok := idx[fc.Path]
-		if !ok {
-			i = len(out)
-			idx[fc.Path] = i
-			out = append(out, fileEdit{Path: fc.Path, Op: fc.Op})
-		}
-		if fc.Diff != "" {
-			out[i].Diff = append(out[i].Diff, strings.Split(fc.Diff, "\n")...)
-		} else {
-			out[i].noBody = true
-		}
-		out[i].Added += fc.Added
-		out[i].Removed += fc.Removed
-	}
-	for i := range out {
-		if out[i].noBody && len(out[i].Diff) == 0 {
-			out[i].Diff = []string{"(no diff body)"}
-		}
-	}
-	return out
-}
-
-// skipInFileSection reports edit events already surfaced in the consolidated file
-// section, so turnBlocksOf omits them from the chronological block list. An
-// event without Changes stays visible in the timeline (a file_change lacking
-// them would otherwise silently render nowhere).
-func skipInFileSection(e domain.Event) bool {
-	return len(e.Changes) > 0
 }
 
 func oneLine(text string) string {

@@ -229,19 +229,6 @@ func TestEventBlockPrototypeTaskAndPseudoUser(t *testing.T) {
 	}
 }
 
-// Changes-bearing events (edit tool calls, file changes) are surfaced by the
-// consolidated file section, not the chronological block list. A file_change
-// WITHOUT Changes stays visible in the timeline instead of vanishing.
-func TestChangesBearingEventsSkipTimeline(t *testing.T) {
-	edit := domain.Event{Kind: domain.EventToolCall, ToolName: "Edit", Changes: []domain.FileChange{{Path: "a.go"}}}
-	fc := domain.Event{Kind: domain.EventFileChange, Changes: []domain.FileChange{{Path: "a.go"}}}
-	plain := domain.Event{Kind: domain.EventToolCall, ToolName: "Read", ToolArg: "/x/c.py"}
-	bare := domain.Event{Kind: domain.EventFileChange, Text: "raw"}
-	if !skipInFileSection(edit) || !skipInFileSection(fc) || skipInFileSection(plain) || skipInFileSection(bare) {
-		t.Fatalf("skipInFileSection: edit=%v fc=%v plain=%v bare=%v", skipInFileSection(edit), skipInFileSection(fc), skipInFileSection(plain), skipInFileSection(bare))
-	}
-}
-
 func TestToolCallLabelBodyPrototypeBashShell(t *testing.T) {
 	fg := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: "$ ls -la echo done", ToolDetail: "ls -la\necho done"})
 	if !strings.Contains(fg.Label, "Bash") || !strings.Contains(fg.Label, "$ ls -la echo done") || strings.Contains(fg.Label, "&") {
