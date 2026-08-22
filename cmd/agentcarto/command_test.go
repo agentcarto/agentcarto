@@ -233,6 +233,53 @@ func TestSearchCommandFillsTheLimitAfterDroppingASession(t *testing.T) {
 	}
 }
 
+// Every use of the search leaves behind a session whose only mention of the
+// query is the search itself, and each one answers that query forever after.
+// They are left out unless they are what was asked for.
+func TestSearchCommandHidesTheSessionsThatOnlyLookedItUp(t *testing.T) {
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	sessions := []domain.Session{
+		{PluginID: "claude", AgentType: "claude", SessionID: "lookup-0001", CWD: absPath("/home"), Title: "png を探して",
+			UpdatedAt: now, SourceRef: domain.SessionRef{Source: "/logs/lookup.jsonl"}},
+		{PluginID: "claude", AgentType: "claude", SessionID: "work-0002", CWD: absPath("/repo/png"), Title: "表紙の作業",
+			UpdatedAt: now.Add(-24 * time.Hour), SourceRef: domain.SessionRef{Source: "/logs/work.jsonl"}},
+	}
+	convs := map[string]domain.Conversation{
+		"/logs/lookup.jsonl": domain.NewConversation([]domain.ConvNode{{ID: "u1", Timestamp: now, Events: []domain.Event{
+			{Kind: domain.EventUser, Text: "png のセッションを探して", Prompt: "png のセッションを探して"},
+			{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: "$ agentcarto search --regex 'png|PNG'"},
+			{Kind: domain.EventAssistant, Text: "png の本命は別のセッションでした"},
+		}}}),
+		"/logs/work.jsonl": domain.NewConversation([]domain.ConvNode{{ID: "u1", Timestamp: now, Events: []domain.Event{
+			{Kind: domain.EventUser, Text: "png の表紙を見て", Prompt: "png の表紙を見て"},
+			{Kind: domain.EventToolCall, ToolName: "Read", ToolArg: "/repo/png/cover.png"},
+		}}}),
+	}
+	a, cfg := fixtureApp(sessions, convs)
+
+	got := runSearchOn(t, a, cfg, "png")
+	if len(got.Sessions) != 1 || got.Sessions[0].SessionID != "work-0002" {
+		t.Fatalf("the lookup should be left out: %+v", got.Sessions)
+	}
+	// What was left out is said out loud rather than silently missing.
+	if got.MetaSuppressed != 1 {
+		t.Errorf("meta_suppressed=%d want 1", got.MetaSuppressed)
+	}
+	// It is still counted as a match: it did match, it is just not worth listing.
+	if got.Matched != 2 {
+		t.Errorf("matched=%d want 2", got.Matched)
+	}
+
+	if got := runSearchOn(t, a, cfg, "--include-meta", "png"); len(got.Sessions) != 2 || got.MetaSuppressed != 0 {
+		t.Errorf("--include-meta should list it: %d sessions, suppressed=%d", len(got.Sessions), got.MetaSuppressed)
+	}
+
+	// A search for agentcarto itself is asking for exactly these sessions.
+	if got := runSearchOn(t, a, cfg, "agentcarto png"); len(got.Sessions) != 1 || got.Sessions[0].SessionID != "lookup-0001" {
+		t.Errorf("a search for agentcarto should find the session that ran it: %+v", got.Sessions)
+	}
+}
+
 func runShow(t *testing.T, args ...string) string {
 	t.Helper()
 	a, cfg := commandApp()

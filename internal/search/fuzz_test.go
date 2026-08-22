@@ -27,9 +27,12 @@ func FuzzHits(f *testing.F) {
 			{ID: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: text, Prompt: text}}},
 		})
 		turns := turnsOf(c)
-		hits, total := Hits(c, turns, NewQuery(query), HitOptions{Context: ctx})
-		if total < len(hits) {
-			t.Fatalf("total=%d is less than the %d hits returned", total, len(hits))
+		hits, sum := Hits(c, turns, NewQuery(query), HitOptions{Context: ctx})
+		if sum.Total < len(hits) {
+			t.Fatalf("total=%d is less than the %d hits returned", sum.Total, len(hits))
+		}
+		if sum.SelfCalls > sum.ToolCalls || sum.ToolCalls > sum.Total {
+			t.Fatalf("summary is inconsistent: %+v", sum)
 		}
 		folded := strings.Join(strings.Fields(text), " ")
 		for _, h := range hits {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/agentcarto/core/domain"
 	"github.com/agentcarto/core/plugin"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -163,6 +164,32 @@ func (i *Index) Match(s domain.Session, q Query) bool {
 	}
 	return q.matchesEither(metaText(s), i.m[id(s)].text)
 }
+
+// selfName is the command's own name. A session whose only matching tool calls
+// are calls to agentcarto searched for the subject instead of working on it,
+// and every use of the search leaves another such session behind — so the name
+// has to be recognizable here.
+const selfName = "agentcarto"
+
+// selfCall matches a tool call that ran agentcarto: the name — however it was
+// spelled on the command line, bare or as a path — followed by one of its
+// subcommands, with any global flags in between.
+//
+// The bare name is not enough. This project's own files live under directories
+// called agentcarto, so reading one would count as a lookup, and a search for
+// one of its paths would then be told there is nothing: every hit it found was
+// "a call to agentcarto". Requiring the shape of a command run is what separates
+// looking something up from working on it.
+var selfCall = regexp.MustCompile(`(^|[\s/\\])` + selfName + `(\.exe)?\s+(-{1,2}[a-z-]+\s+)*(search|show|list|active)\b`)
+
+// IsSelfQuery reports whether the query is looking for agentcarto itself. Then
+// the sessions that ran it are what is being asked for, and the rule that hides
+// them has to stand down: applied to this query it would answer that there is
+// nothing, having quietly discarded everything.
+// One term naming it is enough: "agentcarto handoff" is looking for the
+// sessions that worked on this command, and hiding the ones that ran it would
+// leave the better half of the answer out.
+func IsSelfQuery(q Query) bool { return q.present(selfName) > 0 }
 
 // metaTermScore is what a term found in the session's own fields is worth: ten
 // hits. A session whose title or working directory names what is being looked

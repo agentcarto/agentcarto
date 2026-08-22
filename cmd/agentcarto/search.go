@@ -35,8 +35,13 @@ type searchResult struct {
 	// the current directory comes up empty often enough — the work was done one
 	// directory up, or by another agent — that an empty result with no hint is
 	// misread as "this was never discussed".
-	Elsewhere int    `json:"elsewhere,omitempty"`
-	Note      string `json:"note,omitempty"`
+	Elsewhere int `json:"elsewhere,omitempty"`
+	// MetaSuppressed counts the sessions left out for having only searched for the
+	// query rather than worked on it (--include-meta keeps them). It is what was
+	// dropped while collecting --limit sessions, not every such session there is:
+	// the ones further down the order are never opened, so they cannot be counted.
+	MetaSuppressed int    `json:"meta_suppressed,omitempty"`
+	Note           string `json:"note,omitempty"`
 }
 
 type searchSession struct {
@@ -63,6 +68,10 @@ type searchSession struct {
 	// rank orders the listed sessions, and is not part of the JSON: it is a number
 	// that only means something next to the other results of the same search.
 	rank int
+	// meta says the session only ran agentcarto over the query and never worked on
+	// it. Not part of the JSON either: such a session is left out rather than
+	// labelled, and --include-meta lists it like any other.
+	meta bool
 }
 
 func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, args []string, w io.Writer) {
@@ -74,6 +83,7 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 	perSession := fs.Int("hits-per-session", 3, "most hits to list per session, newest kept (0: all of them)")
 	width := fs.Int("context", search.DefaultContext, "characters of context on either side of a hit")
 	asRegexp := fs.Bool("regex", false, `read the query as a regular expression (RE2), case-insensitive: "cache|キャッシュ"`)
+	includeMeta := fs.Bool("include-meta", false, "keep the sessions that only ran agentcarto over the query")
 	query := strings.TrimSpace(strings.Join(parseFlags(fs, args), " "))
 	if query == "" {
 		fail(fmt.Errorf("search: a query is required (agentcarto search --cwd . \"handoff\")"))
@@ -159,6 +169,13 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 			// can match it there and nowhere in a single message. Such a session
 			// has nothing to show and is dropped rather than listed empty.
 			result.Matched--
+			continue
+		}
+		if row.meta && !*includeMeta {
+			// Every use of the search leaves behind a session whose only mention of
+			// the query is the search itself, and each one answers the same query
+			// forever after. Left in, they crowd out the work they were looking for.
+			result.MetaSuppressed++
 			continue
 		}
 		row.rank = row.TotalHits + search.MetaScore(s, q)
@@ -298,13 +315,16 @@ func sessionHits(ctx context.Context, a *app.App, s domain.Session, q search.Que
 		}
 		return row
 	}
-	hits, total := search.Hits(*conv, transcript.Turns(*conv, conv.ActivePath()), q,
+	hits, sum := search.Hits(*conv, transcript.Turns(*conv, conv.ActivePath()), q,
 		search.HitOptions{Max: max, Context: width})
-	if total > 0 {
+	if sum.Total > 0 {
 		row.Match = "content"
 		row.Hits = hits
-		row.TotalHits = total
+		row.TotalHits = sum.Total
 	}
+	// A search for agentcarto itself is asking for these sessions, so it is not
+	// told there are none.
+	row.meta = sum.OnlyRanAgentcarto() && !search.IsSelfQuery(q)
 	return row
 }
 

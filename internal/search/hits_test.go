@@ -21,7 +21,8 @@ func reply(text string) domain.Event {
 }
 
 func hitsOf(c domain.Conversation, query string, o HitOptions) ([]Hit, int) {
-	return Hits(c, transcript.Turns(c, c.ActivePath()), NewQuery(query), o)
+	hits, sum := Hits(c, transcript.Turns(c, c.ActivePath()), NewQuery(query), o)
+	return hits, sum.Total
 }
 
 func TestHitsCarryTheTurnNumberTheTurnViewShows(t *testing.T) {
@@ -125,8 +126,8 @@ func TestHitsOfNothing(t *testing.T) {
 	if hits, total := hitsOf(c, "absent", HitOptions{}); hits != nil || total != 0 {
 		t.Fatalf("a query that is not there: %v %d", hits, total)
 	}
-	if hits, total := Hits(domain.Conversation{}, nil, NewQuery("hello"), HitOptions{}); hits != nil || total != 0 {
-		t.Fatalf("an empty conversation: %v %d", hits, total)
+	if hits, sum := Hits(domain.Conversation{}, nil, NewQuery("hello"), HitOptions{}); hits != nil || sum.Total != 0 {
+		t.Fatalf("an empty conversation: %v %d", hits, sum.Total)
 	}
 }
 
@@ -186,9 +187,9 @@ func TestHitsWithARegexpQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hits, total := Hits(c, transcript.Turns(c, c.ActivePath()), q, HitOptions{Context: 2})
-	if total != 2 || len(hits) != 2 {
-		t.Fatalf("total=%d hits=%d", total, len(hits))
+	hits, sum := Hits(c, transcript.Turns(c, c.ActivePath()), q, HitOptions{Context: 2})
+	if sum.Total != 2 || len(hits) != 2 {
+		t.Fatalf("total=%d hits=%d", sum.Total, len(hits))
 	}
 	if !strings.Contains(hits[0].Snippet, "キャッシュ") || !strings.Contains(hits[1].Snippet, "cache") {
 		t.Fatalf("snippets=%q, %q", hits[0].Snippet, hits[1].Snippet)
@@ -196,5 +197,115 @@ func TestHitsWithARegexpQuery(t *testing.T) {
 	// The snippet is cut around the match, not from the start of the message.
 	if strings.HasPrefix(hits[1].Snippet, "cache") == false && !strings.HasPrefix(hits[1].Snippet, "…") {
 		t.Fatalf("snippet=%q", hits[1].Snippet)
+	}
+}
+
+func call(name, arg string) domain.Event {
+	return domain.Event{Kind: domain.EventToolCall, ToolName: name, ToolArg: arg}
+}
+
+func summaryOf(c domain.Conversation, query string) Summary {
+	_, sum := Hits(c, transcript.Turns(c, c.ActivePath()), NewQuery(query), HitOptions{})
+	return sum
+}
+
+// A session whose only matching tool call ran agentcarto looked the subject up.
+// One that ran anything else — read a file, built something — worked on it, and
+// so did one that never called a tool at all.
+func TestSummaryTellsALookupFromWork(t *testing.T) {
+	lookup := domain.NewConversation([]domain.ConvNode{
+		node("u1", "", prompt("png の話を探して")),
+		node("a1", "u1", call("Bash", "$ agentcarto search --regex 'png|PNG'"),
+			reply("png の本命は 57cdf262 でした")),
+	})
+	sum := summaryOf(lookup, "png")
+	if sum.Total != 3 || sum.ToolCalls != 1 || sum.SelfCalls != 1 {
+		t.Fatalf("summary=%+v want 3 hits, 1 tool call, 1 of them agentcarto", sum)
+	}
+	if !sum.OnlyRanAgentcarto() {
+		t.Error("a session that only ran the search should be recognized as one")
+	}
+
+	work := domain.NewConversation([]domain.ConvNode{
+		node("u1", "", prompt("png の表紙を見て")),
+		node("a1", "u1", call("Read", "/repo/png/cover.png"), reply("見ました")),
+	})
+	if sum := summaryOf(work, "png"); sum.OnlyRanAgentcarto() || sum.SelfCalls != 0 {
+		t.Errorf("work was taken for a lookup: %+v", sum)
+	}
+
+	// This project's own files live under directories called agentcarto. Reading
+	// one is work on the command, not a lookup with it — and if it counted, a
+	// search for one of these paths would be told there is nothing.
+	onItself := domain.NewConversation([]domain.ConvNode{
+		node("u1", "", prompt("show.go を直す"),
+			call("Read", "/home/ubuntu/repo/agentcarto/agentcarto/cmd/agentcarto/show.go")),
+	})
+	if sum := summaryOf(onItself, "cmd/agentcarto/show.go"); sum.OnlyRanAgentcarto() {
+		t.Errorf("reading a file under an agentcarto directory was taken for a lookup: %+v", sum)
+	}
+
+	// However the command was spelled, running it is a lookup.
+	for _, arg := range []string{
+		"$ agentcarto search --regex 'png|PNG'",
+		"$ /home/ubuntu/repo/agentcarto/agentcarto/bin/agentcarto search png",
+		"$ agentcarto --no-cache list --cwd /repo/png",
+		"$ timeout 900 agentcarto show 57cdf262 | grep png",
+	} {
+		c := domain.NewConversation([]domain.ConvNode{node("u1", "", call("Bash", arg))})
+		if sum := summaryOf(c, "png"); !sum.OnlyRanAgentcarto() {
+			t.Errorf("%q was not recognized as running agentcarto: %+v", arg, sum)
+		}
+	}
+	// Naming the directory is not running the command.
+	for _, arg := range []string{
+		"$ cd /home/ubuntu/repo/agentcarto && make check",
+		"$ grep -rn png /home/ubuntu/repo/agentcarto/",
+	} {
+		c := domain.NewConversation([]domain.ConvNode{node("u1", "", call("Bash", arg))})
+		if sum := summaryOf(c, "png"); sum.SelfCalls != 0 {
+			t.Errorf("%q was counted as running agentcarto: %+v", arg, sum)
+		}
+	}
+
+	// One agentcarto call among others is a session that did something else too.
+	mixed := domain.NewConversation([]domain.ConvNode{
+		node("u1", "", call("Bash", "$ agentcarto search png"), call("Read", "/repo/png/cover.png")),
+	})
+	if summaryOf(mixed, "png").OnlyRanAgentcarto() {
+		t.Error("a session that also read a file is not a lookup")
+	}
+
+	// Talking about a subject is not searching for it.
+	talkOnly := domain.NewConversation([]domain.ConvNode{
+		node("u1", "", prompt("png は可逆圧縮"), reply("そうですね")),
+	})
+	if summaryOf(talkOnly, "png").OnlyRanAgentcarto() {
+		t.Error("a session with no matching tool call is not a lookup")
+	}
+}
+
+// Looking for agentcarto itself is asking for the sessions that ran it, so the
+// rule that hides them stands down.
+func TestIsSelfQuery(t *testing.T) {
+	for _, q := range []string{"agentcarto", "agentcarto search", "AgentCarto"} {
+		if !IsSelfQuery(NewQuery(q)) {
+			t.Errorf("%q should be recognized as a search for agentcarto", q)
+		}
+	}
+	// The search matches on substrings, so a prefix of the name finds the same
+	// sessions and counts as the same question.
+	if !IsSelfQuery(NewQuery("agentcart")) {
+		t.Error("a prefix of the name finds the same sessions and should count")
+	}
+	if IsSelfQuery(NewQuery("png キャッシュ")) {
+		t.Error("an unrelated query should not count")
+	}
+	re, err := NewRegexpQuery("agent(carto|smith)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsSelfQuery(re) {
+		t.Error("a pattern that matches the name should count")
 	}
 }

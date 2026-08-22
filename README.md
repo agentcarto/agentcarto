@@ -169,6 +169,7 @@ which is how a two-turn session can report a hundred of them.
 | `--hits-per-session N` | most hits per session (default 3, newest kept) |
 | `--context N` | characters of context around a hit (default 120) |
 | `--regex` | read the query as a regular expression instead of words |
+| `--include-meta` | keep the sessions that only ran `agentcarto` over the query (see below) |
 
 `show` prints Markdown, and prints the **outline** — header, then one line per turn with its
 number, time, **size** and headline — unless asked for turns. The size is what that turn would
@@ -189,6 +190,15 @@ An id can be given as a prefix (`8f3a2b1c`), the way the list and the search res
 A search narrowed with `--cwd` that finds nothing reports how many sessions match outside the
 filter and where they are, with the directory containing yours named first — the work is often
 one level up, and an unexplained zero reads as "never discussed".
+
+**Sessions that only searched are left out.** Using `search` creates a session whose mention of
+the query is the search itself, and it answers that same query from then on — including the one
+running right now, which is why the search that found nothing keeps finding itself. A session
+whose matching tool calls are *all* calls to `agentcarto` is left out, and `meta_suppressed`
+says how many were (the ones dropped while collecting `--limit` sessions — the rest are never
+opened, so they cannot be counted). One matching call to anything else — a file that was read,
+a command that was run — and the session stays. `--include-meta` lists them like any other, and
+a query that names `agentcarto` switches the rule off, since those sessions are then the answer.
 
 #### Teaching Claude Code to use it
 

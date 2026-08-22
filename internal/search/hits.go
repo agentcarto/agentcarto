@@ -33,11 +33,33 @@ type HitOptions struct {
 // readable.
 const DefaultContext = 120
 
+// Summary counts what the query was found in across a whole session, of which
+// Hits returns only the newest few. It is what a caller needs to tell a session
+// that worked on the subject from one that only looked it up.
+type Summary struct {
+	// Total is how many events hold the query.
+	Total int
+	// ToolCalls is how many of those events are tool calls — a command that was
+	// run, a file that was read. A call that carries file changes is not counted
+	// here: it is indexed as the paths it changed, which is work, not a lookup.
+	ToolCalls int
+	// SelfCalls is how many of those tool calls ran agentcarto itself.
+	SelfCalls int
+}
+
+// OnlyRanAgentcarto reports that every tool call the query was found in was a
+// call to agentcarto. Such a session looked the subject up rather than working
+// on it: the search that found it, and the conversation about what it returned.
+// A session with no matching tool call at all is not one of these — talking
+// about a subject is not the same as searching for it.
+func (s Summary) OnlyRanAgentcarto() bool { return s.ToolCalls > 0 && s.SelfCalls == s.ToolCalls }
+
 // Hits locates a query inside a session's turns and returns the newest Max of
-// them in chronological order, along with the number of matching events found
-// (so a caller can say how many it is not showing). An event that holds the
-// query more than once is one hit, cut around its first occurrence, and a query
-// of several terms hits an event holding any one of them.
+// them in chronological order, along with a Summary of everything it found (so
+// a caller can say how many it is not showing, and what kind of session it is
+// looking at). An event that holds the query more than once is one hit, cut
+// around its first occurrence, and a query of several terms hits an event
+// holding any one of them.
 //
 // What counts as searchable is IndexText, the same definition the index is built
 // from: a message, a task's report, or a tool call's name and one-line argument.
@@ -45,9 +67,9 @@ const DefaultContext = 120
 // be hit here too, even though a rendered transcript leaves them out. Searching more than the index does would
 // produce hits in sessions the index cannot find in the first place, which reads
 // as the search being unreliable rather than as the limitation it is.
-func Hits(c domain.Conversation, turns []transcript.Turn, q Query, o HitOptions) (hits []Hit, total int) {
+func Hits(c domain.Conversation, turns []transcript.Turn, q Query, o HitOptions) (hits []Hit, sum Summary) {
 	if q.Empty() {
-		return nil, 0
+		return nil, Summary{}
 	}
 	ctx := o.Context
 	if ctx <= 0 {
@@ -67,7 +89,15 @@ func Hits(c domain.Conversation, turns []transcript.Turn, q Query, o HitOptions)
 				continue
 			}
 			at := utf8.RuneCountInString(folded[:from])
-			total++
+			sum.Total++
+			// A call carrying file changes is indexed as the paths it changed, so it
+			// is counted as the edit it is and not as a call that was made.
+			if e.Kind == domain.EventToolCall && len(e.Changes) == 0 {
+				sum.ToolCalls++
+				if selfCall.MatchString(folded) {
+					sum.SelfCalls++
+				}
+			}
 			hits = append(hits, Hit{
 				Turn:      t.Index + 1,
 				Kind:      e.Kind,
@@ -79,7 +109,7 @@ func Hits(c domain.Conversation, turns []transcript.Turn, q Query, o HitOptions)
 	if o.Max > 0 && len(hits) > o.Max {
 		hits = hits[len(hits)-o.Max:] // the newest ones: a session's latest turns are what a reader is usually after
 	}
-	return hits, total
+	return hits, sum
 }
 
 // snippet cuts the text around a match down to one line: the match plus ctx
