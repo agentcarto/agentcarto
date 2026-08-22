@@ -31,12 +31,18 @@ func (l *loaderStub) LoadConversation(_ context.Context, _ domain.SessionRef) (*
 }
 
 // storeStub is an in-memory ArtifactStore holding the JSON-ish payload by kind.
+// Blobs are kept apart because they are whole conversations rather than the
+// index payload, and because what a test usually asks is whether one was
+// written at all.
 type storeStub struct {
 	m          map[string]indexArtifact
+	blobs      map[string]any
 	gets, puts int
 }
 
-func newStore() *storeStub { return &storeStub{m: map[string]indexArtifact{}} }
+func newStore() *storeStub {
+	return &storeStub{m: map[string]indexArtifact{}, blobs: map[string]any{}}
+}
 
 func (s *storeStub) key(x domain.Session, kind string) string {
 	return strings.Join([]string{x.PluginID, x.SessionID, x.Fingerprint, kind}, "|")
@@ -53,6 +59,14 @@ func (s *storeStub) GetArtifact(_ context.Context, x domain.Session, kind string
 func (s *storeStub) PutArtifact(_ context.Context, x domain.Session, kind string, v any) error {
 	s.puts++
 	s.m[s.key(x, kind)] = v.(indexArtifact)
+	return nil
+}
+func (s *storeStub) HasArtifact(_ context.Context, x domain.Session, kind string) bool {
+	_, ok := s.blobs[s.key(x, kind)]
+	return ok
+}
+func (s *storeStub) PutBlob(_ context.Context, x domain.Session, kind string, v any) error {
+	s.blobs[s.key(x, kind)] = v
 	return nil
 }
 
@@ -137,6 +151,50 @@ func TestIndexArtifactFormatIsFixed(t *testing.T) {
 	}
 	if got, want := string(b), `{"Text":"folded text","Count":3}`; got != want {
 		t.Fatalf("artifact JSON=%s want %s", got, want)
+	}
+}
+
+// The conversation is kept so a session can outlive its log. The catch is that
+// an already-indexed session is never parsed again, so storing it only "when a
+// conversation happens to be loaded" would store nothing at all for every
+// session already in the cache — and that would only be discovered the day a log
+// was deleted and could not be read back.
+func TestBuildIndexKeepsTheConversation(t *testing.T) {
+	l := &loaderStub{text: "handoff order"}
+	a := indexApp(l)
+	a.Config.Cache.CacheConversations = true
+	store := newStore()
+	s := indexSession()
+
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	if len(store.blobs) != 1 {
+		t.Fatalf("the conversation should have been stored: %d blobs", len(store.blobs))
+	}
+
+	// Indexed and stored: there is nothing left to parse it for.
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	if l.loads != 1 {
+		t.Errorf("loads=%d want 1: neither the index nor the conversation was missing", l.loads)
+	}
+
+	// Indexed but not stored — which is what every existing session looks like the
+	// first time this runs. The session is parsed again for the conversation alone.
+	store.blobs = map[string]any{}
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	if l.loads != 2 || len(store.blobs) != 1 {
+		t.Errorf("an indexed session with no stored conversation should be parsed for it: loads=%d blobs=%d", l.loads, len(store.blobs))
+	}
+}
+
+// The setting has been in the configuration since the beginning without doing
+// anything. Now that it does, off has to mean off.
+func TestBuildIndexHonoursCacheConversations(t *testing.T) {
+	l := &loaderStub{text: "handoff"}
+	a := indexApp(l) // cache_conversations defaults to false in this fixture
+	store := newStore()
+	a.BuildIndex(context.Background(), []domain.Session{indexSession()}, store, nil, nil)
+	if len(store.blobs) != 0 {
+		t.Errorf("nothing should be stored when the setting is off: %d blobs", len(store.blobs))
 	}
 }
 

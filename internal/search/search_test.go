@@ -1,7 +1,6 @@
 package search
 
 import (
-	"context"
 	"github.com/agentcarto/core/domain"
 	"strings"
 	"testing"
@@ -40,9 +39,7 @@ func TestIndexCoversToolCalls(t *testing.T) {
 		{Kind: domain.EventToolResult, Text: "output only"},
 	}}})
 	i := New(1 << 16)
-	if err := i.Build(context.Background(), domain.Session{}, fakeLoader{c: &c}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(domain.Session{}, c)
 	s := domain.Session{}
 	for _, want := range []string{"git push", "bash", "やって"} {
 		if !i.Match(s, NewQuery(want)) {
@@ -71,9 +68,7 @@ func TestIndexCountsEveryMessagePastTheCap(t *testing.T) {
 	}
 	c := domain.NewConversation([]domain.ConvNode{{ID: "n1", Events: events}})
 	i := New(16) // room for one message at most
-	if err := i.Build(context.Background(), domain.Session{}, fakeLoader{c: &c}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(domain.Session{}, c)
 	if n, _ := i.Count(domain.Session{}); n != 10 {
 		t.Errorf("count=%d want 10", n)
 	}
@@ -89,9 +84,7 @@ func TestMatchRequiresEveryTerm(t *testing.T) {
 	}}})
 	i := New(1 << 16)
 	s := domain.Session{Title: "セッション整理", PluginID: "claude"}
-	if err := i.Build(context.Background(), s, fakeLoader{c: &c}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(s, c)
 	for _, q := range []string{"fork relocate", "relocate fork", "  fork   relocate  ", "fork"} {
 		if !i.Match(s, NewQuery(q)) {
 			t.Errorf("query %q should match", q)
@@ -115,9 +108,7 @@ func TestIndexCutsLongToolArguments(t *testing.T) {
 	}}})
 	i := New(1 << 16)
 	s := domain.Session{}
-	if err := i.Build(context.Background(), s, fakeLoader{c: &c}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(s, c)
 	if !i.Match(s, NewQuery("cat > note.md")) {
 		t.Error("the front of the command should stay searchable")
 	}
@@ -140,9 +131,7 @@ func TestIndexBudgetBoundsASingleHugeEvent(t *testing.T) {
 	}}})
 	i := New(4096)
 	s := domain.Session{}
-	if err := i.Build(context.Background(), s, fakeLoader{c: &c}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(s, c)
 	text, _, _ := i.Lookup(s)
 	if len(text) > 4096+8 { // the budget, plus the newline of the last event
 		t.Fatalf("indexed %d bytes for a 4096-byte budget", len(text))
@@ -172,9 +161,7 @@ func TestIndexFollowsWhatATranscriptShows(t *testing.T) {
 	}}})
 	i := New(1 << 16)
 	s := domain.Session{}
-	if err := i.Build(context.Background(), s, fakeLoader{c: &c}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(s, c)
 	for _, want := range []string{"直して", "internal/tui/tui.go", "cmd/agentcarto/show.go"} {
 		if !i.Match(s, NewQuery(want)) {
 			t.Errorf("index should hold %q", want)
@@ -201,9 +188,7 @@ func TestRegexpQueryMatchesEitherSpelling(t *testing.T) {
 	}}})
 	i := New(1 << 16)
 	s := domain.Session{Title: "t", PluginID: "claude"}
-	if err := i.Build(context.Background(), s, fakeLoader{c: &c}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(s, c)
 	q, err := NewRegexpQuery("cache|キャッシュ")
 	if err != nil {
 		t.Fatal(err)
@@ -252,9 +237,7 @@ func scored(t *testing.T, s domain.Session, text string, q Query) int {
 		{Kind: domain.EventAssistant, Text: text},
 	}}})
 	i := New(1 << 16)
-	if err := i.Build(context.Background(), s, fakeLoader{c: &c}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(s, c)
 	return i.Score(s, q)
 }
 

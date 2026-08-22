@@ -1,9 +1,7 @@
 package search
 
 import (
-	"context"
 	"github.com/agentcarto/core/domain"
-	"github.com/agentcarto/core/plugin"
 	"regexp"
 	"strings"
 	"unicode"
@@ -53,11 +51,11 @@ func cut(s string, n int) string {
 }
 func fold(s string) string { return strings.Map(unicode.ToLower, s) }
 
-func (i *Index) Build(ctx context.Context, s domain.Session, l plugin.ConversationLoader) error {
-	c, e := l.LoadConversation(ctx, s.SourceRef)
-	if e != nil {
-		return e
-	}
+// Add indexes a conversation the caller has already loaded. Loading is the
+// caller's business because one parse now serves two purposes — the index and
+// the cached copy of the conversation — and a session is expensive enough to
+// parse that doing it twice would be felt.
+func (i *Index) Add(s domain.Session, c domain.Conversation) {
 	var b strings.Builder
 	count := 0
 	for _, nid := range c.ActivePath() {
@@ -78,7 +76,6 @@ func (i *Index) Build(ctx context.Context, s domain.Session, l plugin.Conversati
 		}
 	}
 	i.m[id(s)] = entry{fold(b.String()), count}
-	return nil
 }
 
 // toolTextLimit is how much of a tool call is indexed, in runes.

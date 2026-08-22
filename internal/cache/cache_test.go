@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,8 +175,11 @@ func TestOpenMigratesAutoVacuum(t *testing.T) {
 }
 
 // A bump of the artifact kind leaves the previous generation behind: nothing
-// else deletes artifacts of a session that still exists.
-func TestDropArtifactsExcept(t *testing.T) {
+// else deletes artifacts of a session that still exists. What must survive the
+// sweep is a kind of another name — an older agentcarto sharing this cache would
+// otherwise delete the conversation, which is the one artifact that cannot be
+// rebuilt.
+func TestDropSupersededArtifacts(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "cache.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -183,12 +187,12 @@ func TestDropArtifactsExcept(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 	s := domain.Session{PluginID: "claude", SessionID: "s1", Fingerprint: "fp", ParserVersion: "1"}
-	for _, kind := range []string{"search-v3", "search-v4"} {
+	for _, kind := range []string{"search-v3", "search-v4", "conversation-v1", "unversioned"} {
 		if err := db.PutArtifact(ctx, s, kind, map[string]string{"Text": kind}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := db.DropArtifactsExcept(ctx, "search-v4"); err != nil {
+	if err := db.DropSupersededArtifacts(ctx, "search-v4"); err != nil {
 		t.Fatal(err)
 	}
 	var got map[string]string
@@ -198,11 +202,87 @@ func TestDropArtifactsExcept(t *testing.T) {
 	if !db.GetArtifact(ctx, s, "search-v4", &got) || got["Text"] != "search-v4" {
 		t.Errorf("the current artifact was dropped: %v", got)
 	}
-	// Dropping nothing is a no-op rather than a table wipe.
-	if err := db.DropArtifactsExcept(ctx); err != nil {
+	// A kind this sweep was not told about is none of its business.
+	for _, kind := range []string{"conversation-v1", "unversioned"} {
+		if !db.GetArtifact(ctx, s, kind, &got) {
+			t.Errorf("%s was deleted by a sweep of another kind", kind)
+		}
+	}
+	// Sweeping nothing is a no-op rather than a table wipe.
+	if err := db.DropSupersededArtifacts(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if !db.GetArtifact(ctx, s, "search-v4", &got) {
-		t.Error("an empty keep list emptied the table")
+		t.Error("an empty list emptied the table")
+	}
+}
+
+// A conversation is stored compressed, because it is the size of the log it was
+// parsed from and the cache now keeps one for every session on the machine.
+func TestBlobRoundTripAndCompression(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1", Fingerprint: "fp1", ParserVersion: "1"}
+
+	// Text that compresses, which is what a conversation is: the same words over
+	// and over, in two languages.
+	long := strings.Repeat("handoff の順序はプラグインを先に落とすこと。 ", 200)
+	c := domain.NewConversation([]domain.ConvNode{{ID: "n1", Events: []domain.Event{
+		{Kind: domain.EventUser, Text: long, Prompt: long},
+	}}})
+	if d.HasArtifact(ctx, s, "conversation-v1") {
+		t.Fatal("nothing has been stored yet")
+	}
+	if e := d.PutBlob(ctx, s, "conversation-v1", &c); e != nil {
+		t.Fatal(e)
+	}
+	if !d.HasArtifact(ctx, s, "conversation-v1") {
+		t.Error("HasArtifact should see what PutBlob wrote")
+	}
+
+	var got domain.Conversation
+	if !d.GetBlob(ctx, s, "conversation-v1", &got) {
+		t.Fatal("the conversation should read back")
+	}
+	if len(got.Nodes) != 1 || got.Nodes["n1"].Events[0].Text != long {
+		t.Errorf("the conversation did not survive the round trip: %+v", got)
+	}
+
+	var stored int
+	if e := d.db.QueryRow("SELECT length(data) FROM artifacts WHERE session_id='s1'").Scan(&stored); e != nil {
+		t.Fatal(e)
+	}
+	if stored > len(long)/4 {
+		t.Errorf("stored %d bytes for %d bytes of text: it is not being compressed", stored, len(long))
+	}
+}
+
+// An artifact belongs to one version of a session. A session that changed
+// underneath must not read back what was written for the old one — the whole
+// point of keeping the fingerprint on the row.
+func TestBlobIsTiedToTheSessionVersion(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1", Fingerprint: "fp1", ParserVersion: "1"}
+	c := domain.NewConversation([]domain.ConvNode{{ID: "n1"}})
+	if e := d.PutBlob(ctx, s, "conversation-v1", &c); e != nil {
+		t.Fatal(e)
+	}
+	changed := s
+	changed.Fingerprint = "fp2"
+	if d.HasArtifact(ctx, changed, "conversation-v1") {
+		t.Error("a changed session should not see the old artifact")
+	}
+	var got domain.Conversation
+	if d.GetBlob(ctx, changed, "conversation-v1", &got) {
+		t.Error("a changed session should not read the old artifact")
+	}
+	// What PutArtifact wrote is not a blob and must not be read as one.
+	if e := d.PutArtifact(ctx, s, "plain", map[string]string{"a": "b"}); e != nil {
+		t.Fatal(e)
+	}
+	var any map[string]string
+	if d.GetBlob(ctx, s, "plain", &any) {
+		t.Error("uncompressed bytes should not decode as a blob")
 	}
 }

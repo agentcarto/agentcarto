@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -105,25 +107,82 @@ func (d *DB) PutArtifact(ctx context.Context, s domain.Session, kind string, v a
 	if e != nil {
 		return e
 	}
-	_, e = d.db.ExecContext(ctx, "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?) ON CONFLICT(plugin_id,session_id,kind) DO UPDATE SET fingerprint=excluded.fingerprint,parser_version=excluded.parser_version,data=excluded.data,accessed=excluded.accessed", s.PluginID, s.SessionID, s.Fingerprint, s.ParserVersion, kind, b, time.Now().Unix())
+	return d.put(ctx, s, kind, b)
+}
+
+// put writes the bytes of one artifact, whatever they are. The row is keyed by
+// (plugin, session, kind) and carries the fingerprint and parser version the
+// bytes were made from, so a session that changed underneath never reads back a
+// stale artifact.
+func (d *DB) put(ctx context.Context, s domain.Session, kind string, b []byte) error {
+	_, e := d.db.ExecContext(ctx, "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?) ON CONFLICT(plugin_id,session_id,kind) DO UPDATE SET fingerprint=excluded.fingerprint,parser_version=excluded.parser_version,data=excluded.data,accessed=excluded.accessed", s.PluginID, s.SessionID, s.Fingerprint, s.ParserVersion, kind, b, time.Now().Unix())
 	return e
 }
 
-// DropArtifactsExcept deletes cached artifacts of every other kind. An artifact
-// kind carries a version ("search-v4"), so a change to what is cached leaves the
-// previous generation behind — for sessions that still exist, nothing else ever
-// collects it, and each bump adds another copy of the whole index.
-func (d *DB) DropArtifactsExcept(ctx context.Context, kinds ...string) error {
-	if len(kinds) == 0 {
-		return nil
+// PutBlob stores a value the way PutArtifact does, gzipped. It is for the one
+// artifact that is the size of the log it came from — the conversation itself —
+// where keeping the JSON as it is would make the cache as large as every log on
+// the machine put together.
+func (d *DB) PutBlob(ctx context.Context, s domain.Session, kind string, v any) error {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if e := json.NewEncoder(zw).Encode(v); e != nil {
+		return e
 	}
-	holes := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
-	args := make([]any, len(kinds))
-	for i, k := range kinds {
-		args[i] = k
+	if e := zw.Close(); e != nil {
+		return e
 	}
-	_, e := d.db.ExecContext(ctx, "DELETE FROM artifacts WHERE kind NOT IN ("+holes+")", args...)
-	return e
+	return d.put(ctx, s, kind, buf.Bytes())
+}
+
+// GetBlob reads back what PutBlob wrote (ok=false if it is not there, was
+// written for a different version of the session, or cannot be read).
+func (d *DB) GetBlob(ctx context.Context, s domain.Session, kind string, dst any) bool {
+	var b []byte
+	if d.db.QueryRowContext(ctx, "SELECT data FROM artifacts WHERE plugin_id=? AND session_id=? AND fingerprint=? AND parser_version=? AND kind=?", s.PluginID, s.SessionID, s.Fingerprint, s.ParserVersion, kind).Scan(&b) != nil {
+		return false
+	}
+	zr, e := gzip.NewReader(bytes.NewReader(b))
+	if e != nil {
+		return false
+	}
+	defer zr.Close()
+	if json.NewDecoder(zr).Decode(dst) != nil {
+		return false
+	}
+	_, _ = d.db.ExecContext(ctx, "UPDATE artifacts SET accessed=? WHERE plugin_id=? AND session_id=? AND kind=?", time.Now().Unix(), s.PluginID, s.SessionID, kind)
+	return true
+}
+
+// HasArtifact reports whether an artifact of this kind is stored for this exact
+// version of the session. It answers without reading the bytes, which is what a
+// caller deciding whether to parse a session needs to know.
+func (d *DB) HasArtifact(ctx context.Context, s domain.Session, kind string) bool {
+	var one int
+	return d.db.QueryRowContext(ctx, "SELECT 1 FROM artifacts WHERE plugin_id=? AND session_id=? AND fingerprint=? AND parser_version=? AND kind=?", s.PluginID, s.SessionID, s.Fingerprint, s.ParserVersion, kind).Scan(&one) == nil
+}
+
+// DropSupersededArtifacts deletes the earlier generations of the kinds given. A
+// kind is "<name>-v<n>", and a change to what is cached leaves the previous
+// generation behind: nothing reads it again, and each bump would otherwise add
+// another copy of the whole index.
+//
+// Only the same name is touched. Deleting every kind that was not named — which
+// is what this did — means an older agentcarto sharing this cache silently
+// erases a kind it has never heard of. That is survivable for the index, which
+// is rebuilt by reparsing, and not survivable for the conversation, which is the
+// only copy left once its log is deleted.
+func (d *DB) DropSupersededArtifacts(ctx context.Context, kinds ...string) error {
+	for _, k := range kinds {
+		name, _, ok := strings.Cut(k, "-v")
+		if !ok {
+			continue // not a versioned kind: there is no generation to compare with
+		}
+		if _, e := d.db.ExecContext(ctx, "DELETE FROM artifacts WHERE kind LIKE ? AND kind <> ?", name+"-v%", k); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 func (d *DB) Close() error { return d.db.Close() }

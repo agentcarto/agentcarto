@@ -142,7 +142,7 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 	idx, _ := a.BuildIndex(ctx, sessions, artifactStore(db), nil, nil)
 	if db != nil {
 		// Drop a previous generation of the index, which nothing else collects.
-		_ = db.DropArtifactsExcept(ctx, app.SearchArtifactKind)
+		_ = db.DropSupersededArtifacts(ctx, app.SearchArtifactKind, app.ConversationArtifactKind)
 	}
 	var matched []domain.Session
 	for _, s := range sessions {

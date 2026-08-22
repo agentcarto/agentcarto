@@ -500,7 +500,7 @@ func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 		_ = m.cache.Enforce(context.Background(), int64(m.app.Config.Cache.MaxSize))
 		// The index that was just written is the only artifact worth keeping; a
 		// previous generation of it would otherwise sit in the cache forever.
-		_ = m.cache.DropArtifactsExcept(context.Background(), app.SearchArtifactKind)
+		_ = m.cache.DropSupersededArtifacts(context.Background(), app.SearchArtifactKind, app.ConversationArtifactKind)
 	}
 	m.scanning = false
 	m.filter()

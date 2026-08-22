@@ -13,12 +13,25 @@ import (
 // what it covers, or stale entries would keep answering with the old coverage.
 const SearchArtifactKind = "search-v6"
 
+// ConversationArtifactKind names the cached copy of a session's conversation.
+// Unlike the index it is not derived data that can be rebuilt: once the log it
+// was parsed from is gone, this is the only copy left. The version belongs to
+// the shape of domain.Conversation, not to what search covers, so it moves on
+// its own.
+const ConversationArtifactKind = "conversation-v1"
+
 // ArtifactStore is the part of the cache the index build uses. Taking it as an
 // interface keeps internal/app free of a dependency on internal/cache, and lets
 // a caller without a cache (the CLI with --no-cache) pass nil.
 type ArtifactStore interface {
 	GetArtifact(ctx context.Context, s domain.Session, kind string, dst any) bool
 	PutArtifact(ctx context.Context, s domain.Session, kind string, v any) error
+	// HasArtifact answers without reading the bytes, which is what deciding
+	// whether to parse a session needs.
+	HasArtifact(ctx context.Context, s domain.Session, kind string) bool
+	// PutBlob stores a compressed artifact: the conversation, which is the size of
+	// the log it was read from.
+	PutBlob(ctx context.Context, s domain.Session, kind string, v any) error
 }
 
 // indexArtifact is the cached payload. The field names are part of the on-disk
@@ -56,12 +69,31 @@ func (a *App) BuildIndex(ctx context.Context, sessions []domain.Session, store A
 			continue // the plugin cannot read conversations: nothing to index
 		}
 		var cached indexArtifact
-		if store != nil && store.GetArtifact(ctx, s, SearchArtifactKind, &cached) {
+		indexed := store != nil && store.GetArtifact(ctx, s, SearchArtifactKind, &cached)
+		if indexed {
 			idx.Set(s, cached.Text, cached.Count)
-		} else if idx.Build(ctx, s, l) == nil && store != nil {
-			if t, n, ok := idx.Lookup(s); ok {
-				// A failed write costs a reparse next time and nothing else.
-				_ = store.PutArtifact(ctx, s, SearchArtifactKind, indexArtifact{t, n})
+		}
+		// The conversation is kept so the session survives its log: an agent
+		// deletes its own logs, and what was said is then only here. It is written
+		// once per version of a session, and asking whether it is already there
+		// costs a row lookup against the parse it saves.
+		keep := store != nil && a.Config.Cache.CacheConversations &&
+			!store.HasArtifact(ctx, s, ConversationArtifactKind)
+		if !indexed || keep {
+			// One parse serves both. Without the second condition a session that is
+			// already indexed would never be read again, and its conversation would
+			// never be stored at all.
+			if c, err := l.LoadConversation(ctx, s.SourceRef); err == nil && c != nil {
+				if !indexed {
+					idx.Add(s, *c)
+					if t, n, ok := idx.Lookup(s); ok && store != nil {
+						// A failed write costs a reparse next time and nothing else.
+						_ = store.PutArtifact(ctx, s, SearchArtifactKind, indexArtifact{t, n})
+					}
+				}
+				if keep {
+					_ = store.PutBlob(ctx, s, ConversationArtifactKind, c)
+				}
 			}
 		}
 		// The fingerprint is recorded even when the parse failed: there is no entry

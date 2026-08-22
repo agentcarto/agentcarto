@@ -1,22 +1,11 @@
 package search
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/agentcarto/core/domain"
 )
-
-// fakeLoader returns a fixed conversation, satisfying plugin.ConversationLoader.
-type fakeLoader struct {
-	c   *domain.Conversation
-	err error
-}
-
-func (f fakeLoader) LoadConversation(context.Context, domain.SessionRef) (*domain.Conversation, error) {
-	return f.c, f.err
-}
 
 // linear builds a single-chain conversation, one event per node.
 func linear(events ...domain.Event) *domain.Conversation {
@@ -52,9 +41,7 @@ func TestBuildCountsAllButTruncatesText(t *testing.T) {
 	// what it expects to find.)
 	i := New(len("alpha\n"))
 	s := sessionAt("/s/1")
-	if err := i.Build(context.Background(), s, fakeLoader{c: conv}); err != nil {
-		t.Fatal(err)
-	}
+	i.Add(s, *conv)
 	// Count reflects every qualifying (user/assistant) event, even those past the
 	// text budget; meta is not counted.
 	if n, ok := i.Count(s); !ok || n != 3 {
@@ -65,17 +52,6 @@ func TestBuildCountsAllButTruncatesText(t *testing.T) {
 	}
 	if i.Match(s, NewQuery("gamma")) {
 		t.Error("text beyond MaxChars must not be indexed")
-	}
-}
-
-func TestBuildPropagatesLoaderError(t *testing.T) {
-	i := New(100)
-	s := sessionAt("/s/err")
-	if err := i.Build(context.Background(), s, fakeLoader{err: context.Canceled}); err != context.Canceled {
-		t.Errorf("err = %v, want context.Canceled", err)
-	}
-	if _, ok := i.Count(s); ok {
-		t.Error("a failed Build must not index the session")
 	}
 }
 
