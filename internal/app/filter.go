@@ -76,3 +76,31 @@ func UnderDir(path, dir string) bool {
 	path = filepath.Clean(path)
 	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }
+
+// MergeDeletedLogs adds back the sessions the cache remembers and the scan no
+// longer finds. An agent deletes its own logs — a cleanup, a project directory
+// that moved — and until now that removed the session from agentcarto entirely,
+// although everything needed to read it was still in the cache.
+//
+// A session is only called deleted when its plugin scanned successfully. A
+// plugin that crashed or was misconfigured finds nothing either, and marking
+// every one of its sessions as deleted would turn one bad start-up into a wall
+// of wrong answers.
+func MergeDeletedLogs(scanned, cached []domain.Session, successful map[string]bool) []domain.Session {
+	found := make(map[string]bool, len(scanned))
+	for _, s := range scanned {
+		found[s.SourceRef.Source] = true
+	}
+	out := scanned
+	for _, s := range cached {
+		if s.SourceRef.Source == "" || found[s.SourceRef.Source] || !successful[s.PluginID] {
+			continue
+		}
+		s.LogDeleted = true
+		// Whatever the cache remembers of a running session is stale: the process
+		// it belonged to is not being watched any more.
+		s.Status, s.PermissionWait = "", false
+		out = append(out, s)
+	}
+	return out
+}

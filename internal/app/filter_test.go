@@ -80,3 +80,51 @@ func TestFilterSessionsDropsEmptyForks(t *testing.T) {
 		t.Fatalf("empty fork was dropped even when asked for: %+v", got)
 	}
 }
+
+// A log that was deleted took its session out of every listing, although the
+// cache still held what it takes to read one. The cache is asked for what the
+// scan could not find.
+func TestMergeDeletedLogs(t *testing.T) {
+	scanned := []domain.Session{
+		{PluginID: "claude", SessionID: "alive", SourceRef: domain.SessionRef{Source: "/logs/alive.jsonl"}},
+	}
+	cached := []domain.Session{
+		{PluginID: "claude", SessionID: "alive", SourceRef: domain.SessionRef{Source: "/logs/alive.jsonl"}},
+		{PluginID: "claude", SessionID: "gone", SourceRef: domain.SessionRef{Source: "/logs/gone.jsonl"},
+			Status: domain.StatusRunning, PermissionWait: true},
+		{PluginID: "codex", SessionID: "unscanned", SourceRef: domain.SessionRef{Source: "/logs/codex.jsonl"}},
+		{PluginID: "claude", SessionID: "nosource"},
+	}
+	// codex did not scan successfully, so nothing of its is called deleted.
+	out := MergeDeletedLogs(scanned, cached, map[string]bool{"claude": true, "codex": false})
+	if len(out) != 2 {
+		t.Fatalf("sessions=%d want 2: %+v", len(out), out)
+	}
+	if out[0].SessionID != "alive" || out[0].LogDeleted {
+		t.Errorf("a scanned session should come back unchanged: %+v", out[0])
+	}
+	gone := out[1]
+	if gone.SessionID != "gone" || !gone.LogDeleted {
+		t.Errorf("the deleted session should be marked: %+v", gone)
+	}
+	// What the cache remembers of a running session is stale: nothing is watching
+	// that process any more.
+	if gone.Status != "" || gone.PermissionWait {
+		t.Errorf("a remembered status should not be presented as live: %+v", gone)
+	}
+}
+
+// A plugin that fails to start finds nothing, which must not be read as "every
+// session was deleted".
+func TestMergeDeletedLogsIgnoresAFailedPlugin(t *testing.T) {
+	cached := []domain.Session{
+		{PluginID: "claude", SessionID: "a", SourceRef: domain.SessionRef{Source: "/logs/a.jsonl"}},
+		{PluginID: "claude", SessionID: "b", SourceRef: domain.SessionRef{Source: "/logs/b.jsonl"}},
+	}
+	if out := MergeDeletedLogs(nil, cached, map[string]bool{"claude": false}); len(out) != 0 {
+		t.Errorf("a failed scan should add nothing: %+v", out)
+	}
+	if out := MergeDeletedLogs(nil, cached, map[string]bool{"claude": true}); len(out) != 2 {
+		t.Errorf("a successful scan that found nothing means both logs are gone: %+v", out)
+	}
+}

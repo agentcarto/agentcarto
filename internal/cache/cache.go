@@ -222,12 +222,24 @@ func (d *DB) Save(ctx context.Context, s []domain.Session) error {
 	}
 	return tx.Commit()
 }
+// Prune drops the rows of sessions that are neither on disk nor readable from
+// here. A session whose log was deleted is kept as long as its conversation was
+// stored — this is the only copy of it now, and letting it expire would throw
+// away the thing the cache is for. One whose log is gone and whose conversation
+// never made it here is a title, a time and nothing else, and max_age collects
+// those.
+//
+// Only sessions of a plugin that scanned successfully are considered: a plugin
+// that failed to start finds nothing, which must not be read as "the user
+// deleted everything".
 func (d *DB) Prune(ctx context.Context, sessions []domain.Session, successful map[string]bool, maxAge time.Duration) error {
 	seen := map[domain.SessionKey]bool{}
 	for _, s := range sessions {
 		seen[s.Key()] = true
 	}
-	rows, e := d.db.QueryContext(ctx, "SELECT plugin_id,session_id,seen FROM sessions")
+	rows, e := d.db.QueryContext(ctx, `SELECT plugin_id,session_id,seen FROM sessions s
+		WHERE NOT EXISTS (SELECT 1 FROM artifacts a
+			WHERE a.plugin_id = s.plugin_id AND a.session_id = s.session_id AND a.kind LIKE 'conversation-%')`)
 	if e != nil {
 		return e
 	}

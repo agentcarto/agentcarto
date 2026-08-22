@@ -60,6 +60,19 @@ func (a *App) BuildIndex(ctx context.Context, sessions []domain.Session, store A
 			fp[src] = s.Fingerprint
 			continue
 		}
+		if s.LogDeleted {
+			// The log is gone, so the plugin has nothing to give: what the cache holds
+			// is all there is. Asking anyway would be one failed read per deleted
+			// session on every scan.
+			if store != nil {
+				var cached indexArtifact
+				if store.GetArtifact(ctx, s, SearchArtifactKind, &cached) {
+					idx.Set(s, cached.Text, cached.Count)
+				}
+			}
+			fp[src] = s.Fingerprint
+			continue
+		}
 		p, ok := a.Catalog.Plugin(s.PluginID)
 		if !ok {
 			continue

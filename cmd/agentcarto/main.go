@@ -341,23 +341,26 @@ func scanSessions(ctx context.Context, a *app.App, c config.Config, db *cache.DB
 	for _, x := range snap.Errors {
 		fmt.Fprintf(os.Stderr, "%s: %s: %v\n", x.PluginID, x.Reason, x.Err)
 	}
+	failed := map[string]bool{}
+	for _, e := range snap.Errors {
+		failed[e.PluginID] = true
+	}
+	successful := map[string]bool{}
+	for _, p := range a.Catalog.Plugins {
+		successful[p.ID] = !failed[p.ID]
+	}
 	if db != nil {
 		_ = db.Save(ctx, snap.Sessions)
 		// The same housekeeping the TUI does after a scan. Without it, a machine
 		// where agentcarto is only ever called from the command line keeps every
 		// session it has ever seen and honours neither cache.max_age nor max_size.
-		failed := map[string]bool{}
-		for _, e := range snap.Errors {
-			failed[e.PluginID] = true
-		}
-		successful := map[string]bool{}
-		for _, p := range a.Catalog.Plugins {
-			successful[p.ID] = !failed[p.ID]
-		}
 		_ = db.Prune(ctx, snap.Sessions, successful, time.Duration(c.Cache.MaxAge))
 		_ = db.Enforce(ctx, int64(c.Cache.MaxSize))
 	}
-	return a.MarkEmptyForks(ctx, snap.Sessions)
+	// The cache is asked what the scan could not find. A log that was deleted took
+	// its session out of every listing until now, though what it takes to read it
+	// was here all along.
+	return app.MergeDeletedLogs(a.MarkEmptyForks(ctx, snap.Sessions), warm, successful)
 }
 
 // runTUI loads any cached sessions, runs the interactive TUI, and, if the TUI

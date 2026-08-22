@@ -286,3 +286,35 @@ func TestBlobIsTiedToTheSessionVersion(t *testing.T) {
 		t.Error("uncompressed bytes should not decode as a blob")
 	}
 }
+
+// A session whose log was deleted is what the cache exists for once its
+// conversation is stored: max_age must not collect it. One that was never
+// stored is a title and a time, and that does expire.
+func TestPruneKeepsWhatCanStillBeRead(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	readable := domain.Session{PluginID: "p", SessionID: "readable", Fingerprint: "fp", ParserVersion: "1"}
+	bare := domain.Session{PluginID: "p", SessionID: "bare", Fingerprint: "fp", ParserVersion: "1"}
+	if e := d.Save(ctx, []domain.Session{readable, bare}); e != nil {
+		t.Fatal(e)
+	}
+	c := domain.NewConversation([]domain.ConvNode{{ID: "n1"}})
+	if e := d.PutBlob(ctx, readable, "conversation-v1", &c); e != nil {
+		t.Fatal(e)
+	}
+	// Neither is on disk any more, and both are older than the age allowed.
+	if e := d.Prune(ctx, nil, map[string]bool{"p": true}, -time.Hour); e != nil {
+		t.Fatal(e)
+	}
+	got, e := d.Load(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(got) != 1 || got[0].SessionID != "readable" {
+		t.Fatalf("the readable session should have survived and the bare one gone: %+v", got)
+	}
+	var back domain.Conversation
+	if !d.GetBlob(ctx, readable, "conversation-v1", &back) {
+		t.Error("the conversation of the surviving session was collected with it")
+	}
+}

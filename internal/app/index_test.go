@@ -216,3 +216,31 @@ func TestBuildIndexWithoutStoreOrLoader(t *testing.T) {
 		t.Fatalf("no fingerprint should be reported: %#v", fp)
 	}
 }
+
+// A session whose log is gone has nothing for the plugin to load, and asking
+// anyway costs one failed read per deleted session on every scan. What the cache
+// kept is used as it is.
+func TestBuildIndexDoesNotAskThePluginForADeletedLog(t *testing.T) {
+	l := &loaderStub{text: "handoff order"}
+	a := indexApp(l)
+	a.Config.Cache.CacheConversations = true
+	store := newStore()
+	s := indexSession()
+
+	// Index it while the log is still there, then let the log disappear.
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	loads := l.loads
+	gone := s
+	gone.LogDeleted = true
+
+	idx, fp := a.BuildIndex(context.Background(), []domain.Session{gone}, store, nil, nil)
+	if l.loads != loads {
+		t.Errorf("the plugin was asked for a log that is gone: loads=%d want %d", l.loads, loads)
+	}
+	if !idx.Match(gone, search.NewQuery("handoff")) {
+		t.Error("the cached index should still answer for a deleted log")
+	}
+	if fp[gone.SourceRef.Source] != gone.Fingerprint {
+		t.Errorf("the fingerprint should still be reported: %#v", fp)
+	}
+}
