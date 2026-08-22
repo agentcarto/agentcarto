@@ -202,7 +202,12 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 	if *limit > 0 && len(result.Sessions) > *limit {
 		result.Sessions = result.Sessions[:*limit]
 	}
-	if result.Matched > len(result.Sessions) {
+	// Sessions go missing for two different reasons and only one of them is
+	// answered by asking for more: the limit cut the listing off, or a session was
+	// left out for having only searched (which meta_suppressed accounts for).
+	// Saying "raise --limit" to a listing that never reached the limit sends the
+	// reader after sessions that raising it will not produce.
+	if *limit > 0 && len(result.Sessions) == *limit && result.Matched > *limit {
 		result.Note = fmt.Sprintf("%d sessions matched; listing the %d most relevant (raise --limit for more)", result.Matched, len(result.Sessions))
 	}
 	// Nothing to show, rather than nothing matched: a session that was opened and

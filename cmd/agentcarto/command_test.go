@@ -146,6 +146,10 @@ func TestSearchCommandFilters(t *testing.T) {
 	if len(got.Sessions) != 1 || got.Matched != 2 || !strings.Contains(got.Note, "2 sessions matched") {
 		t.Errorf("limit=%+v note=%q", got.Sessions, got.Note)
 	}
+	// A limit that was not reached is not what is holding anything back.
+	if got := runSearch(t, "--limit", "20", "handoff"); got.Note != "" {
+		t.Errorf("a listing that fits under the limit should say nothing: %q", got.Note)
+	}
 }
 
 // A filtered search that finds nothing says where the matches are instead, with
@@ -275,6 +279,12 @@ func TestSearchCommandHidesTheSessionsThatOnlyLookedItUp(t *testing.T) {
 	// It is still counted as a match: it did match, it is just not worth listing.
 	if got.Matched != 2 {
 		t.Errorf("matched=%d want 2", got.Matched)
+	}
+
+	// The limit was nowhere near reached, so raising it would produce nothing:
+	// what is missing was left out, and meta_suppressed already says so.
+	if strings.Contains(got.Note, "raise --limit") {
+		t.Errorf("a listing that never reached the limit should not point at it: %q", got.Note)
 	}
 
 	if got := runSearchOn(t, a, cfg, "--include-meta", "png"); len(got.Sessions) != 2 || got.MetaSuppressed != 0 {
