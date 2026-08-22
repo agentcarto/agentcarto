@@ -16,6 +16,7 @@ import (
 	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 	"github.com/agentcarto/core/plugin"
+	"github.com/mattn/go-runewidth"
 )
 
 // absPath builds an absolute path for the platform the test runs on: on Windows
@@ -98,7 +99,8 @@ func runSearch(t *testing.T, args ...string) searchResult {
 func runSearchOn(t *testing.T, a *app.App, cfg config.Config, args ...string) searchResult {
 	t.Helper()
 	var b bytes.Buffer
-	searchCmd(context.Background(), a, cfg, nil, args, &b)
+	// The JSON is what these tests read; the table is checked on its own below.
+	searchCmd(context.Background(), a, cfg, nil, append([]string{"--format", "json"}, args...), &b)
 	var got searchResult
 	if err := json.Unmarshal(b.Bytes(), &got); err != nil {
 		t.Fatalf("output is not the documented JSON: %v\n%s", err, b.String())
@@ -277,6 +279,116 @@ func TestSearchCommandHidesTheSessionsThatOnlyLookedItUp(t *testing.T) {
 	// A search for agentcarto itself is asking for exactly these sessions.
 	if got := runSearchOn(t, a, cfg, "agentcarto png"); len(got.Sessions) != 1 || got.Sessions[0].SessionID != "lookup-0001" {
 		t.Errorf("a search for agentcarto should find the session that ran it: %+v", got.Sessions)
+	}
+}
+
+// Both listings print columns by default and JSON when asked, so there is one
+// answer to "which flag do I need" instead of one per command.
+func TestSearchPrintsATableByDefault(t *testing.T) {
+	a, cfg := commandApp()
+	var b bytes.Buffer
+	searchCmd(context.Background(), a, cfg, nil, []string{"--limit", "1", "handoff"}, &b)
+	out := b.String()
+	if strings.Contains(out, `"sessions"`) {
+		t.Fatalf("the default should not be JSON:\n%s", out)
+	}
+	// The handle show takes, the turn number show --turns takes, and the count.
+	for _, want := range []string{"aaaa1111 ", "claude", "1 hits", "handoff の順序", "t1 "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the table is missing %q:\n%s", want, out)
+		}
+	}
+	// An id is copied from here into show, so it must not carry an ellipsis.
+	if strings.Contains(out, "…") {
+		t.Errorf("the id should be a usable prefix, not an elided string:\n%s", out)
+	}
+	// A listing that stops short says so.
+	if !strings.Contains(out, "2 sessions matched") {
+		t.Errorf("the table should say what it left out:\n%s", out)
+	}
+
+	// --json is the older spelling of --format json, and both parse as JSON.
+	for _, args := range [][]string{{"--json", "handoff"}, {"--format", "json", "handoff"}} {
+		var j bytes.Buffer
+		searchCmd(context.Background(), a, cfg, nil, args, &j)
+		var got searchResult
+		if err := json.Unmarshal(j.Bytes(), &got); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, j.String())
+		}
+		if got.Matched != 2 {
+			t.Errorf("%v: matched=%d", args, got.Matched)
+		}
+	}
+	if text := runList(t, "--format", "json"); !strings.Contains(text, `"sessions"`) {
+		t.Errorf("list --format json should print JSON:\n%s", text)
+	}
+}
+
+// A column holds columns, not runes: these logs are written in Japanese as often
+// as in English, and counting runes turns a table into wrapped paragraphs.
+func TestTableHelpers(t *testing.T) {
+	if got := short("あいうえおかきくけこ", 10); runewidth.StringWidth(got) > 10 {
+		t.Errorf("short(%q)=%q is %d columns wide, want at most 10", "あいうえお…", got, runewidth.StringWidth(got))
+	}
+	if got := short("abcdefghij", 10); got != "abcdefghij" {
+		t.Errorf("what fits should be left alone: %q", got)
+	}
+	// An id is copied into show, which takes a prefix — so it is not elided.
+	if got := idPrefix("aaaa1111-2222-3333"); got != "aaaa1111" {
+		t.Errorf("idPrefix=%q want aaaa1111", got)
+	}
+	if got := idPrefix("short"); got != "short" {
+		t.Errorf("a short id should be left whole: %q", got)
+	}
+	// A title is the first thing that was said, and that can run to several lines.
+	if got := oneLine("一行目\n二行目  三行目"); got != "一行目 二行目 三行目" {
+		t.Errorf("oneLine=%q", got)
+	}
+	if got := day(time.Time{}); got != "" {
+		t.Errorf("a session with no recorded time should show no date: %q", got)
+	}
+}
+
+// The width of a hit is the table's business until someone asks for one: a
+// terminal is what the narrow default is for, and the caller is the one who
+// knows how wide theirs is.
+func TestSearchTableHonoursAnAskedForContext(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	long := strings.Repeat("あ", 300) + "handoff" + strings.Repeat("い", 300)
+	a, cfg := fixtureApp(
+		[]domain.Session{{PluginID: "claude", AgentType: "claude", SessionID: "long-0001",
+			CWD: absPath("/repo/app"), Title: "長い話", UpdatedAt: now,
+			SourceRef: domain.SessionRef{Source: "/logs/long.jsonl"}}},
+		map[string]domain.Conversation{"/logs/long.jsonl": domain.NewConversation(
+			[]domain.ConvNode{{ID: "u1", Timestamp: now, Events: talk(long, "はい")}})},
+	)
+	hitLine := func(args ...string) string {
+		t.Helper()
+		var b bytes.Buffer
+		searchCmd(context.Background(), a, cfg, nil, args, &b)
+		for _, l := range strings.Split(b.String(), "\n") {
+			if strings.Contains(l, "t1 ") {
+				return l
+			}
+		}
+		t.Fatalf("no hit line in:\n%s", b.String())
+		return ""
+	}
+	if w := runewidth.StringWidth(hitLine("handoff")); w > tableSnippet+24 {
+		t.Errorf("the default hit line is %d columns wide, want it to fit a terminal", w)
+	}
+	if w := runewidth.StringWidth(hitLine("--context", "400", "handoff")); w < 2*tableSnippet {
+		t.Errorf("--context 400 was cut back to %d columns; an asked-for width should stand", w)
+	}
+}
+
+// A search that finds nothing says so, rather than printing an empty page.
+func TestSearchTableSaysWhenNothingMatched(t *testing.T) {
+	a, cfg := commandApp()
+	var b bytes.Buffer
+	searchCmd(context.Background(), a, cfg, nil, []string{"存在しない語"}, &b)
+	if out := b.String(); !strings.Contains(out, "nothing matched") {
+		t.Errorf("an empty result should be explained:\n%q", out)
 	}
 }
 

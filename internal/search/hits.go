@@ -33,6 +33,11 @@ type HitOptions struct {
 // readable.
 const DefaultContext = 120
 
+// TableContext is the same for a listing meant to be read on a terminal, where
+// a hit has one line and a line that wraps three times costs more than the
+// sentence it shows is worth.
+const TableContext = 44
+
 // Summary counts what the query was found in across a whole session, of which
 // Hits returns only the newest few. It is what a caller needs to tell a session
 // that worked on the subject from one that only looked it up.

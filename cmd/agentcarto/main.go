@@ -12,6 +12,7 @@ import (
 	"github.com/agentcarto/agentcarto/internal/tui"
 	"github.com/agentcarto/core/domain"
 	"github.com/agentcarto/core/plugin"
+	"github.com/mattn/go-runewidth"
 	"gopkg.in/yaml.v3"
 	"io"
 	"os"
@@ -95,7 +96,8 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 		name = "active"
 	}
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
-	asJSON := fs.Bool("json", false, "print JSON instead of columns")
+	format := fs.String("format", "table", "print as columns (table) or as JSON (json)")
+	asJSON := fs.Bool("json", false, "the older spelling of --format json")
 	dir := fs.String("cwd", "", `only sessions that ran in this directory or below it ("." for the current one)`)
 	agent := fs.String("agent", "", "only this agent (plugin id or agent type)")
 	since := fs.String("since", "", "only sessions updated since then (7d, 12h, 2026-08-01)")
@@ -144,7 +146,7 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 	if *limit > 0 && len(sessions) > *limit {
 		sessions = sessions[:*limit]
 	}
-	if *asJSON {
+	if resolveFormat(fs, name, *format, *asJSON) == "json" {
 		rows := make([]listedSession, 0, len(sessions))
 		for _, s := range sessions {
 			rows = append(rows, listedSession{
@@ -158,10 +160,72 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 		}{rows})
 		return
 	}
+	// The columns open the way a search result does — id, agent, when — so the two
+	// listings read as one thing. The status column is only there for `active`,
+	// where it is the answer; in `list` it would be an empty column on every row.
 	for _, s := range sessions {
-		fmt.Fprintf(w, "%-8s %-8s %-20s %-30s %s\n", s.PluginID, s.Status, short(s.SessionID, 20), short(s.CWD, 30), s.Title)
+		status := ""
+		if active {
+			status = fmt.Sprintf("%-8s ", s.Status)
+		}
+		fmt.Fprintf(w, "%-8s %-8s %s%-10s %-30s %s\n",
+			idPrefix(s.SessionID), s.PluginID, status, day(s.UpdatedAt), short(s.CWD, 30), short(oneLine(s.Title), 60))
 	}
 }
+
+// day is the date a listing shows for a session, or nothing when the plugin
+// records no times.
+func day(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Local().Format("2006-01-02")
+}
+
+// resolveFormat settles the --format / --json pair the listings take. --json is
+// the older spelling of --format json and stays because it is written into
+// scripts and into the past-sessions skill; asking for both at once is a
+// mistake worth naming rather than quietly resolving.
+func resolveFormat(fs *flag.FlagSet, cmd, format string, asJSON bool) string {
+	if asJSON {
+		if flagGiven(fs, "format") && format != "json" {
+			fail(fmt.Errorf("%s: --json and --format %s ask for different things", cmd, format))
+		}
+		return "json"
+	}
+	if format != "table" && format != "json" {
+		fail(fmt.Errorf("%s: --format %q: use table or json", cmd, format))
+	}
+	return format
+}
+
+// flagGiven reports whether the flag was set on the command line, as opposed to
+// left at its default. A default that depends on another flag has to know the
+// difference.
+func flagGiven(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+// idPrefix is the handle a table row hands to the next command. It is not
+// elided: an id is given to `show` as a prefix, so these eight characters are
+// something to copy rather than a shortened form of something else.
+func idPrefix(id string) string {
+	if r := []rune(id); len(r) > 8 {
+		return string(r[:8])
+	}
+	return id
+}
+
+// oneLine folds a value onto the single line a table row has for it. A title is
+// the first thing that was said in the session, and what was said can run to
+// several lines.
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // listedSession is a session without the hits: what `list --json` prints, with
 // the same field names search uses so the two can be read by one reader.
@@ -183,9 +247,9 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `usage: agentcarto [--config FILE] [--no-cache] [command]
 
   (no command)              launch the TUI
-  list [flags]              list sessions (--json, --cwd, --agent, --since, --limit)
+  list [flags]              list sessions (--format, --cwd, --agent, --since, --limit)
   active [flags]            list running sessions (same flags)
-  search [flags] QUERY      search sessions, printing JSON hits
+  search [flags] QUERY      search sessions and print where the query was found
   show [flags] SESSION      print a session's outline, or the turns asked for
   config validate           validate the config and list enabled plugins
   plugins list              list plugins and their capabilities
@@ -290,13 +354,12 @@ func runTUI(ctx context.Context, a *app.App, c config.Config, host *pluginhost.H
 		fail(e)
 	}
 }
-func short(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n-1]) + "…"
-}
+
+// short cuts a value to n columns of terminal, marking the cut. It counts
+// display width rather than runes: these logs are written in Japanese as often
+// as in English, and a column that holds 30 runes of one holds 15 of the other
+// — counting runes is what turns a table into wrapped paragraphs.
+func short(s string, n int) string { return runewidth.Truncate(s, n, "…") }
 func configCmd(a *app.App, args []string) {
 	if len(args) == 0 {
 		fail(fmt.Errorf("config requires validate or print"))

@@ -6,7 +6,7 @@ description: Search and read past agent sessions on this machine — your own an
 # Past sessions
 
 `agentcarto` reads the on-disk sessions of Claude Code, Codex, Grok and Copilot Chat, and
-prints them as JSON and Markdown. Reach for it before grepping the logs yourself: a raw
+prints them as lines you can read, as JSON when you ask (`--format json`), and as Markdown. Reach for it before grepping the logs yourself: a raw
 `.jsonl` hands you one line of a large JSON object, with no turn boundaries, no decoded tool
 calls, and none of the other agents' formats.
 
@@ -20,7 +20,7 @@ kilobytes, and reading a whole one is rarely what the question needs.
 
 ```sh
 # 1. What was worked on here, most recent first
-agentcarto list --json --cwd . --limit 3
+agentcarto list --cwd . --limit 3
 
 # 2. Which session, and which turn in it
 agentcarto search --cwd . --since 7d "handoff"
@@ -43,9 +43,10 @@ seventy-kilobyte one before you ask for it.
 | Flag | Command | Why |
 |---|---|---|
 | `--regex` | `search` | The query becomes a pattern (RE2). In a log written in two languages this is the flag that matters: `'cache\|キャッシュ'` finds sessions that use either word, and most use only one |
+| `--format json` | `search`, `list` | Both print columns by default; this switches either to JSON. `--json` is the older spelling |
 | `--hits-per-session N` | `search` | Default 3, newest kept. `0` for all of them. `total_hits` says how many turns hold the query in all |
 | `--include-meta` | `search` | Keeps the sessions that only ran `agentcarto` over the query. They are left out by default — every search leaves one behind, and they answer the same query forever after |
-| `--context N` | `search` | Characters around a hit, default 120 |
+| `--context N` | `search` | Characters around a hit. 120 in JSON; narrower in a table, where a hit gets one line |
 | `--turns` | `show` | `12`, `12-14`, `3,7,12-14`. A named turn has to exist; a range may have gaps, because turn numbers skip the summary-only turns of a `/compact` |
 | `--last N` / `--all` | `show` | The tail of a session, or the whole thing |
 | `--tools` | `show` | `label` (default: the call's name and one-line argument), `full` (multi-line calls and subagent reports in full), `none` (conversation only — the cheapest way to read a long session) |

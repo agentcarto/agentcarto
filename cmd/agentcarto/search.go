@@ -76,6 +76,8 @@ type searchSession struct {
 
 func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, args []string, w io.Writer) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
+	format := fs.String("format", "table", "print as lines (table) or as JSON (json)")
+	asJSON := fs.Bool("json", false, "the older spelling of --format json")
 	dir := fs.String("cwd", "", `only sessions that ran in this directory or below it ("." for the current one)`)
 	agent := fs.String("agent", "", "only this agent (plugin id or agent type)")
 	since := fs.String("since", "", "only sessions updated since then (7d, 12h, 2026-08-01)")
@@ -104,6 +106,16 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 		if f.v < 0 {
 			fail(fmt.Errorf("search: %s %d: a count cannot be negative", f.name, f.v))
 		}
+	}
+	out := resolveFormat(fs, "search", *format, *asJSON)
+	// A table gives a hit one line, and a line that wraps three times costs more
+	// than the sentence it shows is worth — so a table narrows the snippet twice
+	// over, in runes when it is cut out of the message and in columns when it is
+	// printed. Asking for a width means it: both limits then step aside, since the
+	// caller is the one who knows how wide their terminal is.
+	snippet := 0
+	if out == "table" && !flagGiven(fs, "context") {
+		*width, snippet = search.TableContext, tableSnippet
 	}
 	filter := app.SessionFilter{Agent: *agent}
 	if *dir != "" {
@@ -201,7 +213,61 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 			result.Elsewhere, result.Note = n, fmt.Sprintf("nothing here, but %d sessions match without the filters (%s)", n, where)
 		}
 	}
-	printJSON(w, result)
+	if out == "json" {
+		printJSON(w, result)
+		return
+	}
+	printSearchTable(w, result, snippet)
+}
+
+// tableSnippet is how many columns a hit is given on the line it shares with
+// its turn number and kind. It bounds what --context left, which is counted in
+// runes: 44 runes of Japanese is 88 columns, and the two limits together are
+// what keeps a hit on one line in either language.
+const tableSnippet = 100
+
+// printSearchTable prints the result as lines meant to be read: one row per
+// session with the handle `show` takes, then the title, then the hits with the
+// turn number `show --turns` takes. Everything the JSON says about what was left
+// out is said here too, at the end — a listing that quietly stops at ten is read
+// as "there were ten". snippet is how many columns a hit may take, or 0 to print
+// it whole.
+func printSearchTable(w io.Writer, r searchResult, snippet int) {
+	for _, s := range r.Sessions {
+		date := ""
+		if !s.UpdatedAt.IsZero() {
+			date = s.UpdatedAt.Local().Format("2006-01-02")
+		}
+		// A session that matched on its title or path alone says so where the hit
+		// count would be, rather than showing "0 hits" and no hits.
+		found := fmt.Sprintf("%d hits", s.TotalHits)
+		if s.Match != "content" {
+			found = s.Match
+		}
+		fmt.Fprintf(w, "%-8s %-8s %-10s %-9s %s\n", idPrefix(s.SessionID), s.PluginID, date, found, s.CWD)
+		if s.Title != "" {
+			fmt.Fprintf(w, "  %s\n", short(oneLine(s.Title), 72))
+		}
+		for _, h := range s.Hits {
+			text := h.Snippet
+			if snippet > 0 {
+				text = short(text, snippet)
+			}
+			fmt.Fprintf(w, "  t%-4d %-10s %s\n", h.Turn, h.Kind, text)
+		}
+		if s.Error != "" {
+			fmt.Fprintf(w, "  %s\n", s.Error)
+		}
+	}
+	if len(r.Sessions) == 0 {
+		fmt.Fprintf(w, "nothing matched %q in %d sessions\n", r.Query, r.Scanned)
+	}
+	if r.MetaSuppressed > 0 {
+		fmt.Fprintf(w, "%d left out for only having searched for it (--include-meta keeps them)\n", r.MetaSuppressed)
+	}
+	if r.Note != "" {
+		fmt.Fprintln(w, r.Note)
+	}
 }
 
 // openCount is how many of the candidate sessions to open for a limit of n.

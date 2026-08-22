@@ -120,12 +120,12 @@ Launch the TUI with `agentcarto`, or use the CLI directly:
 
 ```text
 agentcarto                  launch the TUI
-agentcarto list [flags]     list sessions (--json for a program)
+agentcarto list [flags]     list sessions (--format table|json)
 agentcarto active [flags]   list running sessions
 agentcarto config validate  validate config and list enabled plugins
 agentcarto plugins list     list plugins and capabilities
 agentcarto doctor           diagnose config, executables, and storage
-agentcarto search "query"   search sessions and print JSON hits
+agentcarto search "query"   search sessions and print where the query was found
 agentcarto show <session>   print a session's outline, or the turns you ask for
 agentcarto cache stats|clear
 ```
@@ -139,18 +139,22 @@ Two commands let an agent look through the sessions on this machine — its own 
 every other agent — instead of grepping raw log files:
 
 ```sh
-agentcarto list --json --cwd . --limit 3         # what was last worked on here
+agentcarto list --cwd . --limit 3                # what was last worked on here
 agentcarto search --cwd . --since 7d "handoff"   # which sessions and turns
 agentcarto show 8f3a2b1c                         # that session's outline
 agentcarto show 8f3a2b1c --turns 12-14           # those turns, as Markdown
 ```
 
-`list --json` answers "what was I doing here" — the question that has no query — and takes the
+`list` answers "what was I doing here" — the question that has no query — and takes the
 same `--cwd` / `--agent` / `--since` / `--limit` filters as `search`, with the same field names.
 
-`search` prints JSON. Each match reports the session (id, agent, working directory, times)
-and where the query was found: the **turn number the TUI shows** (`turn #12` in the detail
-view), the event kind, and a one-line snippet. `show` takes that number.
+Both print columns by default and JSON on `--format json` (`--json` is the older spelling of
+the same thing), so there is one answer to "which flag do I need" rather than one per command.
+Each match reports the session (id, agent, working directory, times) and where the query was
+found: the **turn number the TUI shows** (`turn #12` in the detail view), the event kind, and a
+one-line snippet. `show` takes both the id — printed as the eight-character prefix it accepts —
+and that turn number. A table gives each hit one line, so it uses a narrower `--context` unless
+one is asked for; the JSON keeps the full width.
 
 Sessions come back **most relevant first**: how often the query occurs in the indexed text,
 plus a fixed bonus for each term the session's own title, working directory, agent or id
@@ -167,9 +171,10 @@ which is how a two-turn session can report a hundred of them.
 | `--since` | `7d`, `2w`, `12h`, or a date (`2026-08-01`) |
 | `--limit N` | most sessions to list (default 10, most relevant first) |
 | `--hits-per-session N` | most hits per session (default 3, newest kept) |
-| `--context N` | characters of context around a hit (default 120) |
+| `--context N` | characters of context around a hit (120 in JSON, narrower in a table) |
 | `--regex` | read the query as a regular expression instead of words |
 | `--include-meta` | keep the sessions that only ran `agentcarto` over the query (see below) |
+| `--format` | `table` (default) or `json`. `--json` is the older spelling of `--format json` |
 
 `show` prints Markdown, and prints the **outline** — header, then one line per turn with its
 number, time, **size** and headline — unless asked for turns. The size is what that turn would
