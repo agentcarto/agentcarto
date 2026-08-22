@@ -166,7 +166,7 @@ which is how a two-turn session can report a hundred of them.
 
 | Flag | Meaning |
 |---|---|
-| `--cwd PATH` | only sessions that ran in `PATH` or below it (`.` for the current directory) |
+| `--cwd PATH` | only sessions **started** in `PATH` or below it — what a session records is the directory the agent was launched from, which is often the repository root rather than the subdirectory the work was in |
 | `--agent ID` | only one agent (`claude`, `codex`, `grok`, `copilot` — or one editor of it, `copilot-vc` / `copilot-jb`) |
 | `--since` | `7d`, `2w`, `12h`, or a date (`2026-08-01`) |
 | `--limit N` | most sessions to list (default 10, most relevant first) |
@@ -192,9 +192,9 @@ the whole session.
 
 An id can be given as a prefix (`8f3a2b1c`), the way the list and the search results show it.
 
-A search narrowed with `--cwd` that finds nothing reports how many sessions match outside the
-filter and where they are, with the directory containing yours named first — the work is often
-one level up, and an unexplained zero reads as "never discussed".
+A search or a listing narrowed with `--cwd` that finds nothing reports how many sessions are
+outside the filter and where they are, with the directory containing yours named first — the
+work is often one level up, and an unexplained zero reads as "never discussed".
 
 **Sessions that only searched are left out.** Using `search` creates a session whose mention of
 the query is the search itself, and it answers that same query from then on — including the one

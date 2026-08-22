@@ -210,7 +210,11 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 	// same hint is the one worth giving.
 	if len(result.Sessions) == 0 && filter != (app.SessionFilter{}) {
 		if n, where := elsewhere(ctx, a, db, all, sessions, q, filter.CWD); n > 0 {
-			result.Elsewhere, result.Note = n, fmt.Sprintf("nothing here, but %d sessions match without the filters (%s)", n, where)
+			result.Elsewhere = n
+			result.Note = fmt.Sprintf("nothing here, but %d sessions match without the filters", n)
+			if where != "" {
+				result.Note += " (" + where + ")"
+			}
 		}
 	}
 	if out == "json" {
@@ -322,6 +326,11 @@ func elsewhere(ctx context.Context, a *app.App, db *cache.DB, all, kept []domain
 			count++
 			byDir[s.CWD]++
 		}
+	}
+	if dir == "" {
+		// Nothing was narrowed by directory, so naming directories would point away
+		// from the filter that is actually in the way.
+		return count, ""
 	}
 	return count, topDirs(byDir, dir, 3)
 }

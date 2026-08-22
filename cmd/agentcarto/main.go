@@ -124,7 +124,8 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 		filter.Since = t
 	}
 
-	sessions := app.FilterSessions(scanSessions(ctx, a, c, db), filter)
+	all := scanSessions(ctx, a, c, db)
+	sessions := app.FilterSessions(all, filter)
 	if active {
 		var e error
 		sessions, e = a.DetectActive(ctx, sessions)
@@ -146,6 +147,15 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 	if *limit > 0 && len(sessions) > *limit {
 		sessions = sessions[:*limit]
 	}
+	// A listing narrowed to a directory that holds nothing is the same dead end a
+	// narrowed search was: the work is usually one level up, because what gets
+	// recorded is where the agent was started and not what it was working on.
+	// `active` is left out — nothing running here is an answer in itself, and the
+	// sessions outside the filter would have to be re-detected to be counted.
+	note := ""
+	if len(sessions) == 0 && !active {
+		note = listElsewhere(all, filter)
+	}
 	if resolveFormat(fs, name, *format, *asJSON) == "json" {
 		rows := make([]listedSession, 0, len(sessions))
 		for _, s := range sessions {
@@ -157,8 +167,12 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 		}
 		printJSON(w, struct {
 			Sessions []listedSession `json:"sessions"`
-		}{rows})
+			Note     string          `json:"note,omitempty"`
+		}{rows, note})
 		return
+	}
+	if note != "" {
+		fmt.Fprintln(w, note)
 	}
 	// The columns open the way a search result does — id, agent, when — so the two
 	// listings read as one thing. The status column is only there for `active`,
@@ -171,6 +185,29 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 		fmt.Fprintf(w, "%-8s %-8s %s%-10s %-30s %s\n",
 			idPrefix(s.SessionID), s.PluginID, status, day(s.UpdatedAt), short(s.CWD, 30), short(oneLine(s.Title), 60))
 	}
+}
+
+// listElsewhere says how many sessions the filters left out and where they are,
+// for a listing that came back empty. Unlike the same answer in a search this
+// costs nothing to work out — there is no query, so no index to build — which is
+// why it is computed whenever the listing is empty rather than only on request.
+func listElsewhere(all []domain.Session, filter app.SessionFilter) string {
+	rest := app.FilterSessions(all, app.SessionFilter{IncludeEmptyForks: true})
+	if len(rest) == 0 {
+		return "" // there are no sessions at all: the filters are not what is wrong
+	}
+	note := fmt.Sprintf("nothing here, but %d sessions exist without the filters", len(rest))
+	// Where they are is the answer to "I narrowed by directory and found nothing".
+	// It answers nothing about an agent or a date, where naming the directories
+	// would only point away from the filter that is actually in the way.
+	if filter.CWD != "" {
+		byDir := map[string]int{}
+		for _, s := range rest {
+			byDir[s.CWD]++
+		}
+		note += " (" + topDirs(byDir, filter.CWD, 3) + ")"
+	}
+	return note
 }
 
 // day is the date a listing shows for a session, or nothing when the plugin

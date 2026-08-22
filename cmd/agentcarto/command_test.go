@@ -462,6 +462,40 @@ func TestListCommand(t *testing.T) {
 
 // usage has to name every command the dispatcher accepts. Adding one without
 // telling anyone is how a CLI grows features nobody can find.
+// A listing narrowed to a directory that holds nothing points at the one that
+// does. What a session records is where the agent was started, not what it was
+// working on, so a project's own directory is often not where its sessions are.
+func TestListCommandPointsAtWhereTheWorkIs(t *testing.T) {
+	out := runList(t, "--cwd", absPath("/repo/app/sub"))
+	if !strings.Contains(out, "nothing here") || !strings.Contains(out, absPath("/repo/app")) {
+		t.Errorf("an empty listing should say where the sessions are:\n%s", out)
+	}
+	// The same answer reaches a program through the JSON.
+	var got struct {
+		Sessions []listedSession `json:"sessions"`
+		Note     string          `json:"note"`
+	}
+	if err := json.Unmarshal([]byte(runList(t, "--json", "--cwd", absPath("/repo/app/sub"))), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != 0 || !strings.Contains(got.Note, "2 sessions exist") {
+		t.Errorf("json note=%q sessions=%d", got.Note, len(got.Sessions))
+	}
+	// A listing that found something says nothing extra.
+	if out := runList(t); strings.Contains(out, "nothing here") {
+		t.Errorf("a listing that found sessions should not carry the hint:\n%s", out)
+	}
+	// Narrowing by agent and finding nothing is not a question about directories,
+	// so they are not named: they would point away from the filter in the way.
+	out = runList(t, "--agent", "codex")
+	if !strings.Contains(out, "2 sessions exist") {
+		t.Errorf("the count should still be given:\n%s", out)
+	}
+	if strings.Contains(out, absPath("/repo/app")) {
+		t.Errorf("directories should not be named for an agent filter:\n%s", out)
+	}
+}
+
 func TestUsageListsEveryCommand(t *testing.T) {
 	var b strings.Builder
 	usage(&b)
