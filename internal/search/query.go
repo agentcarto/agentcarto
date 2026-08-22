@@ -78,6 +78,39 @@ func (q Query) matchesEither(meta, text string) bool {
 	return len(q.terms) > 0
 }
 
+// count returns how often the query occurs in the folded text: for several
+// words, the occurrences of each of them added together. The sum is a coarse
+// measure on purpose — a session that says a word twenty times is about it, and
+// which of the words carried the count is not worth the arithmetic to find out.
+func (q Query) count(folded string) int {
+	if q.re != nil {
+		return len(q.re.FindAllStringIndex(folded, -1))
+	}
+	n := 0
+	for _, t := range q.terms {
+		n += strings.Count(folded, t)
+	}
+	return n
+}
+
+// present returns how many of the query's terms the folded text holds at all. A
+// pattern is one term, so it answers 0 or 1.
+func (q Query) present(folded string) int {
+	if q.re != nil {
+		if q.re.MatchString(folded) {
+			return 1
+		}
+		return 0
+	}
+	n := 0
+	for _, t := range q.terms {
+		if strings.Contains(folded, t) {
+			n++
+		}
+	}
+	return n
+}
+
 // find returns the byte range of the earliest match in the folded text.
 func (q Query) find(folded string) (start, end int, ok bool) {
 	if q.re != nil {

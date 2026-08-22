@@ -164,6 +164,46 @@ func (i *Index) Match(s domain.Session, q Query) bool {
 	return q.matchesEither(metaText(s), i.m[id(s)].text)
 }
 
+// metaTermScore is what a term found in the session's own fields is worth: ten
+// hits. A session whose title or working directory names what is being looked
+// for is about it, which a handful of passing mentions elsewhere should not
+// outrank — but a session that discusses it at length should.
+const metaTermScore = 10
+
+// MetaScore rewards the terms the session's own fields answer (its title,
+// working directory, agent or id). It is the part of a session's relevance that
+// does not depend on reading the conversation, so it is added both to the index
+// score below and to the rank a caller computes from the hits it found.
+func MetaScore(s domain.Session, q Query) int {
+	if q.Empty() {
+		return 0
+	}
+	return metaTermScore * q.present(metaText(s))
+}
+
+// Score rates how well the session answers the query, to decide which sessions
+// are worth opening. It is the number of times the query occurs in the indexed
+// text, plus MetaScore.
+//
+// It is a coarse measure: the index holds a session as one run of text, so a
+// single message repeating a word outweighs ten turns that each mention it
+// once. What it is good for is separating the sessions that are about the
+// subject from the ones that mention it, without opening any of them.
+//
+// The count is not divided by the length of the session. A long session that
+// keeps coming back to a subject is the one worth reading, and normalizing it
+// away would put a passing mention in a short session on top.
+//
+// The score is read from the index, so it stops at MaxChars like everything
+// else here: past that point a session cannot raise its score, which is the
+// same limit that decides whether it is found at all.
+func (i *Index) Score(s domain.Session, q Query) int {
+	if q.Empty() {
+		return 0
+	}
+	return q.count(i.m[id(s)].text) + MetaScore(s, q)
+}
+
 // Count returns the session's message count (ok=true if it has been indexed).
 func (i *Index) Count(s domain.Session) (int, bool) {
 	e, ok := i.m[id(s)]

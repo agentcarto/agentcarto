@@ -243,3 +243,63 @@ func TestMatchesMetadata(t *testing.T) {
 		t.Error("a pattern should match the working directory")
 	}
 }
+
+// scored indexes one session's worth of text and returns what the query is
+// worth against it.
+func scored(t *testing.T, s domain.Session, text string, q Query) int {
+	t.Helper()
+	c := domain.NewConversation([]domain.ConvNode{{ID: "n1", Events: []domain.Event{
+		{Kind: domain.EventAssistant, Text: text},
+	}}})
+	i := New(1 << 16)
+	if err := i.Build(context.Background(), s, fakeLoader{c: &c}); err != nil {
+		t.Fatal(err)
+	}
+	return i.Score(s, q)
+}
+
+// The session that keeps coming back to the subject outranks the one that
+// mentions it once, which is the whole point of scoring.
+func TestScoreCountsOccurrences(t *testing.T) {
+	one := domain.Session{SourceRef: domain.SessionRef{Source: "/a"}}
+	many := domain.Session{SourceRef: domain.SessionRef{Source: "/b"}}
+	q := NewQuery("handoff")
+	lo := scored(t, one, "handoff was mentioned", q)
+	hi := scored(t, many, strings.Repeat("handoff ", 5), q)
+	if lo != 1 || hi != 5 {
+		t.Fatalf("scores are %d and %d, want 1 and 5", lo, hi)
+	}
+}
+
+// Each word of a query contributes, so a session holding both of them beats one
+// that repeats a single word.
+func TestScoreAddsUpTerms(t *testing.T) {
+	s := domain.Session{SourceRef: domain.SessionRef{Source: "/a"}}
+	if n := scored(t, s, "fork fork relocate", NewQuery("fork relocate")); n != 3 {
+		t.Errorf("score=%d want 3", n)
+	}
+	// The query is a pattern: every place it matches counts once.
+	q, _ := NewRegexpQuery("cache|キャッシュ")
+	if n := scored(t, s, "cache キャッシュ cache", q); n != 3 {
+		t.Errorf("regexp score=%d want 3", n)
+	}
+}
+
+// A title or working directory that names the subject is worth more than a
+// passing mention, and it lifts a session whose text was never indexed at all.
+func TestScoreRewardsMetadata(t *testing.T) {
+	named := domain.Session{SourceRef: domain.SessionRef{Source: "/a"}, Title: "handoff の設計", CWD: "/repo/app"}
+	other := domain.Session{SourceRef: domain.SessionRef{Source: "/b"}}
+	q := NewQuery("handoff")
+	if lifted, plain := scored(t, named, "handoff", q), scored(t, other, "handoff", q); lifted <= plain {
+		t.Errorf("a matching title did not lift the score (%d vs %d)", lifted, plain)
+	}
+	// Both words are answered by the session's own fields, so both are rewarded.
+	two := NewQuery("handoff app")
+	if n := scored(t, named, "", two); n != 2*metaTermScore {
+		t.Errorf("score=%d want %d", n, 2*metaTermScore)
+	}
+	if n := scored(t, named, "handoff", Query{}); n != 0 {
+		t.Errorf("an empty query scored %d", n)
+	}
+}

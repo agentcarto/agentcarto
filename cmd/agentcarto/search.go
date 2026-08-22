@@ -52,10 +52,17 @@ type searchSession struct {
 	// when only the title, path, agent or id matched — a session with no hits is
 	// then explained rather than looking like a bug — and "unknown" when the
 	// conversation could not be read, which Error then describes.
-	Match    string       `json:"match"`
-	Hits     []search.Hit `json:"hits"`
-	MoreHits int          `json:"more_hits,omitempty"`
-	Error    string       `json:"error,omitempty"`
+	Match string       `json:"match"`
+	Hits  []search.Hit `json:"hits"`
+	// TotalHits is how many events the query was found in, of which Hits shows at
+	// most --hits-per-session. It counts events and not occurrences — an event
+	// that says the word ten times is one hit — which is why a two-turn session
+	// can hold a hundred of them.
+	TotalHits int    `json:"total_hits"`
+	Error     string `json:"error,omitempty"`
+	// rank orders the listed sessions, and is not part of the JSON: it is a number
+	// that only means something next to the other results of the same search.
+	rank int
 }
 
 func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, args []string, w io.Writer) {
@@ -63,7 +70,7 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 	dir := fs.String("cwd", "", `only sessions that ran in this directory or below it ("." for the current one)`)
 	agent := fs.String("agent", "", "only this agent (plugin id or agent type)")
 	since := fs.String("since", "", "only sessions updated since then (7d, 12h, 2026-08-01)")
-	limit := fs.Int("limit", 10, "most sessions to list (0: all of them)")
+	limit := fs.Int("limit", 10, "most sessions to list, most relevant first (0: all of them)")
 	perSession := fs.Int("hits-per-session", 3, "most hits to list per session, newest kept (0: all of them)")
 	width := fs.Int("context", search.DefaultContext, "characters of context on either side of a hit")
 	asRegexp := fs.Bool("regex", false, `read the query as a regular expression (RE2), case-insensitive: "cache|キャッシュ"`)
@@ -121,15 +128,31 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 			matched = append(matched, s)
 		}
 	}
-	sort.SliceStable(matched, func(i, j int) bool { return matched[i].UpdatedAt.After(matched[j].UpdatedAt) })
+	// Relevance decides the order, and the clock only separates sessions the query
+	// cannot tell apart. The session worth opening is the one that keeps coming
+	// back to the subject, which is rarely the one that was touched last: sorting
+	// by time alone buried a hundred-hit session below the search that found it.
+	score := make(map[string]int, len(matched))
+	for _, s := range matched {
+		score[s.SourceRef.Source] = idx.Score(s, q)
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		si, sj := score[matched[i].SourceRef.Source], score[matched[j].SourceRef.Source]
+		if si != sj {
+			return si > sj
+		}
+		return matched[i].UpdatedAt.After(matched[j].UpdatedAt)
+	})
 
 	result := searchResult{Query: query, Scanned: len(all), Matched: len(matched), Sessions: []searchSession{}}
-	listed := matched
-	if *limit > 0 && len(listed) > *limit {
-		listed = listed[:*limit]
-		result.Note = fmt.Sprintf("%d sessions matched; listing the %d most recently updated (raise --limit for more)", len(matched), len(listed))
-	}
-	for _, s := range listed {
+	// More sessions are opened than are listed, and the ones that were opened are
+	// ranked again on what a reader actually gets: the number of turns the query
+	// is in. The index score that got them this far counts occurrences in one run
+	// of text, which is enough to pick the candidates but puts a session that says
+	// a word five times in one message above one that returns to it all afternoon.
+	// The margin also absorbs the sessions dropped below, so a search still answers
+	// with as many sessions as it was asked for.
+	for _, s := range matched[:openCount(len(matched), *limit)] {
 		row := sessionHits(ctx, a, s, q, *perSession, *width)
 		if row.Match == "metadata" && q.IsRegexp() && !search.MatchesMetadata(s, q) {
 			// The index holds a session's text as one run, so an anchored pattern
@@ -138,14 +161,43 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 			result.Matched--
 			continue
 		}
+		row.rank = row.TotalHits + search.MetaScore(s, q)
 		result.Sessions = append(result.Sessions, row)
 	}
-	if len(matched) == 0 && filter != (app.SessionFilter{}) {
+	sort.SliceStable(result.Sessions, func(i, j int) bool {
+		if result.Sessions[i].rank != result.Sessions[j].rank {
+			return result.Sessions[i].rank > result.Sessions[j].rank
+		}
+		return result.Sessions[i].UpdatedAt.After(result.Sessions[j].UpdatedAt)
+	})
+	if *limit > 0 && len(result.Sessions) > *limit {
+		result.Sessions = result.Sessions[:*limit]
+	}
+	if result.Matched > len(result.Sessions) {
+		result.Note = fmt.Sprintf("%d sessions matched; listing the %d most relevant (raise --limit for more)", result.Matched, len(result.Sessions))
+	}
+	// Nothing to show, rather than nothing matched: a session that was opened and
+	// turned out to have nothing to point at leaves the same empty answer, and the
+	// same hint is the one worth giving.
+	if len(result.Sessions) == 0 && filter != (app.SessionFilter{}) {
 		if n, where := elsewhere(ctx, a, db, all, sessions, q, filter.CWD); n > 0 {
 			result.Elsewhere, result.Note = n, fmt.Sprintf("nothing here, but %d sessions match without the filters (%s)", n, where)
 		}
 	}
 	printJSON(w, result)
+}
+
+// openCount is how many of the candidate sessions to open for a limit of n.
+// Opening every match would make a broad query as slow as a search that reads
+// everything, and opening exactly as many as are listed would let the coarse
+// index order decide the answer. The margin is what the second ranking has to
+// work with — and what replaces the sessions that turn out to have nothing to
+// show.
+func openCount(matched, limit int) int {
+	if limit <= 0 {
+		return matched
+	}
+	return min(matched, max(3*limit, limit+10))
 }
 
 // slowNotice says on stderr what is taking so long, but only once it has taken
@@ -251,7 +303,7 @@ func sessionHits(ctx context.Context, a *app.App, s domain.Session, q search.Que
 	if total > 0 {
 		row.Match = "content"
 		row.Hits = hits
-		row.MoreHits = total - len(hits)
+		row.TotalHits = total
 	}
 	return row
 }

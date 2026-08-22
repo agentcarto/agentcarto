@@ -73,7 +73,7 @@ func hitApp(c domain.Conversation) *app.App {
 	return a
 }
 
-func TestSessionHitsReportsWhereAndHowManyMore(t *testing.T) {
+func TestSessionHitsReportsWhereAndHowMany(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
 		{ID: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: "handoff の順序", Prompt: "handoff の順序"}}},
 		{ID: "a1", Parent: "u1", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "handoff はプラグインを先に落とす"}}},
@@ -86,8 +86,10 @@ func TestSessionHitsReportsWhereAndHowManyMore(t *testing.T) {
 	if row.Match != "content" {
 		t.Fatalf("match=%q want content", row.Match)
 	}
-	if len(row.Hits) != 2 || row.MoreHits != 1 {
-		t.Fatalf("hits=%d more=%d want 2 and 1", len(row.Hits), row.MoreHits)
+	// Two hits shown of the three the query was found in: the total is the whole
+	// count, not the remainder, so nothing has to be added back to read it.
+	if len(row.Hits) != 2 || row.TotalHits != 3 {
+		t.Fatalf("hits=%d total=%d want 2 and 3", len(row.Hits), row.TotalHits)
 	}
 	// The turn numbers are the ones show takes.
 	if row.Hits[0].Turn != 1 || row.Hits[1].Turn != 2 {
@@ -112,13 +114,18 @@ func TestSearchResultJSONShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{`"query":"q"`, `"scanned":3`, `"matched":1`,
-		`"session_id":"s1"`, `"plugin_id":"claude"`, `"source":"/logs/s1.jsonl"`, `"match":"metadata"`, `"hits":[]`} {
+		`"session_id":"s1"`, `"plugin_id":"claude"`, `"source":"/logs/s1.jsonl"`, `"match":"metadata"`, `"hits":[]`, `"total_hits":0`} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("result JSON is missing %s: %s", want, b)
 		}
 	}
-	if strings.Contains(string(b), `"note"`) || strings.Contains(string(b), `"more_hits"`) {
+	if strings.Contains(string(b), `"note"`) {
 		t.Errorf("empty fields should be left out: %s", b)
+	}
+	// The value the results are ordered by only means something next to the other
+	// results of the same search, so it stays out of the interface.
+	if strings.Contains(string(b), `"rank"`) {
+		t.Errorf("the ordering value should not be part of the JSON: %s", b)
 	}
 	// A session whose plugin records no times must not report the zero date:
 	// encoding/json does not consider a struct empty, so these fields need

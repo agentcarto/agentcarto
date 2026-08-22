@@ -75,6 +75,11 @@ func commandApp() (*app.App, config.Config) {
 			{ID: "u1", Timestamp: now, Events: talk("handoff について", "こちらでも触れた")},
 		}),
 	}
+	return fixtureApp(sessions, convs)
+}
+
+// fixtureApp serves the given sessions and conversations from one stub plugin.
+func fixtureApp(sessions []domain.Session, convs map[string]domain.Conversation) (*app.App, config.Config) {
 	a := app.Build(config.Config{Index: config.Index{MaxCharsPerSession: 1 << 16}}, nil)
 	a.Catalog = catalog.Catalog{Plugins: []plugin.Instance{{
 		ID:         "claude",
@@ -87,6 +92,11 @@ func commandApp() (*app.App, config.Config) {
 func runSearch(t *testing.T, args ...string) searchResult {
 	t.Helper()
 	a, cfg := commandApp()
+	return runSearchOn(t, a, cfg, args...)
+}
+
+func runSearchOn(t *testing.T, a *app.App, cfg config.Config, args ...string) searchResult {
+	t.Helper()
 	var b bytes.Buffer
 	searchCmd(context.Background(), a, cfg, nil, args, &b)
 	var got searchResult
@@ -101,9 +111,10 @@ func TestSearchCommandEndToEnd(t *testing.T) {
 	if got.Query != "handoff" || got.Scanned != 2 || got.Matched != 2 || len(got.Sessions) != 2 {
 		t.Fatalf("result=%+v", got)
 	}
-	// Newest first, and each session reports where the query was found.
+	// The session whose title also names the query comes first, and each session
+	// reports where the query was found.
 	if got.Sessions[0].SessionID != "aaaa1111-2222" {
-		t.Errorf("sessions are not newest first: %+v", got.Sessions)
+		t.Errorf("sessions are not in relevance order: %+v", got.Sessions)
 	}
 	if got.Sessions[0].Match != "content" || len(got.Sessions[0].Hits) == 0 {
 		t.Errorf("first session: %+v", got.Sessions[0])
@@ -149,6 +160,76 @@ func TestSearchCommandMetadataOnlyMatch(t *testing.T) {
 	}
 	if got.Sessions[0].Match != "metadata" || len(got.Sessions[0].Hits) != 0 {
 		t.Errorf("a title-only match should say so: %+v", got.Sessions[0])
+	}
+}
+
+// The order is relevance, not the clock. The session that keeps coming back to
+// the subject is the one worth opening, and it is usually older than the search
+// that went looking for it — sorting by time alone buried it.
+func TestSearchCommandRanksByRelevance(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	sessions := []domain.Session{
+		{PluginID: "claude", AgentType: "claude", SessionID: "recent-0001", CWD: absPath("/repo/app"), Title: "きのうの作業",
+			UpdatedAt: now, SourceRef: domain.SessionRef{Source: "/logs/recent.jsonl"}},
+		{PluginID: "claude", AgentType: "claude", SessionID: "deep-0002", CWD: absPath("/repo/app"), Title: "むかしの作業",
+			UpdatedAt: now.Add(-72 * time.Hour), SourceRef: domain.SessionRef{Source: "/logs/deep.jsonl"}},
+	}
+	convs := map[string]domain.Conversation{
+		"/logs/recent.jsonl": domain.NewConversation([]domain.ConvNode{
+			{ID: "u1", Timestamp: now, Events: talk("handoff を一度だけ話した", "そうですね")},
+		}),
+		"/logs/deep.jsonl": domain.NewConversation([]domain.ConvNode{
+			{ID: "u1", Timestamp: now, Events: talk("handoff の設計", "handoff は handoff を先に落とす")},
+			{ID: "u2", Parent: "u1", Timestamp: now, Events: talk("handoff の続き", "handoff を直した")},
+		}),
+	}
+	a, cfg := fixtureApp(sessions, convs)
+	got := runSearchOn(t, a, cfg, "handoff")
+	if len(got.Sessions) != 2 {
+		t.Fatalf("sessions=%d want 2", len(got.Sessions))
+	}
+	if got.Sessions[0].SessionID != "deep-0002" {
+		t.Errorf("the older session that says it more should come first: %+v", got.Sessions)
+	}
+	// The total counts every event the query was found in, so it can be read
+	// without adding back the ones that were listed.
+	if got.Sessions[0].TotalHits != 4 {
+		t.Errorf("total_hits=%d want 4", got.Sessions[0].TotalHits)
+	}
+}
+
+// A session dropped after being opened is replaced by the next candidate. The
+// index holds a session as one run of text, so a pattern can match across two
+// messages and nowhere inside one; such a session used to take a slot of --limit
+// with it and leave the answer one session short.
+func TestSearchCommandFillsTheLimitAfterDroppingASession(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	var sessions []domain.Session
+	convs := map[string]domain.Conversation{}
+	add := func(id, source string, updated time.Time, events []domain.Event) {
+		sessions = append(sessions, domain.Session{PluginID: "claude", AgentType: "claude", SessionID: id,
+			CWD: absPath("/repo/app"), Title: "題", UpdatedAt: updated, SourceRef: domain.SessionRef{Source: source}})
+		convs[source] = domain.NewConversation([]domain.ConvNode{{ID: "u1", Timestamp: updated, Events: events}})
+	}
+	// The newest one matches only across the message boundary, so it is opened
+	// first and then dropped.
+	add("across-0001", "/logs/across.jsonl", now, talk("handoff", "プラグイン"))
+	add("real-0002", "/logs/real1.jsonl", now.Add(-time.Hour), talk("handoff\nプラグイン", "はい"))
+	add("real-0003", "/logs/real2.jsonl", now.Add(-2*time.Hour), talk("handoff\nプラグイン", "はい"))
+
+	a, cfg := fixtureApp(sessions, convs)
+	got := runSearchOn(t, a, cfg, "--regex", "handoff\nプラグイン", "--limit", "2")
+	if len(got.Sessions) != 2 {
+		t.Fatalf("the limit was not filled: %d sessions", len(got.Sessions))
+	}
+	for _, s := range got.Sessions {
+		if s.SessionID == "across-0001" {
+			t.Errorf("a session with nothing to show was listed: %+v", s)
+		}
+	}
+	// The dropped session is not counted as a match either.
+	if got.Matched != 2 {
+		t.Errorf("matched=%d want 2", got.Matched)
 	}
 }
 
@@ -238,6 +319,21 @@ func TestUsageListsEveryCommand(t *testing.T) {
 
 // A nil *cache.DB must not reach BuildIndex as a non-nil interface holding a nil
 // pointer: every call on it would panic.
+// The margin over --limit is what the second ranking works with, and it never
+// promises more sessions than matched.
+func TestOpenCount(t *testing.T) {
+	for _, c := range []struct{ matched, limit, want int }{
+		{100, 0, 100}, // no limit: every candidate is opened
+		{100, 10, 30},
+		{100, 1, 11}, // a small limit still gets a margin worth ranking
+		{5, 10, 5},
+	} {
+		if got := openCount(c.matched, c.limit); got != c.want {
+			t.Errorf("openCount(%d, %d)=%d want %d", c.matched, c.limit, got, c.want)
+		}
+	}
+}
+
 func TestArtifactStoreKeepsNilNil(t *testing.T) {
 	if s := artifactStore(nil); s != nil {
 		t.Fatalf("artifactStore(nil) = %#v, want a nil interface", s)

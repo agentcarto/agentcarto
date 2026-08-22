@@ -152,12 +152,20 @@ same `--cwd` / `--agent` / `--since` / `--limit` filters as `search`, with the s
 and where the query was found: the **turn number the TUI shows** (`turn #12` in the detail
 view), the event kind, and a one-line snippet. `show` takes that number.
 
+Sessions come back **most relevant first**: how often the query occurs in the indexed text,
+plus a fixed bonus for each term the session's own title, working directory, agent or id
+answers. Sessions the query cannot tell apart are ordered by time, newest first. The count
+behind the order is read from the index, so it stops at `index.max_chars_per_session` like
+everything else here. `total_hits` is a different number: it counts the **events** the query
+was found in across the whole session, of which `hits` lists at most `--hits-per-session` —
+which is how a two-turn session can report a hundred of them.
+
 | Flag | Meaning |
 |---|---|
 | `--cwd PATH` | only sessions that ran in `PATH` or below it (`.` for the current directory) |
 | `--agent ID` | only one agent (`claude`, `codex`, `grok`, `copilot` — or one editor of it, `copilot-vc` / `copilot-jb`) |
 | `--since` | `7d`, `2w`, `12h`, or a date (`2026-08-01`) |
-| `--limit N` | most sessions to list (default 10, newest first) |
+| `--limit N` | most sessions to list (default 10, most relevant first) |
 | `--hits-per-session N` | most hits per session (default 3, newest kept) |
 | `--context N` | characters of context around a hit (default 120) |
 | `--regex` | read the query as a regular expression instead of words |
