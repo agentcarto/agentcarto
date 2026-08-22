@@ -59,8 +59,13 @@ func talk(prompt, reply string) []domain.Event {
 
 // commandApp builds an App over two sessions in different directories: one that
 // talks about handoff, one that does not.
+//
+// Their times are relative to now, because --since is: a fixed date passes until
+// the day it falls out of the window a test asks for, and then the test fails
+// for a reason that has nothing to do with the code. What the fixtures fix is
+// the distance between the two sessions, which is what the filter is judged on.
 func commandApp() (*app.App, config.Config) {
-	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	sessions := []domain.Session{
 		{PluginID: "claude", AgentType: "claude", SessionID: "aaaa1111-2222", CWD: absPath("/repo/app"), Title: "handoff の順序",
 			UpdatedAt: now, StartedAt: now.Add(-time.Hour), SourceRef: domain.SessionRef{Source: "/logs/a.jsonl"}},
