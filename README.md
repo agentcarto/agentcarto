@@ -27,8 +27,8 @@ own processes, no integration required:
 
 | Glyph | Status | Meaning |
 |---|---|---|
-| `●` | `RUN` | The agent is actively processing |
-| `●` | `THINK` | Reasoning or streaming a reply |
+| `●` | `RUN` | Writing the answer (or a tool's input) |
+| `●` | `THINK` | Working on a reply, with nothing emitted yet |
 | `●` | `TOOL` | Running a tool |
 | `●` | `ASK` | Waiting for **your** approval (a permission prompt) |
 | `○` | `READY` | The process is alive but idle, ready for input |

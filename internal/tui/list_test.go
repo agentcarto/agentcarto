@@ -18,7 +18,20 @@ func TestStatusMarkPrototypeFormat(t *testing.T) {
 	cases := []struct {
 		s    domain.Session
 		want string
-	}{{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventToolCall}, "● TOOL"}, {domain.Session{Status: domain.StatusRunning, LastKind: domain.EventUser}, "● THINK"}, {domain.Session{Status: domain.StatusRunning, PermissionWait: true}, "● ASK"}, {domain.Session{Status: domain.StatusReady}, "○ READY"}, {domain.Session{Status: domain.StatusOther}, "· OTHER"}}
+	}{
+		// LastKind is the activity in progress, so a tool call is the only kind that means a tool is
+		// running, and a session that has already started producing its answer (stream) is not thinking.
+		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventToolCall}, "● TOOL"},
+		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventUser}, "● THINK"},
+		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventReasoning}, "● THINK"},
+		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventToolResult}, "● THINK"},
+		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventStream}, "● RUN"},
+		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventAssistant}, "● RUN"},
+		{domain.Session{Status: domain.StatusRunning}, "● RUN"},
+		{domain.Session{Status: domain.StatusRunning, PermissionWait: true}, "● ASK"},
+		{domain.Session{Status: domain.StatusReady}, "○ READY"},
+		{domain.Session{Status: domain.StatusOther}, "· OTHER"},
+	}
 	for _, c := range cases {
 		got := statusMark(c.s)
 		if !strings.Contains(got, c.want) || lipgloss.Width(got) != 8 {

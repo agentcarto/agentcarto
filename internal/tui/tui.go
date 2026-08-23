@@ -1197,15 +1197,21 @@ func wrapWidth(s string, n int) []string {
 	return out
 }
 
+// statusMark labels what a session is doing, which is what LastKind reports:
+// plugins whose logs only record a block once it is finished map the tail
+// through common.Ongoing first, so a kind here means the activity, not the
+// record. THINK is therefore the model working before it emits anything
+// (a prompt or a tool result went in), and a session already producing its
+// answer — reasoning over, text or a tool input streaming out — is RUN.
 func statusMark(s domain.Session) string {
 	if s.Status == domain.StatusRunning {
 		if s.PermissionWait {
 			return padCol("● ASK", 8)
 		}
-		if s.LastKind == domain.EventToolCall || s.LastKind == domain.EventToolResult {
+		if s.LastKind == domain.EventToolCall {
 			return padCol("● TOOL", 8)
 		}
-		if s.LastKind == domain.EventReasoning || s.LastKind == domain.EventStream || s.LastKind == domain.EventUser {
+		if s.LastKind == domain.EventUser || s.LastKind == domain.EventReasoning || s.LastKind == domain.EventToolResult {
 			return padCol("● THINK", 8)
 		}
 		return padCol("● RUN", 8)
