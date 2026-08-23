@@ -1756,6 +1756,7 @@ func (m Model) detailView() string {
 	colW := m.detailColWidths(s, offset, end)
 	modelW := m.detailModelWidth(s, offset, end)
 	b.WriteString(clip(m.detailLead(s), max(20, m.width-1)) + "\n")
+	b.WriteString(m.detailCWDLine(s) + "\n")
 	b.WriteString(m.detailSubLine(s) + "\n")
 	bodyLines := []string{}
 	for i := offset; i < end; i++ {
@@ -1860,10 +1861,19 @@ func (m Model) detailLead(s *domain.Session) string {
 	return lead
 }
 
-// detailSubLine builds the second header line: "cwd · title", an optional "forked from"
+// detailCWDLine builds the second header line: the working directory on a line of its
+// own. It shares the line with nothing else so a deep path is readable in full; only a
+// terminal narrower than the path itself makes shortCWD shorten it.
+func (m Model) detailCWDLine(s *domain.Session) string {
+	w := max(20, m.width-2)
+	return styled(clip(" "+shortCWD(s.CWD, w), w+1), lipgloss.Color("3"), false, false)
+}
+
+// detailSubLine builds the third header line: the title, an optional "forked from"
 // lineage, and (when descended without a fork route) a breadcrumb of the current level.
+// The working directory is on its own line above (detailCWDLine).
 func (m Model) detailSubLine(s *domain.Session) string {
-	sub := " " + shortCWD(s.CWD, 28) + " · " + s.Title
+	sub := " " + s.Title
 	if s.LogDeleted {
 		// Said here as well as in the list: this is the screen someone reads before
 		// trying to resume, and the log it would resume from is not there.
@@ -2780,7 +2790,8 @@ func (m Model) detailBodyRows() int {
 	if m.height <= 0 {
 		return max(1, len(m.detailRows)*8)
 	}
-	return max(1, m.height-3)
+	// Rows 0-2 = header (lead, cwd, title), last row = footer.
+	return max(1, m.height-4)
 }
 func (m Model) turnEvents(ids []string) []domain.Event {
 	return transcript.EventsOf(*m.detail, ids)

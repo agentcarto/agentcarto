@@ -460,7 +460,8 @@ func TestDetailCursorScrollsAndMovesWithinViewport(t *testing.T) {
 	}
 	c := domain.NewConversation(nodes)
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
-	m := Model{width: 100, height: 6, detailSession: &s}
+	// height=7 -> 3 header lines (lead, cwd, title) + 3 body rows + footer.
+	m := Model{width: 100, height: 7, detailSession: &s}
 	updated, _ := m.Update(convMsg{c: &c})
 	m = updated.(Model)
 	for i := 0; i < 4; i++ {
@@ -495,7 +496,8 @@ func TestConversationRefreshPreservesDetailPosition(t *testing.T) {
 	}
 	c := domain.NewConversation(nodes)
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
-	m := Model{width: 100, height: 6, detail: &c, detailSession: &s, detailCursor: 4, detailOffset: 2}
+	// height=7 -> 3 header lines (lead, cwd, title) + 3 body rows + footer.
+	m := Model{width: 100, height: 7, detail: &c, detailSession: &s, detailCursor: 4, detailOffset: 2}
 	updated, _ := m.Update(convMsg{c: &c})
 	m = updated.(Model)
 	if m.detailCursor != 4 || m.detailOffset != 2 {
