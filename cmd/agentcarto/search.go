@@ -65,6 +65,10 @@ type searchSession struct {
 	// can hold a hundred of them.
 	TotalHits int    `json:"total_hits"`
 	Error     string `json:"error,omitempty"`
+	// LogDeleted says the log this session was read from is no longer on disk:
+	// what is reported came from the cache. Such a session cannot be resumed,
+	// forked or relocated, only read.
+	LogDeleted bool `json:"log_deleted,omitempty"`
 	// rank orders the listed sessions, and is not part of the JSON: it is a number
 	// that only means something next to the other results of the same search.
 	rank int
@@ -253,7 +257,13 @@ func printSearchTable(w io.Writer, r searchResult, snippet int) {
 		if s.Match != "content" {
 			found = s.Match
 		}
-		fmt.Fprintf(w, "%-8s %-8s %-10s %-9s %s\n", idPrefix(s.SessionID), s.PluginID, date, found, s.CWD)
+		gone := ""
+		if s.LogDeleted {
+			// Said on the row rather than left to be discovered: the id is about to be
+			// handed to a command that cannot resume it.
+			gone = "  (log deleted)"
+		}
+		fmt.Fprintf(w, "%-8s %-8s %-10s %-9s %s%s\n", idPrefix(s.SessionID), s.PluginID, date, found, s.CWD, gone)
 		if s.Title != "" {
 			fmt.Fprintf(w, "  %s\n", short(oneLine(s.Title), 72))
 		}
@@ -382,6 +392,7 @@ func sessionHits(ctx context.Context, a *app.App, s domain.Session, q search.Que
 		SessionID: s.SessionID, PluginID: s.PluginID, AgentType: s.AgentType,
 		Title: s.Title, CWD: s.CWD, StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
 		Source: s.SourceRef.Source, Match: "metadata", Hits: []search.Hit{},
+		LogDeleted: s.LogDeleted,
 	}
 	conv, err := a.Conversation(ctx, s)
 	if err != nil || conv == nil {

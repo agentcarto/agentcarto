@@ -70,6 +70,10 @@ indexed up to 128 KiB, so a long session's tail can be missed, and only the bran
 renders is indexed — a rewound session's abandoned lines are not searchable, and `show` says
 how many there are.
 
+Sessions whose logs were deleted are still listed and searched: agentcarto keeps a copy of each
+conversation in its cache. They are marked `(log deleted)` and can be read but not resumed. What
+a search of one can find is whatever was in the cache when the log went away.
+
 A query of several words means all of them, in any order. Results come back **most relevant
 first** — how many turns hold the query, plus a bonus when the session's own title or working
 directory names it — with the newest breaking ties. A search or a listing narrowed with `--cwd` that

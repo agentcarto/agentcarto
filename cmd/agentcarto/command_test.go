@@ -578,3 +578,45 @@ func TestSearchCommandRegex(t *testing.T) {
 		t.Fatalf("a pattern that matches nothing: %+v", got)
 	}
 }
+
+// A session that outlived its log says so where its id is printed: the id is
+// about to be handed to a command, and only some of them can still act on it.
+func TestListAndSearchShowADeletedLog(t *testing.T) {
+	now := time.Now()
+	sessions := []domain.Session{
+		{PluginID: "claude", AgentType: "claude", SessionID: "gone-0001", CWD: absPath("/repo/app"),
+			Title: "消えたログ", UpdatedAt: now, LogDeleted: true,
+			SourceRef: domain.SessionRef{Source: "/logs/gone.jsonl"}},
+	}
+	convs := map[string]domain.Conversation{
+		"/logs/gone.jsonl": domain.NewConversation([]domain.ConvNode{
+			{ID: "u1", Timestamp: now, Events: talk("handoff の話", "はい")},
+		}),
+	}
+	a, cfg := fixtureApp(sessions, convs)
+
+	var b bytes.Buffer
+	listCmd(context.Background(), a, cfg, nil, nil, false, &b)
+	if out := b.String(); !strings.Contains(out, "log deleted") {
+		t.Errorf("the listing should say the log is gone:\n%s", out)
+	}
+
+	// The query is one the session's own title answers: with no cache to read
+	// from, a session whose log is gone has no indexed text of its own.
+	got := runSearchOn(t, a, cfg, "消えたログ")
+	if len(got.Sessions) != 1 || !got.Sessions[0].LogDeleted {
+		t.Fatalf("the JSON should carry the flag: %+v", got.Sessions)
+	}
+	b.Reset()
+	searchCmd(context.Background(), a, cfg, nil, []string{"消えたログ"}, &b)
+	if out := b.String(); !strings.Contains(out, "(log deleted)") {
+		t.Errorf("the table should say the log is gone:\n%s", out)
+	}
+
+	// What acts on the log is refused; reading it back is not.
+	for _, action := range []string{"resume", "fork", "relocate"} {
+		if av := a.Availability(sessions[0], action); av.Reason == "" {
+			t.Errorf("%s should be refused for a session whose log is gone", action)
+		}
+	}
+}

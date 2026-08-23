@@ -162,7 +162,7 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 			rows = append(rows, listedSession{
 				SessionID: s.SessionID, PluginID: s.PluginID, AgentType: s.AgentType,
 				Title: s.Title, CWD: s.CWD, StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
-				Source: s.SourceRef.Source, Status: string(s.Status),
+				Source: s.SourceRef.Source, Status: string(s.Status), LogDeleted: s.LogDeleted,
 			})
 		}
 		printJSON(w, struct {
@@ -182,8 +182,12 @@ func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, arg
 		if active {
 			status = fmt.Sprintf("%-8s ", s.Status)
 		}
+		title := short(oneLine(s.Title), 60)
+		if s.LogDeleted {
+			title = "(log deleted) " + short(oneLine(s.Title), 46)
+		}
 		fmt.Fprintf(w, "%-8s %-8s %s%-10s %-30s %s\n",
-			idPrefix(s.SessionID), s.PluginID, status, day(s.UpdatedAt), short(s.CWD, 30), short(oneLine(s.Title), 60))
+			idPrefix(s.SessionID), s.PluginID, status, day(s.UpdatedAt), short(s.CWD, 30), title)
 	}
 }
 
@@ -276,6 +280,9 @@ type listedSession struct {
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
 	Source    string    `json:"source"`
 	Status    string    `json:"status,omitempty"`
+	// LogDeleted says the session outlived the log it was read from: it is listed
+	// from the cache, and cannot be resumed, forked or relocated.
+	LogDeleted bool `json:"log_deleted,omitempty"`
 }
 
 // usage lists the commands. The TUI is what agentcarto does when it is given

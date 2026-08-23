@@ -196,6 +196,17 @@ A search or a listing narrowed with `--cwd` that finds nothing reports how many 
 outside the filter and where they are, with the directory containing yours named first — the
 work is often one level up, and an unexplained zero reads as "never discussed".
 
+**A deleted log no longer takes its session with it.** Agents delete their own logs — a cleanup,
+a project directory that moved — and what was said then existed only in agentcarto's cache, where
+nothing could reach it. The conversation of every session is now kept there (compressed: 94
+sessions of 71 MB of logs came to 10 MB), so a session whose log is gone is still listed, searched
+and read. It is marked `(log deleted)` in the listings and `"log_deleted": true` in the JSON, and
+it cannot be resumed, forked or relocated — those need the log. `--no-cache` and
+`cache.enabled: false` turn all of this off: with no cache there is nothing to keep.
+
+This is worth knowing before deleting a log on purpose: **the conversation stays in the cache**,
+including whatever was pasted into it. `agentcarto cache clear` is what removes it.
+
 **Sessions that only searched are left out.** Using `search` creates a session whose mention of
 the query is the search itself, and it answers that same query from then on — including the one
 running right now, which is why the search that found nothing keeps finding itself. A session

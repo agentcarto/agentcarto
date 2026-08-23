@@ -44,6 +44,11 @@ func (a *App) Conversation(ctx context.Context, s domain.Session) (*domain.Conve
 	return l.LoadConversation(ctx, s.SourceRef)
 }
 func (a *App) Availability(s domain.Session, action string) domain.ActionAvailability {
+	if s.LogDeleted && action != "open" {
+		// Resuming, forking and relocating all work on the log, and the log is what
+		// is gone. Reading the session back is the one thing the cache can still do.
+		return domain.ActionAvailability{Reason: "the log this session was read from is gone; it can be read but not continued"}
+	}
 	p, ok := a.Catalog.Plugin(s.PluginID)
 	if !ok {
 		return domain.ActionAvailability{Reason: "plugin unavailable"}
