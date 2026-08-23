@@ -101,6 +101,11 @@ func header(s domain.Session, turns int, o Options) []string {
 		count = fmt.Sprintf("%d of %d", turns, o.SessionTurns)
 	}
 	add("Turns", count)
+	if s.LogDeleted {
+		// The file named above is not there any more. Saying so in the document
+		// keeps it from being read as the state of a session that can be continued.
+		add("Log", "deleted (this was read from the cache)")
+	}
 	if o.Branches > 0 {
 		add("Other branches", fmt.Sprintf("%d (rewound or abandoned; not shown here)", o.Branches))
 	}

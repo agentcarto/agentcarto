@@ -17,8 +17,13 @@ import (
 )
 
 type App struct {
-	Config      config.Config
-	Catalog     catalog.Catalog
+	Config  config.Config
+	Catalog catalog.Catalog
+	// Store is where derived data is kept between runs — the search index, and the
+	// conversation of every session. It is nil when the cache is off, and then a
+	// session whose log is gone cannot be read at all: there is nowhere else it
+	// could come from.
+	Store       ArtifactStore
 	mu          sync.Mutex
 	lastRunning map[domain.SessionKey]time.Time
 }
@@ -33,6 +38,17 @@ func (a *App) Scan(ctx context.Context, warm []domain.Session, dead map[string]s
 	return a.Catalog.Scan(ctx, warm, dead)
 }
 func (a *App) Conversation(ctx context.Context, s domain.Session) (*domain.Conversation, error) {
+	if s.LogDeleted {
+		// The file this session names is gone; the cache is the only place left.
+		if a.Store == nil {
+			return nil, fmt.Errorf("the log is gone and the cache is switched off")
+		}
+		var c domain.Conversation
+		if !a.Store.GetBlob(ctx, s, ConversationArtifactKind, &c) {
+			return nil, fmt.Errorf("the log is gone and no copy of the conversation was kept")
+		}
+		return &c, nil
+	}
 	p, ok := a.Catalog.Plugin(s.PluginID)
 	if !ok {
 		return nil, fmt.Errorf("plugin %q unavailable", s.PluginID)

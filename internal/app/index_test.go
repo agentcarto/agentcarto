@@ -73,6 +73,21 @@ func (s *storeStub) PutBlob(_ context.Context, x domain.Session, kind string, v 
 	return nil
 }
 func (s *storeStub) Size() int64 { return s.size }
+func (s *storeStub) GetBlob(_ context.Context, x domain.Session, kind string, dst any) bool {
+	v, ok := s.blobs[s.key(x, kind)]
+	if !ok {
+		return false
+	}
+	// The real store round-trips through JSON; the stub hands back what it was
+	// given, which is a pointer to the same conversation.
+	if c, isConv := v.(*domain.Conversation); isConv {
+		if p, isPtr := dst.(*domain.Conversation); isPtr {
+			*p = *c
+			return true
+		}
+	}
+	return false
+}
 
 func indexApp(impl any) *App {
 	return &App{
@@ -286,5 +301,46 @@ func TestBuildIndexStopsStoringWhenTheCacheIsFull(t *testing.T) {
 	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
 	if len(store.blobs) != 1 {
 		t.Errorf("the conversation should be stored once there is room: %d blobs", len(store.blobs))
+	}
+}
+
+// Reading a session whose log is gone is the whole point of keeping the
+// conversation. It comes from the cache, and says so plainly when it cannot.
+func TestConversationOfADeletedLogComesFromTheCache(t *testing.T) {
+	l := &loaderStub{text: "handoff order"}
+	a := indexApp(l)
+	a.Config.Cache.CacheConversations = true
+	store := newStore()
+	a.Store = store
+	s := indexSession()
+
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	gone := s
+	gone.LogDeleted = true
+
+	loads := l.loads
+	c, err := a.Conversation(context.Background(), gone)
+	if err != nil {
+		t.Fatalf("the stored conversation should be readable: %v", err)
+	}
+	if c == nil || len(c.Nodes) == 0 {
+		t.Fatalf("an empty conversation came back: %+v", c)
+	}
+	if l.loads != loads {
+		t.Errorf("the plugin was asked for a log that is gone: loads=%d", l.loads)
+	}
+
+	// Nothing stored, and nothing to fall back on: say which of the two it is.
+	store.blobs = map[string]any{}
+	if _, err := a.Conversation(context.Background(), gone); err == nil {
+		t.Error("reading a session with no stored conversation should fail")
+	} else if !strings.Contains(err.Error(), "no copy") {
+		t.Errorf("the reason should name what is missing: %v", err)
+	}
+	a.Store = nil
+	if _, err := a.Conversation(context.Background(), gone); err == nil {
+		t.Error("reading with the cache off should fail")
+	} else if !strings.Contains(err.Error(), "cache is switched off") {
+		t.Errorf("the reason should name the cache: %v", err)
 	}
 }

@@ -34,6 +34,8 @@ type ArtifactStore interface {
 	PutBlob(ctx context.Context, s domain.Session, kind string, v any) error
 	// Size is what the store occupies, so a caller can stop before filling it.
 	Size() int64
+	// GetBlob reads back what PutBlob wrote.
+	GetBlob(ctx context.Context, s domain.Session, kind string, dst any) bool
 }
 
 // indexArtifact is the cached payload. The field names are part of the on-disk

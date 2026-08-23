@@ -60,14 +60,17 @@ func main() {
 	case "list", "active":
 		db := openCache(ctx, c, *noCache)
 		defer closeCache(db)
+		a.Store = artifactStore(db)
 		listCmd(ctx, a, c, db, args[1:], cmd == "active", os.Stdout)
 	case "search":
 		db := openCache(ctx, c, *noCache)
 		defer closeCache(db)
+		a.Store = artifactStore(db)
 		searchCmd(ctx, a, c, db, args[1:], os.Stdout)
 	case "show":
 		db := openCache(ctx, c, *noCache)
 		defer closeCache(db)
+		a.Store = artifactStore(db)
 		showCmd(ctx, a, c, db, args[1:], os.Stdout)
 	case "help":
 		usage(os.Stdout)
