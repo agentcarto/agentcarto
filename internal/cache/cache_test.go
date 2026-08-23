@@ -318,3 +318,63 @@ func TestPruneKeepsWhatCanStillBeRead(t *testing.T) {
 		t.Error("the conversation of the surviving session was collected with it")
 	}
 }
+
+// What can be rebuilt is evicted first. A conversation whose log is gone cannot
+// be: it is the last thing the cache gives up, however long ago it was read.
+// The rounds are of a fixed size, so the fixture is large enough that one round
+// does not swallow everything.
+func TestEnforceGivesUpRebuildableArtifactsFirst(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	blob := domain.NewConversation([]domain.ConvNode{{ID: "n1", Events: []domain.Event{
+		{Kind: domain.EventUser, Text: strings.Repeat("あ", 20000), Prompt: "x"},
+	}}})
+	var live, gone []domain.Session
+	for i := 0; i < 20; i++ {
+		live = append(live, domain.Session{PluginID: "p", SessionID: fmt.Sprintf("live%02d", i), Fingerprint: "fp", ParserVersion: "1"})
+		gone = append(gone, domain.Session{PluginID: "p", SessionID: fmt.Sprintf("gone%02d", i), Fingerprint: "fp", ParserVersion: "1"})
+	}
+	// The deleted sessions were last seen long ago; the live ones were seen by the
+	// scan that just ran.
+	for _, s := range gone {
+		if _, e := d.db.ExecContext(ctx, "INSERT INTO sessions VALUES('p',?,?,?)", s.SessionID, []byte(`{"session_id":"`+s.SessionID+`"}`), 1000); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e := d.Save(ctx, live); e != nil {
+		t.Fatal(e)
+	}
+	for _, s := range append(append([]domain.Session{}, gone...), live...) {
+		if e := d.PutBlob(ctx, s, "conversation-v1", &blob); e != nil {
+			t.Fatal(e)
+		}
+	}
+	// Eviction by access time alone would take the deleted sessions first: theirs
+	// are the oldest reads here.
+	if _, e := d.db.ExecContext(ctx, "UPDATE artifacts SET accessed=1 WHERE session_id LIKE 'gone%'"); e != nil {
+		t.Fatal(e)
+	}
+
+	before, e := d.sizeOnDisk()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := d.Enforce(ctx, before/2); e != nil {
+		t.Fatal(e)
+	}
+
+	count := func(like string) int {
+		var n int
+		if e := d.db.QueryRow("SELECT count(*) FROM artifacts WHERE session_id LIKE ?", like).Scan(&n); e != nil {
+			t.Fatal(e)
+		}
+		return n
+	}
+	keptGone, keptLive := count("gone%"), count("live%")
+	if keptLive >= keptGone {
+		t.Errorf("kept %d rebuildable and %d irreplaceable: the ones that cannot be rebuilt should outlast", keptLive, keptGone)
+	}
+	if keptGone == 0 {
+		t.Error("every conversation of a deleted log was evicted")
+	}
+}

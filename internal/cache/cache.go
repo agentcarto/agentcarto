@@ -268,6 +268,15 @@ func (d *DB) Prune(ctx context.Context, sessions []domain.Session, successful ma
 
 // sizeOnDisk reports the cache's real footprint: the main file plus the WAL
 // (which can hold most of the data between checkpoints).
+// Size is what the cache occupies on disk right now, write-ahead log included.
+// A caller about to store something large asks this first: a store at its limit
+// should stop taking conversations rather than make room by deleting one it
+// will be asked for again on the next run.
+func (d *DB) Size() int64 {
+	n, _ := d.sizeOnDisk()
+	return n
+}
+
 func (d *DB) sizeOnDisk() (int64, error) {
 	st, e := os.Stat(d.path)
 	if e != nil {
@@ -305,7 +314,20 @@ func (d *DB) Enforce(ctx context.Context, max int64) error {
 		if size <= max {
 			return nil
 		}
-		res, e := d.db.ExecContext(ctx, "DELETE FROM artifacts WHERE rowid IN (SELECT rowid FROM artifacts ORDER BY CASE kind WHEN 'conversation' THEN 0 ELSE 1 END, accessed LIMIT 32)")
+		// What can be rebuilt goes first. A conversation of a session that is still
+		// on disk is reparsed from the log if it is needed again; the index is
+		// reparsed too and is small enough that dropping it frees little. A
+		// conversation whose log is gone is the only copy there is, so it is the
+		// last thing to go — a session is taken to be gone when the last scan did
+		// not see it, which is what its seen time says.
+		res, e := d.db.ExecContext(ctx, `DELETE FROM artifacts WHERE rowid IN (
+			SELECT a.rowid FROM artifacts a
+			LEFT JOIN sessions s ON s.plugin_id = a.plugin_id AND s.session_id = a.session_id
+			ORDER BY CASE
+				WHEN a.kind LIKE 'conversation-%' AND s.seen >= (SELECT max(seen) FROM sessions) THEN 0
+				WHEN a.kind LIKE 'conversation-%' THEN 2
+				ELSE 1
+			END, a.accessed LIMIT 32)`)
 		if e != nil {
 			return e
 		}

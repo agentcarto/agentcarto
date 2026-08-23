@@ -38,6 +38,9 @@ type storeStub struct {
 	m          map[string]indexArtifact
 	blobs      map[string]any
 	gets, puts int
+	// size is what the store claims to occupy; a test raises it to stand for a
+	// cache that has reached its limit.
+	size int64
 }
 
 func newStore() *storeStub {
@@ -69,10 +72,14 @@ func (s *storeStub) PutBlob(_ context.Context, x domain.Session, kind string, v 
 	s.blobs[s.key(x, kind)] = v
 	return nil
 }
+func (s *storeStub) Size() int64 { return s.size }
 
 func indexApp(impl any) *App {
 	return &App{
-		Config:  config.Config{Index: config.Index{MaxCharsPerSession: 1 << 16}},
+		Config: config.Config{
+			Index: config.Index{MaxCharsPerSession: 1 << 16},
+			Cache: config.Cache{MaxSize: 1 << 20},
+		},
 		Catalog: catalog.Catalog{Plugins: []plugin.Instance{{ID: "p", Impl: impl}}},
 	}
 }
@@ -242,5 +249,42 @@ func TestBuildIndexDoesNotAskThePluginForADeletedLog(t *testing.T) {
 	}
 	if fp[gone.SourceRef.Source] != gone.Fingerprint {
 		t.Errorf("the fingerprint should still be reported: %#v", fp)
+	}
+}
+
+// A cache at its limit stops taking conversations. Storing into a full cache
+// means the next run evicts one and reparses the session to store it again, and
+// then the run after that — which is what made a search take five seconds every
+// time instead of one.
+func TestBuildIndexStopsStoringWhenTheCacheIsFull(t *testing.T) {
+	l := &loaderStub{text: "handoff order"}
+	a := indexApp(l)
+	a.Config.Cache.CacheConversations = true
+	store := newStore()
+	store.size = int64(a.Config.Cache.MaxSize) // no room left
+	s := indexSession()
+
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	if len(store.blobs) != 0 {
+		t.Errorf("a full cache should not take the conversation: %d blobs", len(store.blobs))
+	}
+	// The index is still built: it is small, and without it nothing can be found.
+	if _, ok := store.m[store.key(s, SearchArtifactKind)]; !ok {
+		t.Error("the index should still have been written")
+	}
+
+	// Once indexed, a full cache gives the parser nothing more to do — which is
+	// the loop this closes.
+	loads := l.loads
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	if l.loads != loads {
+		t.Errorf("a full cache should not keep reparsing: loads=%d want %d", l.loads, loads)
+	}
+
+	// Room again: the conversation is picked up on the next pass.
+	store.size = 0
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	if len(store.blobs) != 1 {
+		t.Errorf("the conversation should be stored once there is room: %d blobs", len(store.blobs))
 	}
 }

@@ -32,6 +32,8 @@ type ArtifactStore interface {
 	// PutBlob stores a compressed artifact: the conversation, which is the size of
 	// the log it was read from.
 	PutBlob(ctx context.Context, s domain.Session, kind string, v any) error
+	// Size is what the store occupies, so a caller can stop before filling it.
+	Size() int64
 }
 
 // indexArtifact is the cached payload. The field names are part of the on-disk
@@ -90,7 +92,11 @@ func (a *App) BuildIndex(ctx context.Context, sessions []domain.Session, store A
 		// deletes its own logs, and what was said is then only here. It is written
 		// once per version of a session, and asking whether it is already there
 		// costs a row lookup against the parse it saves.
+		// A full store stops taking conversations. Storing into a store that is over
+		// its limit only means the next run evicts one and reparses the session to
+		// store it again — for as long as it stays full, which is forever.
 		keep := store != nil && a.Config.Cache.CacheConversations &&
+			store.Size() < int64(a.Config.Cache.MaxSize) &&
 			!store.HasArtifact(ctx, s, ConversationArtifactKind)
 		if !indexed || keep {
 			// One parse serves both. Without the second condition a session that is
