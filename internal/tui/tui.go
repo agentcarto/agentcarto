@@ -23,9 +23,15 @@ import (
 )
 
 type scanMsg struct {
-	snap    domain.Snapshot
-	index   *searchpkg.Index
-	indexFP map[string]string
+	snap domain.Snapshot
+	// sessions is what the list shows: the scan's own sessions plus the ones the
+	// cache remembers and the scan could not find. snap.Sessions stays as it came
+	// back, because that is what the cache is told it has seen — recording a
+	// deleted session as seen just now would make it look alive to everything
+	// that asks when a session was last there.
+	sessions []domain.Session
+	index    *searchpkg.Index
+	indexFP  map[string]string
 }
 type convMsg struct {
 	c         *domain.Conversation
@@ -164,6 +170,11 @@ func New(a *app.App, cached []domain.Session, db *cache.DB) Model {
 	q.Prompt = "/ "
 	ri := textinput.New()
 	ri.Prompt = ""
+	// The cache is also where a session whose log is gone is read from, so the app
+	// is given it here rather than only using it for the index.
+	if db != nil {
+		a.Store = db
+	}
 	m := Model{app: a, sessions: cached, query: q, relocInput: ri, scanning: true, view: a.Config.UI.DefaultView, cache: db}
 	m.filter()
 	return m
@@ -196,11 +207,15 @@ func (m Model) scan() tea.Cmd {
 		// be a non-nil ArtifactStore holding a nil pointer, and every call on it
 		// would panic.
 		var store app.ArtifactStore
+		sessions := snap.Sessions
 		if m.cache != nil {
 			store = m.cache
+			if warm, e := m.cache.Load(ctx); e == nil {
+				sessions = app.MergeDeletedLogs(sessions, warm, scanSucceeded(m.app, snap))
+			}
 		}
-		idx, fp := m.app.BuildIndex(ctx, snap.Sessions, store, m.index, m.indexFP)
-		return scanMsg{snap, idx, fp}
+		idx, fp := m.app.BuildIndex(ctx, sessions, store, m.index, m.indexFP)
+		return scanMsg{snap, sessions, idx, fp}
 	}
 }
 func tick(d time.Duration) tea.Cmd {
@@ -482,20 +497,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // detail view is open — reloads the conversation so it follows any growth.
 func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 	m.scanned = true
-	m.sessions = x.snap.Sessions
+	m.sessions = x.sessions
 	m.dead = x.snap.Dead
 	m.index = x.index
 	m.indexFP = x.indexFP
 	if m.cache != nil {
 		_ = m.cache.Save(context.Background(), x.snap.Sessions)
-		failed := map[string]bool{}
-		for _, e := range x.snap.Errors {
-			failed[e.PluginID] = true
-		}
-		successful := map[string]bool{}
-		for _, p := range m.app.Catalog.Plugins {
-			successful[p.ID] = !failed[p.ID]
-		}
+		successful := scanSucceeded(m.app, x.snap)
 		_ = m.cache.Prune(context.Background(), x.snap.Sessions, successful, time.Duration(m.app.Config.Cache.MaxAge))
 		_ = m.cache.Enforce(context.Background(), int64(m.app.Config.Cache.MaxSize))
 		// The index that was just written is the only artifact worth keeping; a
@@ -1415,6 +1423,12 @@ func (m Model) sessionRow(s domain.Session, selected bool, maxN int, prefix stri
 	if prefix != "" {
 		b.WriteString(styled(prefix, lipgloss.Color("5"), selected, false))
 	}
+	// The log this row was read from is gone; what is shown came from the cache.
+	// It matters before anything is asked of the session: resume and fork are not
+	// offered for it.
+	if s.LogDeleted {
+		b.WriteString(styled("⌫ ", lipgloss.Color("8"), selected, false))
+	}
 	remain := max(1, m.width-1-lipgloss.Width(b.String()))
 	b.WriteString(styled(clip(s.Title, remain), "", selected, false))
 	line := b.String()
@@ -1842,6 +1856,11 @@ func (m Model) detailLead(s *domain.Session) string {
 // lineage, and (when descended without a fork route) a breadcrumb of the current level.
 func (m Model) detailSubLine(s *domain.Session) string {
 	sub := " " + shortCWD(s.CWD, 28) + " · " + s.Title
+	if s.LogDeleted {
+		// Said here as well as in the list: this is the screen someone reads before
+		// trying to resume, and the log it would resume from is not there.
+		sub = " ⌫ log deleted (read from the cache) ·" + sub
+	}
 	// Use the same "forked from: <lineage>" wording whether a fork was opened directly or descended into.
 	route, showP := m.detailForkRoute()
 	if len(route) > 0 {
@@ -2956,4 +2975,19 @@ func Run(a *app.App, cached []domain.Session, db *cache.DB) (*domain.Command, er
 		return m.launch, nil
 	}
 	return nil, nil
+}
+
+// scanSucceeded says, per plugin, whether its scan came back without an error.
+// A plugin that failed finds nothing, which must not be read as "every session
+// of that agent was deleted".
+func scanSucceeded(a *app.App, snap domain.Snapshot) map[string]bool {
+	failed := map[string]bool{}
+	for _, e := range snap.Errors {
+		failed[e.PluginID] = true
+	}
+	ok := map[string]bool{}
+	for _, p := range a.Catalog.Plugins {
+		ok[p.ID] = !failed[p.ID]
+	}
+	return ok
 }

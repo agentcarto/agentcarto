@@ -3,12 +3,15 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/agentcarto/agentcarto/internal/app"
 	"github.com/agentcarto/agentcarto/internal/config"
+	"github.com/agentcarto/core/domain"
 	"github.com/agentcarto/core/plugin"
 	"github.com/agentcarto/plugin-claude"
 )
@@ -82,5 +85,39 @@ func TestFirstScanIsFullThenDifferential(t *testing.T) {
 	sm3 := run(m)
 	if got := sm3.snap.Sessions[0].Title; got != realTitle {
 		t.Fatalf("first scan should be full (reparse, fresh title %q), got %q", realTitle, got)
+	}
+}
+
+// The list is what the scan found plus what the cache remembers and the scan
+// could not: a session whose log was deleted is still there to read. What the
+// cache is told it has seen stays the scan's own answer, so a deleted session
+// does not look like it was there a moment ago.
+func TestScanMsgSeparatesWhatWasSeenFromWhatIsShown(t *testing.T) {
+	now := time.Now()
+	seen := domain.Session{PluginID: "claude", SessionID: "alive", UpdatedAt: now,
+		SourceRef: domain.SessionRef{Source: "/logs/alive.jsonl"}}
+	gone := domain.Session{PluginID: "claude", SessionID: "gone", UpdatedAt: now.Add(-time.Hour),
+		SourceRef: domain.SessionRef{Source: "/logs/gone.jsonl"}}
+
+	snap := domain.Snapshot{Sessions: []domain.Session{seen}}
+	shown := app.MergeDeletedLogs(snap.Sessions, []domain.Session{seen, gone}, map[string]bool{"claude": true})
+	msg := scanMsg{snap: snap, sessions: shown}
+
+	if len(msg.snap.Sessions) != 1 || msg.snap.Sessions[0].SessionID != "alive" {
+		t.Errorf("the snapshot should stay what the scan returned: %+v", msg.snap.Sessions)
+	}
+	if len(msg.sessions) != 2 {
+		t.Fatalf("the list should hold both: %+v", msg.sessions)
+	}
+	if !msg.sessions[1].LogDeleted {
+		t.Errorf("the session read from the cache should be marked: %+v", msg.sessions[1])
+	}
+
+	m := Model{app: &app.App{}, width: 120}
+	if row := m.sessionRow(msg.sessions[1], false, 1, ""); !strings.Contains(row, "⌫") {
+		t.Errorf("the row should mark a deleted log: %q", row)
+	}
+	if row := m.sessionRow(msg.sessions[0], false, 1, ""); strings.Contains(row, "⌫") {
+		t.Errorf("a session still on disk should carry no mark: %q", row)
 	}
 }
