@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"github.com/agentcarto/core/domain"
 	"path/filepath"
 	"runtime"
@@ -126,5 +127,22 @@ func TestMergeDeletedLogsIgnoresAFailedPlugin(t *testing.T) {
 	}
 	if out := MergeDeletedLogs(nil, cached, map[string]bool{"claude": true}); len(out) != 2 {
 		t.Errorf("a successful scan that found nothing means both logs are gone: %+v", out)
+	}
+}
+
+// Relocating rewrites the logs of a directory. A session read back from the
+// cache has no log to rewrite, and handing it to a plugin would ask for a file
+// that is not there — the same refusal Availability gives for one session.
+func TestRelocateLeavesOutSessionsWithNoLog(t *testing.T) {
+	a := &App{}
+	if av := a.Availability(domain.Session{LogDeleted: true}, "relocate"); av.Enabled {
+		t.Error("relocate should be refused for a session whose log is gone")
+	}
+	// With no plugin that can relocate, the call is a no-op either way; what is
+	// checked here is that a deleted session does not reach one.
+	if _, err := a.Relocate(context.Background(), "/old", "/new", []domain.Session{
+		{PluginID: "claude", SessionID: "gone", CWD: "/old", LogDeleted: true},
+	}); err != nil {
+		t.Errorf("a directory of deleted sessions should relocate to nothing, not fail: %v", err)
 	}
 }

@@ -129,11 +129,20 @@ func (a *App) Relocate(ctx context.Context, old, new string, sessions []domain.S
 	if old == new {
 		return domain.MutationResult{}, fmt.Errorf("old and new paths are identical")
 	}
+	live := make([]domain.Session, 0, len(sessions))
 	for _, s := range sessions {
 		if s.CWD == old && s.Status != "" {
 			return domain.MutationResult{}, fmt.Errorf("active session %s prevents relocation", s.SessionID)
 		}
+		// A session read back from the cache has no log to rewrite. Handing it to a
+		// plugin would ask it to move a file that is not there; Availability refuses
+		// the action for one session, and this is the same refusal for a directory
+		// full of them.
+		if !s.LogDeleted {
+			live = append(live, s)
+		}
 	}
+	sessions = live
 	var all domain.MutationResult
 	for _, inst := range a.Catalog.Plugins {
 		if !inst.Descriptor.Capabilities.Relocate {
