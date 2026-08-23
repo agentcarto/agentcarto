@@ -25,6 +25,7 @@ func TestStatusMarkPrototypeFormat(t *testing.T) {
 		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventUser}, "● THINK"},
 		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventReasoning}, "● THINK"},
 		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventToolResult}, "● THINK"},
+		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventQueued}, "● THINK"},
 		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventStream}, "● RUN"},
 		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventAssistant}, "● RUN"},
 		{domain.Session{Status: domain.StatusRunning}, "● RUN"},

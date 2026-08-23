@@ -1211,7 +1211,9 @@ func statusMark(s domain.Session) string {
 		if s.LastKind == domain.EventToolCall {
 			return padCol("● TOOL", 8)
 		}
-		if s.LastKind == domain.EventUser || s.LastKind == domain.EventReasoning || s.LastKind == domain.EventToolResult {
+		// EventQueued is a prompt sent while the turn was still running: like a plain prompt, it
+		// means the model has it and has not answered yet.
+		if s.LastKind == domain.EventUser || s.LastKind == domain.EventQueued || s.LastKind == domain.EventReasoning || s.LastKind == domain.EventToolResult {
 			return padCol("● THINK", 8)
 		}
 		return padCol("● RUN", 8)
