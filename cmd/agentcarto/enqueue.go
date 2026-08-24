@@ -26,11 +26,17 @@ func detachWorker() error {
 	return platform.Detach("summarize-worker")
 }
 
-// settleBefore is how long a session must have been idle before it is worth
-// summarizing. A session someone is working in right now grows while the
-// summary is being made, so what comes back describes a state that no longer
-// exists — correctly, since the node ids still match, but at a price paid for
-// turns that were about to be joined by more.
+// settleBefore is how long a session whose last turn did not finish has to sit
+// still before it is worth summarizing.
+//
+// The wait is not about the session growing — turns that are already summarized
+// stay summarized, and a session that gains a turn is only asked about that
+// turn. It is about the turn in progress: summarizing one that is still being
+// written pays for a summary whose terminal node is about to change, and the
+// store withholds a summary whose node moved. That money buys nothing.
+//
+// A session whose log ends at a completed turn has no turn in progress, so it
+// does not wait at all. On this machine that is 150 of 222 sessions.
 const settleBefore = 10 * time.Minute
 
 // QueueSummaries queues the sessions that have no summary and starts a worker
@@ -76,8 +82,13 @@ func pickForSummary(sessions []domain.Session, now time.Time, max int) []domain.
 		if s.LogDeleted || s.EmptyFork {
 			continue // nothing to read, or nothing that was ever continued
 		}
-		if s.Status != "" || now.Sub(s.UpdatedAt) < settleBefore {
-			continue // still being worked in
+		if s.Status != "" {
+			continue // an agent is working in it right now
+		}
+		// A log that ends at a completed turn has nothing in flight: whatever is
+		// there is final, and summarizing it now is not paid for twice.
+		if s.LastKind != domain.EventTurnComplete && now.Sub(s.UpdatedAt) < settleBefore {
+			continue
 		}
 		out = append(out, s)
 	}

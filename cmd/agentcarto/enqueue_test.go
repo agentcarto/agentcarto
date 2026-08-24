@@ -19,6 +19,7 @@ func TestPickForSummary(t *testing.T) {
 	sessions := []domain.Session{
 		{SessionID: "running", UpdatedAt: ago(time.Hour), Status: domain.StatusRunning},
 		{SessionID: "just-touched", UpdatedAt: ago(time.Minute)},
+		{SessionID: "just-finished", UpdatedAt: ago(time.Minute), LastKind: domain.EventTurnComplete},
 		{SessionID: "newest", UpdatedAt: ago(time.Hour)},
 		{SessionID: "older", UpdatedAt: ago(5 * time.Hour)},
 		{SessionID: "oldest", UpdatedAt: ago(30 * 24 * time.Hour)},
@@ -30,7 +31,9 @@ func TestPickForSummary(t *testing.T) {
 	for _, s := range got {
 		ids = append(ids, s.SessionID)
 	}
-	want := []string{"newest", "older", "oldest"}
+	// just-finished is the most recent of the eligible ones: its last turn is
+	// complete, so there is nothing in flight to pay for twice.
+	want := []string{"just-finished", "newest", "older", "oldest"}
 	if len(ids) != len(want) {
 		t.Fatalf("picked %v, want %v", ids, want)
 	}
@@ -68,18 +71,28 @@ func TestPickForSummaryRespectsTheCap(t *testing.T) {
 func TestPickForSummarySkipsWhatIsStillMoving(t *testing.T) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	for _, s := range []domain.Session{
-		{SessionID: "running", UpdatedAt: now.Add(-time.Hour), Status: domain.StatusRunning},
-		{SessionID: "seconds-ago", UpdatedAt: now.Add(-time.Second)},
-		{SessionID: "just-inside", UpdatedAt: now.Add(-settleBefore + time.Second)},
+		// Running: an agent is in it right now, whatever the log says.
+		{SessionID: "running", UpdatedAt: now.Add(-time.Hour), Status: domain.StatusRunning, LastKind: domain.EventTurnComplete},
+		// Mid-turn and recent: the turn being written would change under the
+		// summary, and the store would withhold what was paid for.
+		{SessionID: "seconds-ago", UpdatedAt: now.Add(-time.Second), LastKind: domain.EventStream},
+		{SessionID: "just-inside", UpdatedAt: now.Add(-settleBefore + time.Second), LastKind: domain.EventToolCall},
 	} {
 		if got := pickForSummary([]domain.Session{s}, now, 0); len(got) != 0 {
 			t.Errorf("%s was picked", s.SessionID)
 		}
 	}
-	// Once it has settled, it is picked.
-	s := domain.Session{SessionID: "settled", UpdatedAt: now.Add(-settleBefore - time.Second)}
+	// Once it has settled, it is picked even mid-turn: at that age the turn was
+	// abandoned rather than being written.
+	s := domain.Session{SessionID: "settled", UpdatedAt: now.Add(-settleBefore - time.Second), LastKind: domain.EventStream}
 	if got := pickForSummary([]domain.Session{s}, now, 0); len(got) != 1 {
 		t.Error("a settled session was not picked")
+	}
+	// A finished turn waits for nothing. Most sessions on a machine are in this
+	// state, so making them wait ten minutes delayed nearly everything.
+	fresh := domain.Session{SessionID: "finished", UpdatedAt: now.Add(-time.Second), LastKind: domain.EventTurnComplete}
+	if got := pickForSummary([]domain.Session{fresh}, now, 0); len(got) != 1 {
+		t.Error("a session whose last turn completed was made to wait")
 	}
 }
 
