@@ -81,15 +81,13 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 	opts.Branches = transcript.Branches(*conv, path)
 	opts.Summaries, opts.SummaryModel = storedSummaries(ctx, db, s, turns)
 
+	// Summarizing comes before printing, not after: whoever ran this asked to
+	// read the session, and an outline of "done", "y" and "1" is not that.
+	if len(opts.Summaries) == 0 && summarizeForShow(ctx, a, cfg, db, s, ref) {
+		opts.Summaries, opts.SummaryModel = storedSummaries(ctx, db, s, turns)
+	}
 	if selectors == 0 {
 		fmt.Fprintln(w, transcript.Outline(s, *conv, turns, opts))
-		if len(opts.Summaries) == 0 {
-			// show itself still never generates — it hands the session to a
-			// detached worker and returns. Waiting here would cost a reader
-			// minutes per session, and a reader of show is often an agent
-			// working through several of them.
-			queueOneSession(ctx, a, cfg, db, s)
-		}
 		return
 	}
 	selected, err := selectTurns(turns, *turnSpec, *last, *all)

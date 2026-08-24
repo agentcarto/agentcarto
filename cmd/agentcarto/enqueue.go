@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sort"
 	"time"
@@ -144,23 +145,65 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 	return q.Add(r) == nil
 }
 
-// queueOneSession queues a single session and starts a worker, for `show` on a
-// session that has no summary. Unlike the scan path this ignores how recently
-// the session was touched: someone reading it has said which one they want.
-func queueOneSession(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, s domain.Session) {
+// summarizeForShow makes the summaries for a session someone just asked to see,
+// and reports whether they are ready to print.
+//
+// It waits when one call will do, which is nearly always: the median session
+// summarizes in thirty seconds and the slowest single-call one measured took a
+// hundred and five. Whoever ran show wants to read this session — handing back
+// an outline of "done", "y" and "1" while the answer is made elsewhere fails
+// them at exactly the moment the feature exists for.
+//
+// A session that needs several calls does go to the background. Those run for
+// minutes, which is past what a command should hold anyone for, so it says so
+// and names what can be read in the meantime.
+func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, s domain.Session, ref string) bool {
 	if cfg.Summary.Agent == "" || db == nil {
-		return
+		return false
 	}
 	q, err := summary.OpenQueue(queueDir())
+	if err != nil || !queueOne(ctx, a, db, q, s) {
+		return false
+	}
+	r, ok := q.Find(s.PluginID, s.SessionID)
+	if !ok {
+		return false
+	}
+	if len(r.Prompts) > 1 {
+		if err := detachWorker(); err != nil {
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "agentcarto: %d turns to summarize, running in the background — `agentcarto show %s --turns N` reads a turn now, and the summaries appear here on a later run\n",
+			turnsIn(r), ref)
+		return false
+	}
+	gen, err := summary.New(cfg.Summary.Agent, cfg.Summary.Model, time.Duration(cfg.Summary.Timeout))
 	if err != nil {
-		return
+		return false
 	}
-	if !queueOne(ctx, a, db, q, s) {
-		return
+	fmt.Fprintf(os.Stderr, "agentcarto: summarizing %d turns of this session (about half a minute)…\n", turnsIn(r))
+	out, err := gen.Generate(ctx, summary.System, r.Prompts[0])
+	if err == nil {
+		var res summary.Result
+		if res, err = summary.Parse(out, r.Batches[0]); err == nil {
+			err = storeSummaries(ctx, db, s, res, r.Nodes, gen.Name(), false)
+		}
 	}
-	if err := detachWorker(); err == nil {
-		// Only said where a person can see it. The document itself goes to
-		// stdout, which is often being read by a program.
-		os.Stderr.WriteString("agentcarto: summarizing this session in the background — run show again in a few minutes\n")
+	if err != nil {
+		// The request stays queued with the failure recorded, so a worker picks
+		// it up later rather than show trying again on every run.
+		_ = q.Retry(r, time.Now())
+		fmt.Fprintf(os.Stderr, "agentcarto: could not summarize this session: %v\n", err)
+		return false
 	}
+	_ = q.Done(r)
+	return true
+}
+
+func turnsIn(r summary.Request) int {
+	n := 0
+	for _, b := range r.Batches {
+		n += len(b)
+	}
+	return n
 }

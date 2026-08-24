@@ -152,3 +152,15 @@ func TestQueueOneSkipsWithoutParsing(t *testing.T) {
 		queueOne(ctx, nil, d, q, grown)
 	})
 }
+
+// show waits when one call will do and hands over when it will not. The split
+// is on the number of calls, since that is what decides whether the wait is
+// half a minute or a quarter of an hour.
+func TestTurnsIn(t *testing.T) {
+	if got := turnsIn(summary.Request{Batches: [][]int{{1, 2, 3}, {4, 5}}}); got != 5 {
+		t.Errorf("turnsIn=%d want 5", got)
+	}
+	if got := turnsIn(summary.Request{}); got != 0 {
+		t.Errorf("turnsIn of nothing=%d want 0", got)
+	}
+}
