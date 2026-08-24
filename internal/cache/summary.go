@@ -42,7 +42,25 @@ type Summary struct {
 // single turns when a session has grown, so the write is an upsert rather than a
 // replace-all: the turns that did not change keep the text they already have.
 func (d *DB) PutSummaries(ctx context.Context, s domain.Session, sums []Summary) error {
+	return d.putSummaries(ctx, s, sums, false)
+}
+
+// ReplaceSummaries stores summaries as the only ones the session has, dropping
+// what was there before in the same transaction.
+//
+// It is what "summarize --force" needs. Dropping first and generating after
+// would lose what was already paid for whenever the generation fails — a
+// mistyped model name is enough — and dropping outside a transaction would lose
+// it whenever the write fails. Here there is no window in which the old
+// summaries are gone and the new ones are not yet stored.
+func (d *DB) ReplaceSummaries(ctx context.Context, s domain.Session, sums []Summary) error {
+	return d.putSummaries(ctx, s, sums, true)
+}
+
+func (d *DB) putSummaries(ctx context.Context, s domain.Session, sums []Summary, replace bool) error {
 	if len(sums) == 0 {
+		// Even a replace does nothing here: emptying the table because a
+		// generation produced nothing would throw away usable summaries.
 		return nil
 	}
 	tx, e := d.db.BeginTx(ctx, nil)
@@ -50,6 +68,11 @@ func (d *DB) PutSummaries(ctx context.Context, s domain.Session, sums []Summary)
 		return e
 	}
 	defer func() { _ = tx.Rollback() }()
+	if replace {
+		if _, e = tx.ExecContext(ctx, "DELETE FROM summaries WHERE plugin_id=? AND session_id=?", s.PluginID, s.SessionID); e != nil {
+			return e
+		}
+	}
 	now := time.Now().Unix()
 	for _, sum := range sums {
 		if _, e = tx.ExecContext(ctx,

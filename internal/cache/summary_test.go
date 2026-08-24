@@ -152,3 +152,48 @@ func TestDropSummaries(t *testing.T) {
 		t.Fatalf("summaries survived the drop: %+v", got)
 	}
 }
+
+// --force replaces what a session has. Turns that no longer generate a summary
+// must not keep the text they had.
+func TestReplaceSummariesDropsWhatIsNotRewritten(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1"}
+	if e := d.PutSummaries(ctx, s, []Summary{
+		{Turn: 0, Text: "old session"},
+		{Turn: 1, NodeID: "n1", Text: "one"},
+		{Turn: 2, NodeID: "n2", Text: "two"},
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if e := d.ReplaceSummaries(ctx, s, []Summary{
+		{Turn: 0, Text: "new session"},
+		{Turn: 1, NodeID: "n1", Text: "one again"},
+	}); e != nil {
+		t.Fatal(e)
+	}
+	got := d.Summaries(ctx, s, map[int]string{1: "n1", 2: "n2"})
+	if got[1].Text != "one again" || got[0].Text != "new session" {
+		t.Errorf("the replacement did not land: %+v", got)
+	}
+	if _, ok := got[2]; ok {
+		t.Errorf("turn 2 survived a replace that did not rewrite it: %+v", got[2])
+	}
+}
+
+// Replacing with nothing must not empty the table: a generation that produced
+// no usable summary would otherwise destroy what was already paid for.
+func TestReplaceSummariesWithNothingKeepsWhatIsStored(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1"}
+	if e := d.PutSummaries(ctx, s, []Summary{{Turn: 1, NodeID: "n1", Text: "one"}}); e != nil {
+		t.Fatal(e)
+	}
+	if e := d.ReplaceSummaries(ctx, s, nil); e != nil {
+		t.Fatal(e)
+	}
+	if got := d.Summaries(ctx, s, map[int]string{1: "n1"}); got[1].Text != "one" {
+		t.Fatalf("an empty replace emptied the table: %+v", got)
+	}
+}
