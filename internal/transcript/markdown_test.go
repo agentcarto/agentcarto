@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Only the prompt and the reply keep their bodies; the other events a document
@@ -378,5 +379,64 @@ func TestTaskReportIsAskedForNotImplied(t *testing.T) {
 	bare := domain.Event{Kind: domain.EventTask, ToolArg: "explore"}
 	if got := eventLines(bare, Options{Tools: ToolsFull, TaskReports: true}); len(got) != 1 {
 		t.Fatalf("a task without a report: %q", got)
+	}
+}
+
+// ToolsBrief is the one mode that truncates: its reader is a model being asked
+// what happened, not someone who might run the command again.
+func TestToolsBriefCutsLongCallsAndKeepsShortOnes(t *testing.T) {
+	long := strings.Repeat("x", 400)
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{
+			{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: long, ToolDetail: "line1\nline2"},
+			{Kind: domain.EventToolCall, ToolName: "Read", ToolArg: "a.go"},
+			{Kind: domain.EventAssistant, Text: "できた"},
+		}},
+	})
+	s := domain.Session{PluginID: "p", AgentType: "claude", SessionID: "x", Title: "t"}
+	turns := Turns(c, c.ActivePath())
+	doc, _ := Markdown(s, c, turns, Options{Tools: ToolsBrief})
+
+	// The long call is cut and says so; the short one is untouched.
+	if !strings.Contains(doc, "…") {
+		t.Errorf("a 400-rune call was not marked as cut:\n%s", doc)
+	}
+	if strings.Contains(doc, long) {
+		t.Error("the whole argument survived ToolsBrief")
+	}
+	if !strings.Contains(doc, "- Read a.go\n") {
+		t.Errorf("a short call should be left alone:\n%s", doc)
+	}
+	// The conversation itself is never cut — it is what a summary is made of.
+	for _, want := range []string{"**USER**", "やって", "**ASSISTANT**", "できた"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("ToolsBrief dropped %q from the conversation:\n%s", want, doc)
+		}
+	}
+	// A multi-line detail never becomes a code block under ToolsBrief.
+	if strings.Contains(doc, "```") {
+		t.Errorf("ToolsBrief opened a code block:\n%s", doc)
+	}
+}
+
+// Cutting counts runes, not bytes: half a multibyte character is worse than the
+// ellipsis that replaces it.
+func TestToolsBriefCutsOnRuneBoundaries(t *testing.T) {
+	arg := strings.Repeat("あ", 400)
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "p", Prompt: "p"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{
+			{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: arg},
+		}},
+	})
+	s := domain.Session{PluginID: "p", AgentType: "claude", SessionID: "x", Title: "t"}
+	doc, _ := Markdown(s, c, Turns(c, c.ActivePath()), Options{Tools: ToolsBrief})
+	if !utf8.ValidString(doc) {
+		t.Fatal("the document is not valid UTF-8 after cutting")
+	}
+	// "Bash " is 5 runes, so 195 of the 400 fit within the 200-rune limit.
+	if n := strings.Count(doc, "あ"); n != 195 {
+		t.Errorf("kept %d runes of the argument, want 195", n)
 	}
 }

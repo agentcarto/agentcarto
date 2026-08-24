@@ -35,7 +35,20 @@ const (
 	ToolsLabel
 	// ToolsNone drops tool entries entirely, leaving the conversation.
 	ToolsNone
+	// ToolsBrief keeps the one-line form but cuts it short. It is the one mode
+	// that truncates, and it exists for a reader that only needs to know which
+	// tool ran on what and will never run the command again — a model being
+	// asked what happened in a turn. The plugin folds a heredoc's newlines into
+	// spaces to fit a terminal row, so a single file-writing call can otherwise
+	// carry tens of thousands of characters into a prompt that is paid for by
+	// the token.
+	ToolsBrief
 )
+
+// briefArgLimit is how much of a tool entry ToolsBrief keeps. Long enough for
+// the tool name and what it acted on (a path, a command's first clause), short
+// enough that a heredoc cannot dominate the document.
+const briefArgLimit = 200
 
 // Options are the choices a document makes that its reader cares about.
 type Options struct {
@@ -69,6 +82,23 @@ func Markdown(s domain.Session, c domain.Conversation, turns []Turn, o Options) 
 		}
 	}
 	return strings.Join(tightenLists(append(header(s, rendered, o), body...)), "\n"), rendered
+}
+
+// RenderedTurns reports which of the given turns a document would carry, by the
+// number the turn view shows (Index+1). A turn holding nothing a reader can see
+// — an injected system message and no reply — renders to no heading at all, and
+// a caller that asked a model about it would wait forever for an answer that
+// cannot come. Counting headings in the finished document instead would count
+// the ones quoted inside a conversation, which happens whenever a session shows
+// this program's own output.
+func RenderedTurns(c domain.Conversation, turns []Turn, cwd string, o Options) []int {
+	var out []int
+	for _, t := range turns {
+		if len(turnLines(c, t, cwd, o)) > 0 {
+			out = append(out, t.Index+1)
+		}
+	}
+	return out
 }
 
 // header renders the session's own metadata. Fields the plugin could not fill
@@ -220,6 +250,18 @@ func listEntry(text string) []string {
 	return nil
 }
 
+// clipRunes cuts text to at most n runes, marking that it was cut. Counting
+// runes rather than bytes keeps a multibyte character from being split in half
+// — the text is a command line, and half a character in the middle of a path is
+// worse than the ellipsis.
+func clipRunes(text string, n int) string {
+	r := []rune(text)
+	if len(r) <= n {
+		return text
+	}
+	return strings.TrimRight(string(r[:n]), " ") + "…"
+}
+
 // toolEntry renders a tool call as a list entry. ToolArg is the plugin's
 // one-line form of the call and stays on the entry's own line. ToolDetail is
 // the same call with its line breaks intact (a heredoc, a patch, a payload):
@@ -227,12 +269,17 @@ func listEntry(text string) []string {
 // under the entry instead, because the one-line form of a script is unreadable
 // — the plugin folded every newline into a space to fit a terminal row.
 //
-// Nothing is truncated either way. A command cut mid-path says nothing.
+// Nothing is truncated except under ToolsBrief. A command cut mid-path says
+// nothing to a reader who might run it again; ToolsBrief has a reader who will
+// not.
 func toolEntry(name, arg, detail string, o Options) []string {
 	if o.Tools == ToolsNone {
 		return nil
 	}
 	detail = strings.TrimRight(detail, "\n")
+	if o.Tools == ToolsBrief {
+		return listEntry(clipRunes(strings.TrimSpace(name+" "+strings.TrimSpace(arg)), briefArgLimit))
+	}
 	if o.Tools == ToolsLabel || !strings.Contains(detail, "\n") {
 		return listEntry(strings.TrimSpace(name + " " + strings.TrimSpace(arg)))
 	}
