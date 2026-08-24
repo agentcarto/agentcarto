@@ -440,3 +440,110 @@ func TestToolsBriefCutsOnRuneBoundaries(t *testing.T) {
 		t.Errorf("kept %d runes of the argument, want 195", n)
 	}
 }
+
+// A summary says what came of a turn; the headline says what was asked for. The
+// outline carries both, because a person finds a turn by what they asked and an
+// agent chooses one by what happened.
+func TestOutlineCarriesSummariesBesideHeadlines(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "一回コミット", Prompt: "一回コミット"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "した"}}},
+		{ID: "u2", Parent: "a1", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "done", Prompt: "done"}}},
+		{ID: "a2", Parent: "u2", Timestamp: time.Unix(4, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "確認した"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	turns := Turns(c, c.ActivePath())
+	got := Outline(s, c, turns, Options{Summaries: map[int]string{
+		0: "コピー機能を実装しv0.11.0をリリース",
+		1: "clipboard関連をmainに1コミット（3a2b100）",
+		// Turn 2 has none: a partial map is the normal case.
+	}})
+
+	if !strings.Contains(got, "コピー機能を実装しv0.11.0をリリース") {
+		t.Errorf("the session summary is missing from the header:\n%s", got)
+	}
+	if !strings.Contains(got, "  ↳ clipboard関連をmainに1コミット（3a2b100）") {
+		t.Errorf("turn 1's summary is missing:\n%s", got)
+	}
+	// The headline stays: it is how a person recognizes the turn they remember.
+	if !strings.Contains(got, "一回コミット") {
+		t.Errorf("the summary replaced the headline:\n%s", got)
+	}
+	// A turn without a summary keeps the line it always had, with no marker.
+	for _, ln := range strings.Split(got, "\n") {
+		if strings.Contains(ln, "done") && strings.Contains(ln, "↳") {
+			t.Errorf("turn 2 got a summary marker without a summary: %q", ln)
+		}
+	}
+}
+
+// An outline is an index. A summary generated without a length limit runs past
+// a thousand characters, which would make the list unreadable at the one place
+// it exists to be scanned.
+func TestOutlineCutsALongSummary(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "p", Prompt: "p"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	long := strings.Repeat("あ", 1200)
+	got := Outline(s, c, Turns(c, c.ActivePath()), Options{Summaries: map[int]string{1: long}})
+	if strings.Contains(got, long) {
+		t.Error("a 1200-character summary went into the outline whole")
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("the summary was not marked as cut:\n%s", got)
+	}
+	// A multi-line summary is folded onto the entry's own line.
+	got = Outline(s, c, Turns(c, c.ActivePath()), Options{Summaries: map[int]string{1: "一行目\n二行目"}})
+	if !strings.Contains(got, "  ↳ 一行目 二行目") {
+		t.Errorf("a multi-line summary was not folded:\n%s", got)
+	}
+}
+
+// show --turns N prints the summary whole, above the turn: whoever opened this
+// far still has to decide how much of it to read.
+func TestMarkdownPutsTheSummaryAboveTheTurn(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "できた"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	long := strings.Repeat("あ", 1200)
+	got, _ := Markdown(s, c, Turns(c, c.ActivePath()), Options{Summaries: map[int]string{
+		0: "セッション全体",
+		1: "行1\n行2",
+	}})
+	// Not cut here, unlike the outline.
+	whole, _ := Markdown(s, c, Turns(c, c.ActivePath()), Options{Summaries: map[int]string{1: long}})
+	if !strings.Contains(whole, long) {
+		t.Error("--turns cut the summary; it should print it whole")
+	}
+	if !strings.Contains(got, "> 行1\n> 行2") {
+		t.Errorf("a multi-line summary was not quoted line by line:\n%s", got)
+	}
+	if strings.Index(got, "> 行1") > strings.Index(got, "できた") {
+		t.Error("the summary comes after the turn body")
+	}
+	if !strings.Contains(got, "セッション全体") {
+		t.Errorf("the session summary is missing:\n%s", got)
+	}
+}
+
+// Everything above must leave a document without summaries exactly as it was.
+func TestWithoutSummariesNothingChanges(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "できた"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	turns := Turns(c, c.ActivePath())
+	for _, o := range []Options{{}, {Summaries: nil}, {Summaries: map[int]string{}}, {Summaries: map[int]string{1: "   "}}} {
+		if got := Outline(s, c, turns, o); strings.Contains(got, "↳") {
+			t.Errorf("an outline with no summaries carries a marker:\n%s", got)
+		}
+		if got, _ := Markdown(s, c, turns, o); strings.Contains(got, "> ") {
+			t.Errorf("a document with no summaries carries a quote:\n%s", got)
+		}
+	}
+}

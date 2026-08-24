@@ -67,6 +67,15 @@ type Options struct {
 	// label alone, which is the size a session was exported at before there was
 	// a CLI to search from.
 	TaskReports bool
+	// Summaries are generated descriptions of what happened, keyed by turn number
+	// with 0 for the session's own. A headline says what was asked for, which the
+	// reader can already see; these say what came of it, which is the part that
+	// decides whether a turn is worth opening. Turns without one are printed the
+	// way they were before — this map is normally partial.
+	//
+	// It arrives as plain strings so that rendering stays independent of where
+	// summaries are stored or how they are made.
+	Summaries map[int]string
 }
 
 // Markdown renders the given turns of a session as one document and reports how
@@ -139,7 +148,13 @@ func header(s domain.Session, turns int, o Options) []string {
 	if o.Branches > 0 {
 		add("Other branches", fmt.Sprintf("%d (rewound or abandoned; not shown here)", o.Branches))
 	}
-	return append(out, "")
+	out = append(out, "")
+	// The session's own summary reads as prose, so it goes below the metadata
+	// list rather than as another field in it.
+	if sum := strings.TrimSpace(o.Summaries[0]); sum != "" {
+		out = append(out, sum, "")
+	}
+	return out
 }
 
 // turnLines renders one turn: a heading carrying the number the turn view shows,
@@ -174,6 +189,11 @@ func turnLines(c domain.Conversation, t Turn, cwd string, o Options) []string {
 		// The » badge of the turn list. Where the context was compacted matters to
 		// someone reading the transcript: the agent stopped seeing what came before.
 		out = append(out, "_(context compacted here)_", "")
+	}
+	// What came of the turn, before the turn itself: a reader who opened this
+	// far still has to decide how much of it to read.
+	if sum := strings.TrimSpace(o.Summaries[t.Index+1]); sum != "" {
+		out = append(out, "> "+strings.ReplaceAll(sum, "\n", "\n> "), "")
 	}
 	return append(append(out, body...), "")
 }

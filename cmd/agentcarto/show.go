@@ -13,6 +13,7 @@ import (
 	"github.com/agentcarto/agentcarto/internal/app"
 	"github.com/agentcarto/agentcarto/internal/cache"
 	"github.com/agentcarto/agentcarto/internal/config"
+	"github.com/agentcarto/agentcarto/internal/summary"
 	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 )
@@ -78,9 +79,17 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 	path := conv.ActivePath()
 	turns := transcript.Turns(*conv, path)
 	opts.Branches = transcript.Branches(*conv, path)
+	opts.Summaries = storedSummaries(ctx, db, s, turns)
 
 	if selectors == 0 {
 		fmt.Fprintln(w, transcript.Outline(s, *conv, turns, opts))
+		if len(opts.Summaries) == 0 && cfg.Summary.Agent != "" {
+			// show never generates, so a reader who has the feature configured
+			// but no summaries here would otherwise have no way of knowing that
+			// what they are looking at could say more. It goes to stderr to leave
+			// the outline itself clean for whatever is reading it.
+			fmt.Fprintf(os.Stderr, "agentcarto: no summaries stored for this session — `agentcarto summarize %s` generates them\n", s.SessionID)
+		}
 		return
 	}
 	selected, err := selectTurns(turns, *turnSpec, *last, *all)
@@ -96,6 +105,26 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 		// injected system message. Saying so beats handing back a bare header.
 		fmt.Fprintf(os.Stderr, "agentcarto: %s holds nothing a transcript shows (a command with no reply, or an injected message)\n", selectedTurnsLabel(selected))
 	}
+}
+
+// storedSummaries reads the generated summaries a session has, keyed the way a
+// document wants them. Nothing is generated here: a reader of show is often an
+// agent working through many sessions, and a command that quietly spent money
+// per session would be a poor thing to hand one. `agentcarto summarize` is
+// where that happens.
+func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns []transcript.Turn) map[int]string {
+	if db == nil {
+		return nil // --no-cache: summaries live in the cache
+	}
+	stored := db.Summaries(ctx, s, summary.NodesByTurn(turns))
+	if len(stored) == 0 {
+		return nil
+	}
+	out := make(map[int]string, len(stored))
+	for n, sum := range stored {
+		out[n] = sum.Text
+	}
+	return out
 }
 
 // selectedTurnsLabel names the turns that were asked for, for a message about

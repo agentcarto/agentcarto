@@ -11,6 +11,14 @@ import (
 // tell turns apart, not to be read in place of the turn.
 const headlineWidth = 100
 
+// summaryWidth is where a turn's generated summary is cut in an outline. It is
+// wider than a headline because it carries what happened rather than what was
+// asked, and that is the part a reader is choosing on — but an outline is still
+// an index. A summary generated without a length limit runs past a thousand
+// characters, which makes the list unreadable at the point it exists to be
+// scanned. `show --turns N` prints it whole.
+const summaryWidth = 300
+
 // Outline renders a session's table of contents: the same header a document
 // carries, then one line per turn with the number `Markdown` and the TUI both
 // use, and the size that turn would print at under the given options. It is what a reader asks for first — a whole session can be hundreds of
@@ -34,6 +42,13 @@ func Outline(s domain.Session, c domain.Conversation, turns []Turn, o Options) s
 			entry += " — " + h
 		}
 		lines = append(lines, entry)
+		// The summary goes under the entry rather than replacing the headline:
+		// the headline is what the reader asked for, which is how a person finds
+		// the turn they remember, and the summary is what came of it. Both are
+		// wanted, and only one of them is ever missing.
+		if sum := strings.TrimSpace(o.Summaries[t.Index+1]); sum != "" {
+			lines = append(lines, "  ↳ "+clipRunes(strings.Join(strings.Fields(sum), " "), summaryWidth))
+		}
 	}
 	return strings.Join(lines, "\n")
 }
