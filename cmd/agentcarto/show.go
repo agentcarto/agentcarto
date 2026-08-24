@@ -79,7 +79,7 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 	path := conv.ActivePath()
 	turns := transcript.Turns(*conv, path)
 	opts.Branches = transcript.Branches(*conv, path)
-	opts.Summaries = storedSummaries(ctx, db, s, turns)
+	opts.Summaries, opts.SummaryModel = storedSummaries(ctx, db, s, turns)
 
 	if selectors == 0 {
 		fmt.Fprintln(w, transcript.Outline(s, *conv, turns, opts))
@@ -112,19 +112,25 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 // agent working through many sessions, and a command that quietly spent money
 // per session would be a poor thing to hand one. `agentcarto summarize` is
 // where that happens.
-func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns []transcript.Turn) map[int]string {
+func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns []transcript.Turn) (map[int]string, string) {
 	if db == nil {
-		return nil // --no-cache: summaries live in the cache
+		return nil, "" // --no-cache: summaries live in the cache
 	}
 	stored := db.Summaries(ctx, s, summary.NodesByTurn(turns))
 	if len(stored) == 0 {
-		return nil
+		return nil, ""
 	}
 	out := make(map[int]string, len(stored))
+	model := ""
 	for n, sum := range stored {
 		out[n] = sum.Text
+		if sum.Model != "" {
+			// They are normally all from one run; naming any of them is enough
+			// for a reader deciding how much to trust what it is reading.
+			model = sum.Model
+		}
 	}
-	return out
+	return out, model
 }
 
 // selectedTurnsLabel names the turns that were asked for, for a message about

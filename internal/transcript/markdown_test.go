@@ -547,3 +547,55 @@ func TestWithoutSummariesNothingChanges(t *testing.T) {
 		}
 	}
 }
+
+// A document carrying generated text has to say so. Its reader is often an
+// agent, and one that mistakes a summary for the transcript will quote it as
+// something that was said.
+func TestSummariesAreLabelledAsGenerated(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "できた"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	turns := Turns(c, c.ActivePath())
+	o := Options{Summaries: map[int]string{0: "全体", 1: "ターン1"}, SummaryModel: "claude claude-sonnet-5"}
+
+	out := Outline(s, c, turns, o)
+	if !strings.Contains(out, "claude claude-sonnet-5") {
+		t.Errorf("the outline does not say which model wrote the summaries:\n%s", out)
+	}
+	for _, want := range []string{"generated", "may be wrong", "verbatim", "--turns"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the outline does not say %q:\n%s", want, out)
+		}
+	}
+
+	// In a full document the summary is quoted and labelled, so the turn that
+	// follows it is not read as the same kind of text.
+	doc, _ := Markdown(s, c, turns, o)
+	if !strings.Contains(doc, "> _(generated summary)_") {
+		t.Errorf("the summary above a turn is not labelled:\n%s", doc)
+	}
+
+	// With no model recorded it still says the text is generated.
+	out = Outline(s, c, turns, Options{Summaries: map[int]string{1: "x"}})
+	if !strings.Contains(out, "generated") {
+		t.Errorf("without a model name the notice is missing:\n%s", out)
+	}
+}
+
+// A map holding only blanks is a map holding nothing: a document that prints no
+// summaries must not claim to carry generated text.
+func TestNoNoticeWhenNoSummaryShows(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "p", Prompt: "p"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "a"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	turns := Turns(c, c.ActivePath())
+	for _, o := range []Options{{}, {Summaries: map[int]string{}}, {Summaries: map[int]string{1: "  "}, SummaryModel: "m"}} {
+		if got := Outline(s, c, turns, o); strings.Contains(got, "**Summaries**") {
+			t.Errorf("a document with nothing to show claims generated text:\n%s", got)
+		}
+	}
+}

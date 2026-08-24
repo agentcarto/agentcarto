@@ -76,6 +76,12 @@ type Options struct {
 	// It arrives as plain strings so that rendering stays independent of where
 	// summaries are stored or how they are made.
 	Summaries map[int]string
+	// SummaryModel names what wrote them ("claude claude-sonnet-5"). A document
+	// carrying generated text has to say so: its reader is often an agent, and
+	// one that mistakes a summary for the transcript will quote it as something
+	// that was said. Which model matters too — the same prompt through a smaller
+	// one drops identifiers and mangles sentences.
+	SummaryModel string
 }
 
 // Markdown renders the given turns of a session as one document and reports how
@@ -129,6 +135,18 @@ func TurnSizes(c domain.Conversation, turns []Turn, cwd string, o Options) map[i
 	return out
 }
 
+// hasSummaries reports whether any summary would actually be printed. A map
+// holding only blanks is a map holding nothing: saying a document carries
+// generated text when none of it shows would be its own kind of wrong.
+func hasSummaries(m map[int]string) bool {
+	for _, v := range m {
+		if strings.TrimSpace(v) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // header renders the session's own metadata. Fields the plugin could not fill
 // (a session with no recorded cwd, for instance) are left out rather than shown
 // empty.
@@ -166,6 +184,16 @@ func header(s domain.Session, turns int, o Options) []string {
 	}
 	if o.Branches > 0 {
 		add("Other branches", fmt.Sprintf("%d (rewound or abandoned; not shown here)", o.Branches))
+	}
+	if hasSummaries(o.Summaries) {
+		// Everything above this line is what the session recorded. Everything
+		// marked below is not: it was generated afterwards, and can be wrong in
+		// ways the transcript cannot.
+		model := o.SummaryModel
+		if model == "" {
+			model = "an AI agent"
+		}
+		add("Summaries", fmt.Sprintf("written by %s — the lines below marked `↳`, and the paragraph under this list, are generated and may be wrong. The turns themselves are verbatim; `--turns N` prints one in full", model))
 	}
 	out = append(out, "")
 	// The session's own summary reads as prose, so it goes below the metadata
@@ -210,9 +238,11 @@ func turnLines(c domain.Conversation, t Turn, cwd string, o Options) []string {
 		out = append(out, "_(context compacted here)_", "")
 	}
 	// What came of the turn, before the turn itself: a reader who opened this
-	// far still has to decide how much of it to read.
+	// far still has to decide how much of it to read. It is quoted and labelled
+	// because what follows it is the turn verbatim, and the two must not be read
+	// as the same kind of thing.
 	if sum := strings.TrimSpace(o.Summaries[t.Index+1]); sum != "" {
-		out = append(out, "> "+strings.ReplaceAll(sum, "\n", "\n> "), "")
+		out = append(out, "> _(generated summary)_", ">", "> "+strings.ReplaceAll(sum, "\n", "\n> "), "")
 	}
 	return append(append(out, body...), "")
 }
