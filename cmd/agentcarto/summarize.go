@@ -142,12 +142,24 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		}
 	}
 
-	if len(batches) > 1 && len(all.Turns) > 0 {
-		// No single call saw the whole session, so none of their session
-		// summaries describes it — the last one describes the last few turns.
-		// Asking again from the turn summaries costs a fraction of rereading the
-		// session and sees all of it.
-		if sum := sessionSummary(ctx, gen, s, all.Turns, w); sum != "" {
+	// The session summary that came back describes only the turns that call saw.
+	// That is the whole session when one call asked about all of it, and a
+	// fragment otherwise — a split session, or an incremental run that asked
+	// about the two turns which had grown since last time. Whenever the store
+	// holds more than was asked about, the summary is made again from the turn
+	// summaries: all of them, for a fraction of what rereading the session costs.
+	stored := db.Summaries(ctx, s, nodes)
+	if len(stored) > len(asked)+1 { // +1: turn 0 is in the store but never asked about
+		whole := map[int]string{}
+		for n, sum := range stored {
+			if n != 0 {
+				whole[n] = sum.Text
+			}
+		}
+		for n, text := range all.Turns {
+			whole[n] = text // the ones just made, in case the read raced the write
+		}
+		if sum := sessionSummary(ctx, gen, s, whole, w); sum != "" {
 			all.Session = sum
 		}
 	}
@@ -159,7 +171,7 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 			printSummaries(w, all)
 			fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
 		}
-	} else if len(batches) > 1 && all.Session != "" {
+	} else if all.Session != "" {
 		if err := storeSummaries(ctx, db, s, summary.Result{Session: all.Session}, nodes, gen.Name(), false); err != nil {
 			fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
 		}
