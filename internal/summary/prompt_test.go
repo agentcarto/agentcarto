@@ -1,0 +1,106 @@
+package summary
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/agentcarto/agentcarto/internal/transcript"
+	"github.com/agentcarto/core/domain"
+)
+
+func conv(t *testing.T) (domain.Session, domain.Conversation, []transcript.Turn) {
+	t.Helper()
+	ts := func(n int64) time.Time { return time.Unix(n, 0).UTC() }
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "コピーしたい", Prompt: "コピーしたい"}}},
+		{ID: "a1", Parent: "u1", Timestamp: ts(2), Events: []domain.Event{
+			{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: "$ cat <<EOF " + strings.Repeat("x", 3000) + " EOF", ToolDetail: "cat <<EOF\nbody\nEOF"},
+			{Kind: domain.EventToolResult, Text: "ツール出力は要約の入力に載せない"},
+			{Kind: domain.EventReasoning, Text: "思考も載せない"},
+			{Kind: domain.EventAssistant, Text: "yキーを足した"},
+		}},
+		{ID: "u2", Parent: "a1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventUser, Text: "一回コミット", Prompt: "一回コミット"}}},
+		{ID: "a2", Parent: "u2", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "3a2b100 でコミットした"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s1", Title: "コピー機能"}
+	return s, c, transcript.Turns(c, c.ActivePath())
+}
+
+func TestPromptCarriesTheConversationAndCutsTheTools(t *testing.T) {
+	s, c, turns := conv(t)
+	doc, asked := Prompt(s, c, turns, Options{})
+	if len(asked) != 2 || asked[0] != 1 || asked[1] != 2 {
+		t.Fatalf("asked=%v want [1 2]", asked)
+	}
+	for _, want := range []string{"コピーしたい", "yキーを足した", "一回コミット", "3a2b100", "## Turn 1", "## Turn 2"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("the prompt is missing %q", want)
+		}
+	}
+	// Tool output and thinking are what makes a log big and a summary no better.
+	for _, unwanted := range []string{"ツール出力は要約の入力に載せない", "思考も載せない"} {
+		if strings.Contains(doc, unwanted) {
+			t.Errorf("the prompt carries %q", unwanted)
+		}
+	}
+	// The 3000-character heredoc is cut; the call is still named.
+	if strings.Contains(doc, strings.Repeat("x", 3000)) {
+		t.Error("a heredoc went into the prompt whole")
+	}
+	if !strings.Contains(doc, "- Bash") || !strings.Contains(doc, "…") {
+		t.Errorf("the tool call was dropped instead of cut:\n%s", doc)
+	}
+}
+
+// A session that grew is summarized turn by turn: the prompt then carries only
+// the turns that still need one.
+func TestPromptCanAskAboutSomeTurnsOnly(t *testing.T) {
+	s, c, turns := conv(t)
+	doc, asked := Prompt(s, c, turns, Options{Turns: map[int]bool{2: true}})
+	if len(asked) != 1 || asked[0] != 2 {
+		t.Fatalf("asked=%v want [2]", asked)
+	}
+	if strings.Contains(doc, "コピーしたい") {
+		t.Error("a turn that was not asked about went into the prompt")
+	}
+	if !strings.Contains(doc, "一回コミット") {
+		t.Error("the turn that was asked about is missing")
+	}
+	// The header says the session holds more than the excerpt shows, so the
+	// model does not read a fragment as the whole session.
+	if !strings.Contains(doc, "1 of 2") {
+		t.Errorf("the prompt does not say it is an excerpt:\n%s", doc)
+	}
+}
+
+// asked names the turns the document actually describes, not the ones the
+// caller offered. A turn that renders to nothing would otherwise be waited on
+// forever: the model cannot summarize what it was not shown, and its silence
+// would be read as "this turn has nothing to say".
+func TestPromptAsksOnlyAboutTurnsTheDocumentDescribes(t *testing.T) {
+	s, c, turns := conv(t)
+	// A turn whose nodes are not in the conversation renders to nothing — the
+	// same shape as a turn holding only events a document drops.
+	turns = append(turns, transcript.Turn{Index: 9, Nodes: []string{"gone"}})
+	doc, asked := Prompt(s, c, turns, Options{})
+	for _, n := range asked {
+		if n == 10 {
+			t.Errorf("asked about turn 10, which the document does not describe: asked=%v", asked)
+		}
+	}
+	if strings.Contains(doc, "## Turn 10") {
+		t.Errorf("a turn with no content got a heading:\n%s", doc)
+	}
+	if len(asked) != 2 {
+		t.Errorf("asked=%v want the two real turns", asked)
+	}
+}
+
+func TestPromptOfNoTurns(t *testing.T) {
+	s, c, turns := conv(t)
+	doc, asked := Prompt(s, c, turns, Options{Turns: map[int]bool{}})
+	if doc != "" || asked != nil {
+		t.Fatalf("asking about no turns produced doc=%.40q asked=%v", doc, asked)
+	}
+}
