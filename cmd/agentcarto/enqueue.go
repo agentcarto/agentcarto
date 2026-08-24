@@ -55,18 +55,40 @@ func QueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *cach
 	if err != nil {
 		return
 	}
-	queued := 0
 	for _, s := range pickForSummary(sessions, time.Now(), cfg.Summary.MaxPerRun) {
-		if queueOne(ctx, a, db, q, s) {
-			queued++
-		}
+		queueOne(ctx, a, db, q, s)
 	}
-	if queued == 0 {
+	// Start a worker whenever anything is waiting, not only when this scan added
+	// to it. A worker takes max_per_run sessions and stops, so the queue is
+	// normally left with more than it drained — and the sessions still in it are
+	// skipped by queueOne, which would leave nothing to trigger the next run.
+	// The queue would stall with work in it.
+	if !anyReady(q) {
+		return
+	}
+	// One is already draining the queue. Starting another would spawn a process
+	// that takes the lock's refusal and exits — every few seconds, for as long
+	// as the first one runs, each spawn writing a line to the log.
+	if _, _, err := summary.LockHolder(lockPath()); err == nil {
 		return
 	}
 	// Detached, so quitting the TUI does not take the work with it. A failure to
 	// start is silent: the requests stay queued, and the next run tries again.
 	_ = detachWorker()
+}
+
+// anyReady reports whether the queue holds work a worker would act on now.
+// Requests waiting out a failure do not count: starting a worker for those
+// would spawn a process that looks at them and exits, every few seconds.
+func anyReady(q *summary.Queue) bool {
+	reqs, _ := q.List()
+	now := time.Now()
+	for _, r := range reqs {
+		if r.Ready(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // pickForSummary chooses which sessions to offer the worker.
@@ -181,6 +203,11 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		return false
 	}
 	if len(r.Prompts) > 1 {
+		if _, _, err := summary.LockHolder(lockPath()); err == nil {
+			// Already being drained; this session is in the queue for it.
+			fmt.Fprintf(os.Stderr, "agentcarto: %d turns to summarize, queued behind a run already going — `agentcarto show %s --turns N` reads a turn now\n", turnsIn(r), ref)
+			return false
+		}
 		if err := detachWorker(); err != nil {
 			return false
 		}

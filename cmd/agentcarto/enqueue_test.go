@@ -177,3 +177,37 @@ func TestTurnsIn(t *testing.T) {
 		t.Errorf("turnsIn of nothing=%d want 0", got)
 	}
 }
+
+// A worker takes max_per_run sessions and stops, so the queue is normally left
+// holding more than it drained. Those sessions are skipped by queueOne (they
+// are already queued), so a scan that adds nothing must still start a worker —
+// otherwise the queue stalls with work in it.
+func TestAnyReady(t *testing.T) {
+	now := time.Now()
+	q, err := summary.OpenQueue(filepath.Join(t.TempDir(), "q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if anyReady(q) {
+		t.Error("an empty queue reports work")
+	}
+	if err := q.Add(summary.Request{PluginID: "claude", SessionID: "waiting", Queued: now}); err != nil {
+		t.Fatal(err)
+	}
+	if !anyReady(q) {
+		t.Error("a queued request was not reported as work")
+	}
+
+	// A request waiting out a failure is not work: starting a worker for it
+	// would spawn a process that looks at it and exits, every few seconds.
+	q2, err := summary.OpenQueue(filepath.Join(t.TempDir(), "q2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q2.Add(summary.Request{PluginID: "claude", SessionID: "failed", Queued: now, Attempts: 1, LastTried: now}); err != nil {
+		t.Fatal(err)
+	}
+	if anyReady(q2) {
+		t.Error("a request inside its backoff was reported as work")
+	}
+}
