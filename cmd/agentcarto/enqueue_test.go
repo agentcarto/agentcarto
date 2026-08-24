@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/agentcarto/agentcarto/internal/cache"
+	"github.com/agentcarto/agentcarto/internal/summary"
 	"github.com/agentcarto/core/domain"
 )
 
@@ -83,4 +87,68 @@ func TestPickForSummaryOnNothing(t *testing.T) {
 	if got := pickForSummary(nil, time.Now(), 20); len(got) != 0 {
 		t.Errorf("picked %v from no sessions", got)
 	}
+}
+
+// Deciding whether a session needs summarizing takes its conversation, and a
+// scan runs every few seconds. The sessions that plainly need nothing have to
+// be recognized without parsing, or that answer costs a parse of everything on
+// the machine every few seconds.
+//
+// A nil app panics the moment queueOne reaches the parse, so returning at all
+// is the assertion that it did not get there.
+func TestQueueOneSkipsWithoutParsing(t *testing.T) {
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	s := domain.Session{PluginID: "claude", SessionID: "s1", Fingerprint: "fp1"}
+
+	t.Run("already queued", func(t *testing.T) {
+		q, err := summary.OpenQueue(filepath.Join(t.TempDir(), "q"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Add(summary.Request{PluginID: "claude", SessionID: "s1", Prompts: []string{"doc"}}); err != nil {
+			t.Fatal(err)
+		}
+		if queueOne(ctx, nil, d, q, s) {
+			t.Error("a session already in the queue was queued again")
+		}
+	})
+
+	t.Run("summarized and unchanged", func(t *testing.T) {
+		q, err := summary.OpenQueue(filepath.Join(t.TempDir(), "q"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "the session"}}); err != nil {
+			t.Fatal(err)
+		}
+		if queueOne(ctx, nil, d, q, s) {
+			t.Error("a session whose log has not moved since it was summarized was queued")
+		}
+	})
+
+	t.Run("summarized but the log grew", func(t *testing.T) {
+		q, err := summary.OpenQueue(filepath.Join(t.TempDir(), "q"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		grown := s
+		grown.SessionID = "s2"
+		if err := d.PutSummaries(ctx, grown, []cache.Summary{{Turn: 0, Text: "the session"}}); err != nil {
+			t.Fatal(err)
+		}
+		grown.Fingerprint = "fp2" // the log moved
+		// This one has to be parsed to know what changed, so it reaches the app.
+		// With a nil app that is a panic, which is the point: recover and report.
+		defer func() {
+			if recover() == nil {
+				t.Error("a session whose log grew was skipped without parsing")
+			}
+		}()
+		queueOne(ctx, nil, d, q, grown)
+	})
 }

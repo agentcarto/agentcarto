@@ -93,6 +93,23 @@ func pickForSummary(sessions []domain.Session, now time.Time, max int) []domain.
 // to launch plugins of its own, and the two could disagree about what the turns
 // are.
 func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s domain.Session) bool {
+	// Both checks below exist to avoid parsing. Deciding whether a session needs
+	// summarizing takes its conversation, and a scan runs every few seconds — so
+	// the sessions that plainly need nothing have to be recognized without it,
+	// or the answer costs a parse of everything on the machine every few
+	// seconds.
+	if _, queued := q.Find(s.PluginID, s.SessionID); queued {
+		return false // already waiting; the request holds the prompt already
+	}
+	// Turn 0 carries the fingerprint its summaries were made from, and comes
+	// back without needing the turns (it is the one row not matched on a node).
+	// Same fingerprint means the log has not moved since, so there is nothing
+	// new to summarize.
+	if stored := db.Summaries(ctx, s, nil); len(stored) > 0 {
+		if sum, ok := stored[0]; ok && sum.Fingerprint == s.Fingerprint {
+			return false
+		}
+	}
 	conv, err := a.Conversation(ctx, s)
 	if err != nil || conv == nil {
 		return false
