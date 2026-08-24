@@ -57,6 +57,11 @@ const blinkInterval = 500 * time.Millisecond
 const flashTTL = 4 * time.Second
 
 type Model struct {
+	// afterScan runs once each scan finishes, with the sessions it found. It is
+	// how summarizing gets started without the TUI knowing what summarizing is:
+	// generating costs money and talks to another program, neither of which
+	// belongs in a view. Nil when the host has nothing to do there.
+	afterScan         func([]domain.Session)
 	app               *app.App
 	sessions          []domain.Session
 	dead              map[string]string
@@ -511,6 +516,10 @@ func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 		_ = m.cache.DropSupersededArtifacts(context.Background(), app.SearchArtifactKind, app.ConversationArtifactKind)
 	}
 	m.scanning = false
+	if m.afterScan != nil {
+		// Whatever this does must not block the update loop; the host detaches.
+		m.afterScan(x.snap.Sessions)
+	}
 	m.filter()
 	if m.detail != nil && m.detailSession != nil {
 		key := m.detailSession.Key()
@@ -2978,7 +2987,7 @@ func oneLine(text string) string {
 // A command chosen via resume / fork is not started inside the TUI; instead bubbletea
 // fully restores the terminal here and the caller execs it afterwards, avoiding a broken
 // terminal handoff.
-func Run(a *app.App, cached []domain.Session, db *cache.DB) (*domain.Command, error) {
+func Run(a *app.App, cached []domain.Session, db *cache.DB, afterScan func([]domain.Session)) (*domain.Command, error) {
 	if term := os.Getenv("TERM"); term != "" && term != "dumb" {
 		if strings.Contains(term, "256color") {
 			lipgloss.SetColorProfile(termenv.ANSI256)
@@ -2986,7 +2995,9 @@ func Run(a *app.App, cached []domain.Session, db *cache.DB) (*domain.Command, er
 			lipgloss.SetColorProfile(termenv.ANSI)
 		}
 	}
-	final, e := tea.NewProgram(New(a, cached, db), tea.WithAltScreen()).Run()
+	m := New(a, cached, db)
+	m.afterScan = afterScan
+	final, e := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if e != nil {
 		return nil, e
 	}

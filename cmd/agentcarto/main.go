@@ -24,12 +24,20 @@ import (
 )
 
 func fail(e error) { fmt.Fprintln(os.Stderr, "agentcarto:", e); os.Exit(1) }
+
+// configPath is the --config this process was started with. A detached worker
+// has to be started with the same one: it reads its own configuration, and
+// without this it would come up with the built-in defaults — where summarizing
+// is switched off — and quietly do nothing.
+var configPath string
+
 func main() {
 	fs := flag.NewFlagSet("agentcarto", flag.ExitOnError)
 	cfgPath := fs.String("config", "", "additional configuration file")
 	noCache := fs.Bool("no-cache", false, "disable persistent cache")
 	_ = fs.Parse(os.Args[1:])
 	args := fs.Args()
+	configPath = *cfgPath
 	c, e := config.Load(*cfgPath)
 	if e != nil {
 		fail(e)
@@ -399,7 +407,9 @@ func runTUI(ctx context.Context, a *app.App, c config.Config, host *pluginhost.H
 		_ = db.Save(ctx, snap.Sessions)
 		cached = snap.Sessions
 	}
-	launch, e := tui.Run(a, cached, db)
+	launch, e := tui.Run(a, cached, db, func(sessions []domain.Session) {
+		QueueSummaries(ctx, a, c, db, sessions)
+	})
 	if e != nil {
 		fail(e)
 	}

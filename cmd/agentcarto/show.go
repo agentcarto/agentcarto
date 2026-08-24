@@ -83,12 +83,12 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 
 	if selectors == 0 {
 		fmt.Fprintln(w, transcript.Outline(s, *conv, turns, opts))
-		if len(opts.Summaries) == 0 && cfg.Summary.Agent != "" {
-			// show never generates, so a reader who has the feature configured
-			// but no summaries here would otherwise have no way of knowing that
-			// what they are looking at could say more. It goes to stderr to leave
-			// the outline itself clean for whatever is reading it.
-			fmt.Fprintf(os.Stderr, "agentcarto: no summaries stored for this session — `agentcarto summarize %s` generates them\n", s.SessionID)
+		if len(opts.Summaries) == 0 {
+			// show itself still never generates — it hands the session to a
+			// detached worker and returns. Waiting here would cost a reader
+			// minutes per session, and a reader of show is often an agent
+			// working through several of them.
+			queueOneSession(ctx, a, cfg, db, s)
 		}
 		return
 	}
