@@ -88,11 +88,33 @@ type Plugin struct {
 	Command string    `yaml:"command,omitempty"`
 	Options yaml.Node `yaml:"options"`
 }
+
+// Summary configures the generated turn summaries agentcarto show can print.
+// Generating one runs an AI agent's CLI, which costs money and sends the
+// session's text to that agent's provider, so the shipped default leaves Agent
+// empty and nothing is generated until someone asks for it.
+type Summary struct {
+	// Agent is which CLI writes the summaries: "claude", "codex", or "" for
+	// none. Empty is not an error — it is the off switch.
+	Agent string `yaml:"agent"`
+	// Model is passed to that CLI. It has no default that fits both agents, so
+	// it is required once Agent is set.
+	Model string `yaml:"model"`
+	// Timeout bounds one summarizing run. A median session took 27 seconds on
+	// claude-sonnet-5 and two minutes on claude-haiku-4-5 when this was
+	// measured; the largest sessions are far slower.
+	Timeout Duration `yaml:"timeout"`
+	// MaxPerRun is how many sessions one background run summarizes. It is what
+	// keeps a first run over a machine's whole history from spending without
+	// warning.
+	MaxPerRun int `yaml:"max_per_run"`
+}
 type Config struct {
 	Version int      `yaml:"version"`
 	UI      UI       `yaml:"ui"`
 	Index   Index    `yaml:"index"`
 	Cache   Cache    `yaml:"cache"`
+	Summary Summary  `yaml:"summary"`
 	Plugins []Plugin `yaml:"plugins"`
 }
 
@@ -100,6 +122,7 @@ const defaults = `version: 1
 ui: {refresh_interval: 2s, rescan_interval: 3s, default_view: time}
 index: {max_chars_per_session: 131072}
 cache: {enabled: true, cache_conversations: true, max_size: 512MiB, max_age: 720h}
+summary: {agent: "", model: claude-sonnet-5, timeout: 10m, max_per_run: 20}
 plugins:
   - {id: claude, type: claude, enabled: true, color: cyan, options: {}}
   - {id: codex, type: codex, enabled: true, color: red, options: {}}
@@ -245,6 +268,25 @@ func Validate(c Config) error {
 	}
 	if c.UI.RefreshInterval <= 0 {
 		return fmt.Errorf("ui.refresh_interval: must be positive")
+	}
+	// An empty agent is the off switch, not a mistake: summaries cost money and
+	// leave the machine, so they are opt-in. Everything else is only checked
+	// once someone has opted in.
+	switch c.Summary.Agent {
+	case "", "claude", "codex":
+	default:
+		return fmt.Errorf("summary.agent: expected claude or codex, or empty to generate none, got %q", c.Summary.Agent)
+	}
+	if c.Summary.Agent != "" {
+		if c.Summary.Model == "" {
+			return fmt.Errorf("summary.model: required when summary.agent is set")
+		}
+		if c.Summary.Timeout <= 0 {
+			return fmt.Errorf("summary.timeout: must be positive")
+		}
+		if c.Summary.MaxPerRun <= 0 {
+			return fmt.Errorf("summary.max_per_run: must be positive")
+		}
 	}
 	colors := map[string]bool{"default": true, "black": true, "red": true, "green": true, "yellow": true, "blue": true, "magenta": true, "cyan": true, "white": true, "orange": true}
 	ids := map[string]bool{}

@@ -113,3 +113,69 @@ func nodeScalar(n yaml.Node, key string) string {
 	}
 	return ""
 }
+
+// Summaries cost money and send session text off the machine, so the shipped
+// default generates none. An upgrade must not start spending on its own.
+func TestSummaryIsOffByDefault(t *testing.T) {
+	c, e := Load("")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if c.Summary.Agent != "" {
+		t.Errorf("the built-in default enables summaries with agent %q", c.Summary.Agent)
+	}
+	// The rest of the section still has usable values, so switching the agent on
+	// is a one-line change.
+	if c.Summary.Model == "" || c.Summary.Timeout <= 0 || c.Summary.MaxPerRun <= 0 {
+		t.Errorf("the default summary section is not ready to be switched on: %+v", c.Summary)
+	}
+}
+
+func TestValidateSummary(t *testing.T) {
+	base, e := Load("")
+	if e != nil {
+		t.Fatal(e)
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"off is valid", func(c *Config) { c.Summary.Agent = "" }, ""},
+		{"claude", func(c *Config) { c.Summary.Agent = "claude" }, ""},
+		{"codex", func(c *Config) { c.Summary.Agent = "codex" }, ""},
+		{"unknown agent", func(c *Config) { c.Summary.Agent = "gemini" }, "summary.agent"},
+		{"model required once on", func(c *Config) { c.Summary.Agent = "claude"; c.Summary.Model = "" }, "summary.model"},
+		{"timeout must be positive", func(c *Config) { c.Summary.Agent = "claude"; c.Summary.Timeout = 0 }, "summary.timeout"},
+		{"max_per_run must be positive", func(c *Config) { c.Summary.Agent = "claude"; c.Summary.MaxPerRun = 0 }, "summary.max_per_run"},
+		// While off, the other fields are not checked: a half-filled section
+		// that nobody uses is not an error.
+		{"off ignores the rest", func(c *Config) { c.Summary = Summary{} }, ""},
+	}
+	for _, tc := range cases {
+		c := base
+		tc.mutate(&c)
+		e := Validate(c)
+		switch {
+		case tc.wantErr == "" && e != nil:
+			t.Errorf("%s: Validate=%v want nil", tc.name, e)
+		case tc.wantErr != "" && e == nil:
+			t.Errorf("%s: Validate=nil want an error naming %s", tc.name, tc.wantErr)
+		case tc.wantErr != "" && e != nil && !strings.Contains(e.Error(), tc.wantErr):
+			t.Errorf("%s: Validate=%v want it to name %s", tc.name, e, tc.wantErr)
+		}
+	}
+}
+
+// An unknown key is an error (KnownFields), so a typo in the section name is
+// caught rather than silently leaving summaries off.
+func TestSummaryTypoIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	if e := os.WriteFile(p, []byte("summary: {agnet: claude}\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := Load(p); e == nil {
+		t.Error("a misspelled key inside summary was accepted")
+	}
+}
