@@ -129,3 +129,18 @@ func (d *DB) DropSummaries(ctx context.Context, s domain.Session) error {
 	_, e := d.db.ExecContext(ctx, "DELETE FROM summaries WHERE plugin_id=? AND session_id=?", s.PluginID, s.SessionID)
 	return e
 }
+
+// SummarizedAt reports when a session was last summarized, and whether it ever
+// was. It is the guard against regenerating in a loop: Summaries folds a failed
+// read into "nothing is stored", so a database that cannot be read would
+// otherwise look like an unsummarized session on every run and be paid for
+// every time. This asks the narrower question, which a failed read answers with
+// false rather than with a misleading zero.
+func (d *DB) SummarizedAt(ctx context.Context, s domain.Session) (time.Time, bool) {
+	var unix int64
+	e := d.db.QueryRowContext(ctx, "SELECT MAX(created) FROM summaries WHERE plugin_id=? AND session_id=?", s.PluginID, s.SessionID).Scan(&unix)
+	if e != nil || unix == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(unix, 0), true
+}

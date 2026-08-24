@@ -77,6 +77,12 @@ func main() {
 		defer closeCache(db)
 		a.Store = artifactStore(db)
 		summarizeCmd(ctx, a, c, db, args[1:], os.Stdout)
+	case "summarize-worker":
+		// Deliberately absent from the help: the host starts this, detached, and
+		// a person has "summarize" for doing one session by hand.
+		db := openCache(ctx, c, *noCache)
+		defer closeCache(db)
+		summarizeWorkerCmd(ctx, c, db, args[1:])
 	case "help":
 		usage(os.Stdout)
 	case "":

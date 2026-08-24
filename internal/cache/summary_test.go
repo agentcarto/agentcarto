@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/agentcarto/core/domain"
 )
@@ -195,5 +196,31 @@ func TestReplaceSummariesWithNothingKeepsWhatIsStored(t *testing.T) {
 	}
 	if got := d.Summaries(ctx, s, map[int]string{1: "n1"}); got[1].Text != "one" {
 		t.Fatalf("an empty replace emptied the table: %+v", got)
+	}
+}
+
+// The guard against regenerating in a loop asks a narrower question than
+// Summaries, which folds a failed read into "nothing is stored".
+func TestSummarizedAt(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1"}
+	if _, ok := d.SummarizedAt(ctx, s); ok {
+		t.Error("an unsummarized session reports a time")
+	}
+	before := time.Now().Add(-2 * time.Second)
+	if e := d.PutSummaries(ctx, s, []Summary{{Turn: 1, NodeID: "n1", Text: "one"}}); e != nil {
+		t.Fatal(e)
+	}
+	got, ok := d.SummarizedAt(ctx, s)
+	if !ok {
+		t.Fatal("a summarized session reports no time")
+	}
+	if got.Before(before) {
+		t.Errorf("SummarizedAt=%s, before the write", got)
+	}
+	// Another session's rows do not count.
+	if _, ok := d.SummarizedAt(ctx, domain.Session{PluginID: "p", SessionID: "other"}); ok {
+		t.Error("a different session reports a time")
 	}
 }
