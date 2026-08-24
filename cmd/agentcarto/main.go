@@ -72,6 +72,11 @@ func main() {
 		defer closeCache(db)
 		a.Store = artifactStore(db)
 		showCmd(ctx, a, c, db, args[1:], os.Stdout)
+	case "summarize":
+		db := openCache(ctx, c, *noCache)
+		defer closeCache(db)
+		a.Store = artifactStore(db)
+		summarizeCmd(ctx, a, c, db, args[1:], os.Stdout)
 	case "help":
 		usage(os.Stdout)
 	case "":
@@ -298,6 +303,7 @@ func usage(w io.Writer) {
   active [flags]            list running sessions (same flags)
   search [flags] QUERY      search sessions and print where the query was found
   show [flags] SESSION      print a session's outline, or the turns asked for
+  summarize [flags] SESSION generate the per-turn summaries show prints (costs money)
   config validate           validate the config and list enabled plugins
   plugins list              list plugins and their capabilities
   doctor                    diagnose config, executables and storage

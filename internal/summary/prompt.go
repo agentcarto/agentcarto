@@ -43,6 +43,20 @@ const System = `あなたはAIコーディングエージェントの会話ロ�
 
 ツールは使わず、与えられた入力だけから答えてください。`
 
+// NodesByTurn maps each turn's number to the id of its terminal node — what the
+// summary store checks a stored summary against before showing it. Turn numbers
+// are positions along one branch and a rewind renumbers them; the node id is
+// what stays attached to the content.
+func NodesByTurn(turns []transcript.Turn) map[int]string {
+	out := make(map[int]string, len(turns))
+	for _, t := range turns {
+		if len(t.Nodes) > 0 {
+			out[t.Index+1] = t.Nodes[len(t.Nodes)-1]
+		}
+	}
+	return out
+}
+
 // Options are the knobs Prompt has. The zero value is what the summarizer uses.
 type Options struct {
 	// Turns, when set, limits the prompt to these turn numbers (the numbers
