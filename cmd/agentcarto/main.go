@@ -9,6 +9,7 @@ import (
 	"github.com/agentcarto/agentcarto/internal/config"
 	"github.com/agentcarto/agentcarto/internal/platform"
 	"github.com/agentcarto/agentcarto/internal/pluginhost"
+	"github.com/agentcarto/agentcarto/internal/summary"
 	"github.com/agentcarto/agentcarto/internal/tui"
 	"github.com/agentcarto/core/domain"
 	"github.com/agentcarto/core/plugin"
@@ -520,6 +521,61 @@ func doctor(a *app.App) {
 		}
 		fmt.Printf("%-12s %s\n", p.ID, state)
 	}
+	summaryDoctor(a.Config)
+}
+
+// summaryDoctor reports the state of summarizing. A worker runs detached with
+// no interface, so this is the only place that says whether one is running,
+// what it is costing, and how to stop it — a run that has gone wrong otherwise
+// shows up as nothing but an unexplained bill.
+func summaryDoctor(cfg config.Config) {
+	fmt.Println()
+	if cfg.Summary.Agent == "" {
+		fmt.Println("summary      off (set summary.agent to claude or codex)")
+		return
+	}
+	fmt.Printf("summary      %s %s, up to %d sessions per run\n", cfg.Summary.Agent, cfg.Summary.Model, cfg.Summary.MaxPerRun)
+
+	if pid, taken, err := summary.LockHolder(lockPath()); err == nil {
+		fmt.Printf("  worker     running as pid %d since %s — stop it with: kill %d\n", pid, taken.Format("15:04:05"), pid)
+	} else {
+		fmt.Println("  worker     not running")
+	}
+
+	if q, err := summary.OpenQueue(queueDir()); err == nil {
+		reqs, bad := q.List()
+		failing := 0
+		for _, r := range reqs {
+			if r.Attempts > 0 {
+				failing++
+			}
+		}
+		note := ""
+		if failing > 0 {
+			note = fmt.Sprintf(" (%d waiting after a failure)", failing)
+		}
+		if len(bad) > 0 {
+			note += fmt.Sprintf(" (%d unreadable)", len(bad))
+		}
+		fmt.Printf("  queue      %d waiting%s — %s\n", len(reqs), note, queueDir())
+	}
+
+	if fi, err := os.Stat(logPath()); err == nil {
+		fmt.Printf("  log        %s (%s, last written %s)\n", logPath(), byteSize(fi.Size()), fi.ModTime().Format("01-02 15:04"))
+	} else {
+		fmt.Printf("  log        %s (nothing written yet)\n", logPath())
+	}
+}
+
+// byteSize renders a file size the way the rest of the CLI does.
+func byteSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	}
+	return fmt.Sprintf("%d B", n)
 }
 func executable(p plugin.Instance) string {
 	f := strings.Fields(p.Descriptor.DisplayName)

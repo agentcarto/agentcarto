@@ -131,3 +131,39 @@ func TestProcessAlive(t *testing.T) {
 		}
 	}
 }
+
+// doctor is the only place that says whether a worker is running, since the
+// worker itself is detached and has no interface.
+func TestLockHolder(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "summarize.lock")
+	if _, _, err := LockHolder(p); err == nil {
+		t.Error("LockHolder reported a holder for a lock that does not exist")
+	}
+	l, err := TakeLock(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, taken, err := LockHolder(p)
+	if err != nil {
+		t.Fatalf("LockHolder on a held lock: %v", err)
+	}
+	if pid != os.Getpid() {
+		t.Errorf("LockHolder=%d want %d", pid, os.Getpid())
+	}
+	if taken.IsZero() {
+		t.Error("LockHolder returned no time")
+	}
+	if err := l.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LockHolder(p); err == nil {
+		t.Error("LockHolder reported a holder after Release")
+	}
+	// A lock left by a process that is gone is not a running worker.
+	if err := os.WriteFile(p, []byte(fmt.Sprintf("%d %s\n", 4_000_000, time.Now().Format(time.RFC3339))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LockHolder(p); err == nil {
+		t.Error("a lock held by a dead process was reported as a running worker")
+	}
+}

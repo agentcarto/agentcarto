@@ -103,3 +103,18 @@ func processAlive(pid int) bool {
 	err = p.Signal(syscall.Signal(0))
 	return err == nil || errors.Is(err, os.ErrPermission)
 }
+
+// LockHolder reports the process holding the lock, if one is. It is what
+// `doctor` uses to say whether a worker is running: the worker is detached and
+// has no interface, so without this a run that has gone wrong shows up as
+// nothing but an unexplained bill.
+func LockHolder(path string) (pid int, taken time.Time, err error) {
+	pid, taken, err = readLock(path)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if !processAlive(pid) {
+		return 0, time.Time{}, fmt.Errorf("summary: the lock names pid %d, which is not running", pid)
+	}
+	return pid, taken, nil
+}
