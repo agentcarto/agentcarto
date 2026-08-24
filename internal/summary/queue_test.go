@@ -3,6 +3,7 @@ package summary
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +153,11 @@ func TestQueueSweepsWhatWentStale(t *testing.T) {
 // A request carries a session's text, so neither the directory nor the files
 // are readable by anyone else.
 func TestQueueIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// No Unix permission bits there: os.Chmod sets only the read-only flag,
+		// and who may read a file is decided by the directory's ACL.
+		t.Skip("permission bits are a Unix notion")
+	}
 	q := tempQueue(t)
 	if err := q.Add(Request{PluginID: "claude", SessionID: "s1", Prompts: []string{"secret"}}); err != nil {
 		t.Fatal(err)

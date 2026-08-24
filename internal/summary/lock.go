@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -86,22 +85,6 @@ func readLock(path string) (pid int, taken time.Time, err error) {
 		taken, _ = time.Parse(time.RFC3339, parts[1])
 	}
 	return pid, taken, nil
-}
-
-// processAlive reports whether a process id belongs to something running.
-// Signal 0 performs the existence and permission checks without delivering
-// anything. A process owned by someone else answers EPERM, which still means it
-// is there.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = p.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, os.ErrPermission)
 }
 
 // LockHolder reports the process holding the lock, if one is. It is what

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -98,12 +99,17 @@ func TestLockRecordsHolderAndTime(t *testing.T) {
 	if taken.Before(before) {
 		t.Errorf("taken=%s, which is before the lock was taken", taken)
 	}
-	fi, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		t.Errorf("lock file is %o, want no group or other access", perm)
+	// Windows has no Unix permission bits; os.Chmod there sets only the
+	// read-only flag, so the mode a file reports says nothing about who can read
+	// it. Access is controlled by the ACL the directory carries instead.
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("lock file is %o, want no group or other access", perm)
+		}
 	}
 }
 
