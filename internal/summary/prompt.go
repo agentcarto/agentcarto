@@ -8,6 +8,10 @@
 package summary
 
 import (
+	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 )
@@ -89,4 +93,51 @@ func Prompt(s domain.Session, c domain.Conversation, turns []transcript.Turn, o 
 	o2 := transcript.Options{Tools: transcript.ToolsBrief, SessionTurns: len(turns)}
 	doc, _ = transcript.Markdown(s, c, want, o2)
 	return doc, transcript.RenderedTurns(c, want, s.CWD, o2)
+}
+
+// SessionSystem is the instruction for writing a session's own summary from the
+// summaries of its turns.
+//
+// A long session never has all its turns in front of the model at once — it is
+// asked about in batches — so the session summary cannot come from any one of
+// them. The last batch's answer describes the last few turns, not the session.
+// Reading the turn summaries instead costs a fraction of rereading the session
+// and sees all of it.
+const SessionSystem = `あなたはAIコーディングエージェントの会話ログを要約する処理系です。入力は1セッションの各ターンについて既に作られた要約の一覧です。
+
+これらを読み、セッション全体で何が行われたのかを日本語で1つにまとめてください。
+
+制約:
+- 個々のターンの列挙にしない。何を目的に始まり、何が分かり、何が作られ、どこで終わったのかを述べる。
+- ファイル名・関数名・識別子・コミットハッシュは原文のまま残す。
+- 長さは内容量に見合わせる。上限は設けないが、冗長な説明や自明な補足は書かない。体言止め。丁寧語と主語（「ユーザーが」「Claudeが」）は書かない。
+- 入力に無いことを書かない。
+
+出力は次の形式のみ。前後に説明文やコードフェンスを付けない。
+
+@@SESSION
+セッション全体の要約
+
+ツールは使わず、与えられた入力だけから答えてください。`
+
+// SessionPrompt renders the turn summaries as the document SessionSystem is
+// asked about.
+func SessionPrompt(s domain.Session, turns map[int]string) string {
+	var b strings.Builder
+	if title := strings.TrimSpace(s.Title); title != "" {
+		b.WriteString("# " + title + "\n\n")
+	}
+	for _, n := range sortedTurns(turns) {
+		fmt.Fprintf(&b, "## Turn %d\n\n%s\n\n", n, strings.TrimSpace(turns[n]))
+	}
+	return b.String()
+}
+
+func sortedTurns(m map[int]string) []int {
+	out := make([]int, 0, len(m))
+	for n := range m {
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return out
 }

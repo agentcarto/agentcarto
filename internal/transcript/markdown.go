@@ -110,6 +110,25 @@ func RenderedTurns(c domain.Conversation, turns []Turn, cwd string, o Options) [
 	return out
 }
 
+// TurnSizes reports how many bytes each of the given turns would add to a
+// document, by the number the turn view shows. A caller that has to split a
+// session across several calls needs this before rendering: one turn can be a
+// paragraph or forty kilobytes, so a fixed number of turns per call is either
+// wasteful or too big.
+func TurnSizes(c domain.Conversation, turns []Turn, cwd string, o Options) map[int]int {
+	out := make(map[int]int, len(turns))
+	for _, t := range turns {
+		n := 0
+		for _, ln := range turnLines(c, t, cwd, o) {
+			n += len(ln) + 1
+		}
+		if n > 0 {
+			out[t.Index+1] = n
+		}
+	}
+	return out
+}
+
 // header renders the session's own metadata. Fields the plugin could not fill
 // (a session with no recorded cwd, for instance) are left out rather than shown
 // empty.

@@ -89,57 +89,89 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		return
 	}
 
-	doc, asked := summary.Prompt(s, *conv, turns, summary.Options{Turns: want})
-	if len(asked) == 0 {
+	batches := summary.Batch(*conv, turns, want, s.CWD)
+	if len(batches) == 0 {
 		// Every turn without a summary renders to nothing a reader can see, so
 		// there is nothing to ask about. Saying so beats a call that returns
 		// nothing and looks like a failure.
 		fmt.Fprintf(w, "%s: the %d turns without a summary hold nothing to summarize\n", s.SessionID, len(want))
 		return
 	}
-
-	out, err := gen.Generate(ctx, summary.System, doc)
-	if err != nil {
-		fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
-	}
-	res, err := summary.Parse(out, asked)
-	if err != nil {
-		// The call is already paid for. Handing the answer back is the only way
-		// its content is not lost outright.
-		fmt.Fprintf(os.Stderr, "--- what %s returned (already paid for) ---\n%s\n---\n", gen.Name(), out)
-		fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
+	if len(batches) > 1 {
+		// A long session is asked about in runs: one call's answer has to fit
+		// the model's output limit, and an answer cut at the limit loses every
+		// turn after the cut while costing the same.
+		fmt.Fprintf(w, "%s: %d turns, split across %d calls\n", s.SessionID, len(want), len(batches))
 	}
 
-	sums := make([]cache.Summary, 0, len(res.Turns)+1)
-	if res.Session != "" {
-		// Turn 0 is rewritten whenever any turn is, since adding turns is what
-		// makes the session's own summary out of date.
-		sums = append(sums, cache.Summary{Turn: 0, Text: res.Session, Model: gen.Name()})
+	all := summary.Result{Turns: map[int]string{}}
+	var asked []int
+	for i, batch := range batches {
+		doc, batchAsked := summary.Prompt(s, *conv, turns, summary.Options{Turns: summary.TurnSet(batch)})
+		if len(batchAsked) == 0 {
+			continue
+		}
+		asked = append(asked, batchAsked...)
+
+		out, err := gen.Generate(ctx, summary.System, doc)
+		if err != nil {
+			stopAfter(w, all, i, len(batches), fmt.Errorf("summarize %s: %w", s.SessionID, err))
+		}
+		res, err := summary.Parse(out, batchAsked)
+		if err != nil {
+			// The call is already paid for. Handing the answer back is the only
+			// way its content is not lost outright.
+			fmt.Fprintf(os.Stderr, "--- what %s returned (already paid for) ---\n%s\n---\n", gen.Name(), out)
+			stopAfter(w, all, i, len(batches), fmt.Errorf("summarize %s: %w", s.SessionID, err))
+		}
+		// The last batch's session summary wins: it saw the most recent turns.
+		if res.Session != "" {
+			all.Session = res.Session
+		}
+		for n, text := range res.Turns {
+			all.Turns[n] = text
+		}
+		// Each batch is stored before the next one starts, so a run that fails
+		// halfway keeps what it paid for. Every batch upserts — even under
+		// --force — because replacing here would delete the turns the later
+		// batches have not regenerated yet, and a failure after that would leave
+		// them with neither an old summary nor a new one.
+		if err := storeSummaries(ctx, db, s, res, nodes, gen.Name(), false); err != nil {
+			printSummaries(w, res)
+			stopAfter(w, all, i, len(batches), fmt.Errorf("summarize %s: %w", s.SessionID, err))
+		}
 	}
-	for n, text := range res.Turns {
-		sums = append(sums, cache.Summary{Turn: n, NodeID: nodes[n], Text: text, Model: gen.Name()})
+
+	if len(batches) > 1 && len(all.Turns) > 0 {
+		// No single call saw the whole session, so none of their session
+		// summaries describes it — the last one describes the last few turns.
+		// Asking again from the turn summaries costs a fraction of rereading the
+		// session and sees all of it.
+		if sum := sessionSummary(ctx, gen, s, all.Turns, w); sum != "" {
+			all.Session = sum
+		}
 	}
-	store := db.PutSummaries
 	if *force {
-		// Replace rather than upsert, so that turns which no longer generate a
-		// summary do not keep the text they had. The drop happens inside the
-		// same transaction as the write.
-		store = db.ReplaceSummaries
-	}
-	if err := store(ctx, s, sums); err != nil {
-		// Print what was generated before giving up: it was paid for, and this
-		// is the last place it exists.
-		printSummaries(w, res)
-		fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
+		// --force wants the turns it no longer generates gone. That cleanup can
+		// only happen once everything is in hand: doing it up front, or per
+		// batch, is what would lose summaries when a later call fails.
+		if err := storeSummaries(ctx, db, s, all, nodes, gen.Name(), true); err != nil {
+			printSummaries(w, all)
+			fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
+		}
+	} else if len(batches) > 1 && all.Session != "" {
+		if err := storeSummaries(ctx, db, s, summary.Result{Session: all.Session}, nodes, gen.Name(), false); err != nil {
+			fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
+		}
 	}
 
-	fmt.Fprintf(w, "%s: summarized %d of %d turns with %s\n", s.SessionID, len(res.Turns), len(asked), gen.Name())
-	if missing := res.Missing(asked); len(missing) > 0 {
+	fmt.Fprintf(w, "%s: summarized %d of %d turns with %s\n", s.SessionID, len(all.Turns), len(asked), gen.Name())
+	if missing := all.Missing(asked); len(missing) > 0 {
 		// Not an error: the turns that did come back are stored, and asking again
 		// costs only the ones that did not.
 		fmt.Fprintf(w, "  no summary came back for %s — run summarize again for those\n", turnList(missing))
 	}
-	if res.Session == "" {
+	if all.Session == "" {
 		// The session's own summary is rewritten whenever any turn is, so its
 		// absence leaves a stale one in place. Missing only covers turns.
 		fmt.Fprintln(w, "  no session summary came back — the stored one still describes an earlier state")
@@ -147,7 +179,54 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 	if *quiet {
 		return
 	}
-	printSummaries(w, res)
+	printSummaries(w, all)
+}
+
+// sessionSummary asks for the session's own summary from the turn summaries.
+// A failure here is reported and shrugged off: the turn summaries are stored
+// and useful on their own, and losing the run over the line that describes them
+// would be worse than leaving that line as it was.
+func sessionSummary(ctx context.Context, gen summary.Generator, s domain.Session, turns map[int]string, w io.Writer) string {
+	out, err := gen.Generate(ctx, summary.SessionSystem, summary.SessionPrompt(s, turns))
+	if err == nil {
+		var res summary.Result
+		if res, err = summary.Parse(out, nil); err == nil {
+			return res.Session
+		}
+	}
+	fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be made: %v\n", err)
+	return ""
+}
+
+// storeSummaries writes one batch's result. replace is set for the first batch
+// of a --force run: the old summaries go out in the same transaction the new
+// ones come in, so a failure anywhere leaves the stored set intact rather than
+// empty.
+func storeSummaries(ctx context.Context, db *cache.DB, s domain.Session, res summary.Result, nodes map[int]string, model string, replace bool) error {
+	sums := make([]cache.Summary, 0, len(res.Turns)+1)
+	if res.Session != "" {
+		// Turn 0 is rewritten whenever any turn is, since adding turns is what
+		// makes the session's own summary out of date.
+		sums = append(sums, cache.Summary{Turn: 0, Text: res.Session, Model: model})
+	}
+	for n, text := range res.Turns {
+		sums = append(sums, cache.Summary{Turn: n, NodeID: nodes[n], Text: text, Model: model})
+	}
+	if replace {
+		return db.ReplaceSummaries(ctx, s, sums)
+	}
+	return db.PutSummaries(ctx, s, sums)
+}
+
+// stopAfter reports how far a split run got before failing, then exits. What
+// was stored stays stored: running summarize again asks only for the turns that
+// never came back.
+func stopAfter(w io.Writer, all summary.Result, batch, batches int, err error) {
+	if batches > 1 {
+		fmt.Fprintf(w, "  stored %d turns from %d of %d calls before this failed — summarize again for the rest\n",
+			len(all.Turns), batch, batches)
+	}
+	fail(err)
 }
 
 // printSummaries writes what came back, session line first.
