@@ -79,6 +79,11 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 	reqs, _ := q.List()
 	done := 0
 	for _, r := range reqs {
+		if !r.Ready(time.Now()) {
+			// Failed recently, or failed often enough to stop. Sweep takes the
+			// ones that are done being tried.
+			continue
+		}
 		if done >= cfg.Summary.MaxPerRun {
 			fmt.Fprintf(log, "%s worker: stopping at %d sessions (summary.max_per_run); %d still queued\n",
 				stamp(), done, len(reqs)-done)
@@ -115,17 +120,18 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		}
 		out, err := gen.Generate(ctx, summary.System, prompt)
 		if err != nil {
-			// Stop this session but keep what earlier calls stored. The request
-			// is dropped rather than retried: whatever failed (not signed in, an
-			// unknown model, a session too large for the model) fails the same
-			// way next time, and the host queues it again when it is next seen.
+			// Keep what earlier calls stored, and put the request back with the
+			// failure recorded. Dropping it would mean the next scan queues the
+			// session again and the same call is paid for again, over and over.
 			fmt.Fprintf(log, "%s %s/%s: call %d of %d failed: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts), err)
-			break
+			_ = q.Retry(r, time.Now())
+			return
 		}
 		res, err := summary.Parse(out, r.Batches[i])
 		if err != nil {
 			fmt.Fprintf(log, "%s %s/%s: call %d of %d: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts), err)
-			break
+			_ = q.Retry(r, time.Now())
+			return
 		}
 		if res.Session != "" {
 			all.Session = res.Session
@@ -135,7 +141,8 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		}
 		if err := storeSummaries(ctx, db, s, res, r.Nodes, gen.Name(), false); err != nil {
 			fmt.Fprintf(log, "%s %s/%s: storing call %d failed: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, err)
-			break
+			_ = q.Retry(r, time.Now())
+			return
 		}
 	}
 

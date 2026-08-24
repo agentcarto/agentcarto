@@ -107,6 +107,12 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 		return false
 	}
 	r := summary.Request{PluginID: s.PluginID, SessionID: s.SessionID, Queued: time.Now(), Nodes: nodes}
+	// Queueing a session again must not clear the record of it having failed;
+	// otherwise every scan would reset the backoff and the retries would be
+	// continuous after all.
+	if prev, ok := q.Find(s.PluginID, s.SessionID); ok {
+		r.Attempts, r.LastTried = prev.Attempts, prev.LastTried
+	}
 	for _, batch := range summary.Batch(*conv, turns, want, s.CWD) {
 		doc, asked := summary.Prompt(s, *conv, turns, summary.Options{Turns: summary.TurnSet(batch)})
 		if len(asked) == 0 {

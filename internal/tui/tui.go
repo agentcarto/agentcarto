@@ -516,9 +516,14 @@ func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 		_ = m.cache.DropSupersededArtifacts(context.Background(), app.SearchArtifactKind, app.ConversationArtifactKind)
 	}
 	m.scanning = false
+	// The hook runs as a command rather than here: it parses conversations and
+	// writes files, which at a scan every few seconds would stop the update loop
+	// for as long as that takes. As a command it runs off the loop and returns
+	// nothing, since it changes nothing on screen.
+	var after tea.Cmd
 	if m.afterScan != nil {
-		// Whatever this does must not block the update loop; the host detaches.
-		m.afterScan(x.snap.Sessions)
+		hook, sessions := m.afterScan, x.snap.Sessions
+		after = func() tea.Msg { hook(sessions); return nil }
 	}
 	m.filter()
 	if m.detail != nil && m.detailSession != nil {
@@ -526,11 +531,11 @@ func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 		for _, s := range m.sessions {
 			if s.Key() == key {
 				m.detailSession = &s
-				return m, m.loadConversation(s, false, false)
+				return m, tea.Batch(after, m.loadConversation(s, false, false))
 			}
 		}
 	}
-	return m, nil
+	return m, after
 }
 
 // handleConvMsg applies a loaded conversation to the detail view.

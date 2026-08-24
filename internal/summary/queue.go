@@ -35,6 +35,31 @@ type Request struct {
 	Nodes     map[int]string `json:"nodes"`
 	Batches   [][]int        `json:"batches"`
 	Prompts   []string       `json:"prompts"`
+	// Attempts and LastTried record failures. Nothing else can: the guard
+	// against regenerating asks the store when a session was last summarized,
+	// and a session that has never succeeded has nothing there — so without
+	// this it would be retried on every scan, which for the kind of failure
+	// where the model answers but the answer will not parse means paying every
+	// time.
+	Attempts  int       `json:"attempts,omitempty"`
+	LastTried time.Time `json:"last_tried,omitempty"`
+}
+
+// RetryAfter is how long a failed request waits before the worker tries it
+// again, and MaxAttempts is where it gives up. A session that cannot be
+// summarized is usually one that will not be — an answer the model keeps
+// mangling, a conversation something in the pipeline cannot render — so the
+// backoff is generous and the ceiling is low.
+const (
+	RetryAfter  = 6 * time.Hour
+	MaxAttempts = 3
+)
+
+// Ready reports whether a request should be tried now. A request that failed
+// recently waits; one that has failed too often is done being tried, and Sweep
+// removes it.
+func (r Request) Ready(now time.Time) bool {
+	return r.Attempts < MaxAttempts && (r.LastTried.IsZero() || now.Sub(r.LastTried) >= RetryAfter)
 }
 
 // OpenQueue returns the queue rooted at dir, creating it if it is not there.
@@ -106,6 +131,15 @@ func (q *Queue) List() ([]Request, []string) {
 	return out, bad
 }
 
+// Retry records that a request failed and puts it back, so the worker leaves it
+// alone for a while instead of doing it again on the next scan. Once it has
+// failed MaxAttempts times it stops being tried at all, and Sweep takes it.
+func (q *Queue) Retry(r Request, now time.Time) error {
+	r.Attempts++
+	r.LastTried = now
+	return q.Add(r)
+}
+
 // Done removes a request. It is called for a request that was summarized and
 // for one that failed in a way retrying cannot fix — leaving either in place
 // would make the worker do it again on every run, spending each time.
@@ -130,7 +164,8 @@ func (q *Queue) Sweep(maxAge time.Duration, now time.Time) int {
 		}
 	}
 	for _, r := range reqs {
-		if now.Sub(r.Queued) > maxAge {
+		// Stale, or tried until there was no point trying again.
+		if now.Sub(r.Queued) > maxAge || r.Attempts >= MaxAttempts {
 			if q.Done(r) == nil {
 				n++
 			}
@@ -155,4 +190,19 @@ func requestName(plugin, session string) string {
 		}, s)
 	}
 	return fmt.Sprintf("%s-%s.json", safe(plugin), safe(session))
+}
+
+// Find returns the queued request for a session, if there is one. A caller
+// queueing the same session again uses it to carry over what is known about
+// earlier failures.
+func (q *Queue) Find(plugin, session string) (Request, bool) {
+	b, err := os.ReadFile(filepath.Join(q.dir, requestName(plugin, session)))
+	if err != nil {
+		return Request{}, false
+	}
+	var r Request
+	if json.Unmarshal(b, &r) != nil || r.SessionID == "" {
+		return Request{}, false
+	}
+	return r, true
 }

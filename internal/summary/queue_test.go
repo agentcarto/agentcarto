@@ -186,3 +186,95 @@ func TestRequestNameStaysInTheDirectory(t *testing.T) {
 		t.Errorf("requestName mangled a normal id: %q", got)
 	}
 }
+
+// A session that cannot be summarized must not be retried on every scan. The
+// guard in the worker reads the store, and a session that never succeeded has
+// nothing there — so the backoff has to live with the request.
+func TestRequestReady(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		r    Request
+		want bool
+	}{
+		{"never tried", Request{}, true},
+		{"failed just now", Request{Attempts: 1, LastTried: now.Add(-time.Minute)}, false},
+		{"failed inside the backoff", Request{Attempts: 1, LastTried: now.Add(-RetryAfter + time.Minute)}, false},
+		{"failed before the backoff", Request{Attempts: 1, LastTried: now.Add(-RetryAfter)}, true},
+		{"failed long ago", Request{Attempts: 2, LastTried: now.Add(-30 * 24 * time.Hour)}, true},
+		{"out of attempts", Request{Attempts: MaxAttempts, LastTried: now.Add(-30 * 24 * time.Hour)}, false},
+		{"past the ceiling", Request{Attempts: MaxAttempts + 5, LastTried: time.Time{}}, false},
+	}
+	for _, c := range cases {
+		if got := c.r.Ready(now); got != c.want {
+			t.Errorf("%s: Ready=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestQueueRetryRecordsTheFailure(t *testing.T) {
+	q := tempQueue(t)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: now.Add(-time.Hour), Prompts: []string{"doc"}}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := q.List()
+	if !got[0].Ready(now) {
+		t.Fatal("a fresh request is not ready")
+	}
+	if err := q.Retry(got[0], now); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = q.List()
+	if len(got) != 1 {
+		t.Fatalf("Retry did not put the request back: %+v", got)
+	}
+	if got[0].Attempts != 1 || !got[0].LastTried.Equal(now) {
+		t.Errorf("the failure was not recorded: attempts=%d lastTried=%s", got[0].Attempts, got[0].LastTried)
+	}
+	if got[0].Ready(now) {
+		t.Error("a request that just failed is ready again immediately")
+	}
+	// The prompt survives, so the retry does not have to rebuild it.
+	if len(got[0].Prompts) != 1 || got[0].Prompts[0] != "doc" {
+		t.Errorf("Retry lost the prompt: %+v", got[0].Prompts)
+	}
+}
+
+// Sweep takes the requests that have failed too often, so they do not sit in
+// the queue forever being skipped.
+func TestQueueSweepsWhatGaveUp(t *testing.T) {
+	q := tempQueue(t)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	if err := q.Add(Request{PluginID: "claude", SessionID: "gave-up", Queued: now, Attempts: MaxAttempts, LastTried: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Add(Request{PluginID: "claude", SessionID: "still-trying", Queued: now, Attempts: 1, LastTried: now}); err != nil {
+		t.Fatal(err)
+	}
+	if n := q.Sweep(48*time.Hour, now); n != 1 {
+		t.Errorf("Sweep removed %d, want 1", n)
+	}
+	got, _ := q.List()
+	if len(got) != 1 || got[0].SessionID != "still-trying" {
+		t.Errorf("after the sweep: %+v", got)
+	}
+}
+
+// Queueing a session again must not clear what is known about earlier failures,
+// or every scan would reset the backoff and retries would be continuous.
+func TestQueueFindCarriesFailuresForward(t *testing.T) {
+	q := tempQueue(t)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	if err := q.Add(Request{PluginID: "claude", SessionID: "s1", Queued: now, Attempts: 2, LastTried: now}); err != nil {
+		t.Fatal(err)
+	}
+	prev, ok := q.Find("claude", "s1")
+	if !ok || prev.Attempts != 2 || !prev.LastTried.Equal(now) {
+		t.Fatalf("Find=%+v ok=%v", prev, ok)
+	}
+	if _, ok := q.Find("claude", "never-queued"); ok {
+		t.Error("Find reported a request for a session that was never queued")
+	}
+}
