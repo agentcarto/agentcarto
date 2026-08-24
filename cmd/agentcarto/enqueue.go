@@ -195,11 +195,20 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		return false
 	}
 	q, err := summary.OpenQueue(queueDir())
-	if err != nil || !queueOne(ctx, a, db, q, s) {
+	if err != nil {
 		return false
 	}
+	// queueOne answers false both for "nothing to do" and for "already queued",
+	// and those want opposite things here: a session waiting its turn behind
+	// sixty others is exactly the one someone just asked to read. What decides
+	// is whether a request exists afterwards, not whether this call created it.
+	queueOne(ctx, a, db, q, s)
 	r, ok := q.Find(s.PluginID, s.SessionID)
 	if !ok {
+		return false
+	}
+	if !r.Ready(time.Now()) {
+		// Waiting out a failure. Trying again here would repeat it on every run.
 		return false
 	}
 	if len(r.Prompts) > 1 {

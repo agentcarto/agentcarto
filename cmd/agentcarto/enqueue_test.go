@@ -211,3 +211,48 @@ func TestAnyReady(t *testing.T) {
 		t.Error("a request inside its backoff was reported as work")
 	}
 }
+
+// queueOne answers false for two opposite situations, and show has to tell them
+// apart: "nothing to summarize" means print what there is, while "already
+// queued" means this is precisely the session someone asked to read — waiting
+// behind sixty others is not an answer to that.
+func TestShowActsOnAQueuedSession(t *testing.T) {
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(filepath.Join(t.TempDir(), "q"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "s1", Fingerprint: "fp1"}
+	if err := q.Add(summary.Request{PluginID: "claude", SessionID: "s1", Batches: [][]int{{1}}, Prompts: []string{"doc"}}); err != nil {
+		t.Fatal(err)
+	}
+	// queueOne says false here (already queued), which must not end it.
+	if queueOne(ctx, nil, d, q, s) {
+		t.Fatal("a queued session was queued again")
+	}
+	r, ok := q.Find("claude", "s1")
+	if !ok {
+		t.Fatal("the request went missing")
+	}
+	if !r.Ready(time.Now()) {
+		t.Error("a fresh request is not ready")
+	}
+	if len(r.Prompts) != 1 {
+		t.Errorf("the request lost its prompt: %+v", r.Prompts)
+	}
+
+	// One waiting out a failure is not acted on: retrying here would repeat the
+	// failure on every run.
+	if err := q.Retry(r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := q.Find("claude", "s1")
+	if r2.Ready(time.Now()) {
+		t.Error("a request inside its backoff is ready")
+	}
+}
