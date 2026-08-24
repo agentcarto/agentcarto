@@ -57,6 +57,8 @@ func Open(path string) (*DB, error) {
 	// sessions holds one JSON-encoded session per (plugin_id, session_id); artifacts caches
 	// derived data (e.g. parsed conversations) per (plugin_id, session_id, kind), keyed also
 	// by the session fingerprint and parser_version so stale entries are ignored on read.
+	// summaries holds generated turn summaries, one row per turn — see summary.go for why
+	// they are not artifacts.
 	for _, q := range []string{
 		// Patience first: switching the journal mode and creating the schema both
 		// take the write lock, so a timeout set after them would come too late.
@@ -69,6 +71,7 @@ func Open(path string) (*DB, error) {
 		"PRAGMA journal_mode=WAL",
 		"CREATE TABLE IF NOT EXISTS sessions (plugin_id TEXT, session_id TEXT, data BLOB NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id))",
 		"CREATE TABLE IF NOT EXISTS artifacts (plugin_id TEXT, session_id TEXT, fingerprint TEXT, parser_version TEXT, kind TEXT, data BLOB NOT NULL, accessed INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,kind))",
+		"CREATE TABLE IF NOT EXISTS summaries (plugin_id TEXT, session_id TEXT, turn_index INTEGER, node_id TEXT NOT NULL, summary TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,turn_index))",
 	} {
 		if _, e = d.Exec(q); e != nil {
 			d.Close()
