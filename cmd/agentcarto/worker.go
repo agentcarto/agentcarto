@@ -92,6 +92,12 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		if ctx.Err() != nil {
 			return
 		}
+		// The queue was read once, minutes ago for a long run. `show` takes a
+		// request out before generating that session itself, so one that is gone
+		// is one somebody else is paying for right now.
+		if _, still := q.Find(r.PluginID, r.SessionID); !still {
+			continue
+		}
 		runRequest(ctx, log, q, db, gen, r)
 		done++
 	}
@@ -213,5 +219,5 @@ func summaryDir() string {
 	return filepath.Dir(cache.Path())
 }
 func queueDir() string { return filepath.Join(summaryDir(), "summarize-queue") }
-func lockPath() string   { return filepath.Join(summaryDir(), "summarize.lock") }
-func logPath() string    { return filepath.Join(summaryDir(), "summarize.log") }
+func lockPath() string { return filepath.Join(summaryDir(), "summarize.lock") }
+func logPath() string  { return filepath.Join(summaryDir(), "summarize.log") }

@@ -25,8 +25,9 @@ import (
 func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, args []string, w io.Writer) {
 	// Deferred so it runs after summarizeForShow below rather than beside it: a
 	// worker picking through the queue while this generates could land on the
-	// same session, and both would pay for it.
-	defer StartSummaryWorker(cfg)
+	// same session, and both would pay for it. It is also the only place show
+	// starts one, including for a session too long to summarize inline.
+	defer StartSummaryWorker(cfg, db)
 	fs := flag.NewFlagSet("show", flag.ExitOnError)
 	source := fs.String("source", "", "the session's log path, when an id is ambiguous")
 	turnSpec := fs.String("turns", "", `which turns to print ("12", "12-14", "3,7,12-14")`)

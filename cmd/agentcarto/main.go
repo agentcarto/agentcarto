@@ -116,7 +116,7 @@ func main() {
 func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, args []string, active bool, w io.Writer) {
 	// Deferred so the listing is printed first: the scan queues, and the worker
 	// starts once whoever ran this has what they asked for.
-	defer StartSummaryWorker(c)
+	defer StartSummaryWorker(c, db)
 	name := "list"
 	if active {
 		name = "active"

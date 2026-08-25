@@ -80,7 +80,7 @@ type searchSession struct {
 
 func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, args []string, w io.Writer) {
 	// Deferred so the results are printed first — see listCmd.
-	defer StartSummaryWorker(cfg)
+	defer StartSummaryWorker(cfg, db)
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
 	format := fs.String("format", "table", "print as lines (table) or as JSON (json)")
 	asJSON := fs.Bool("json", false, "the older spelling of --format json")

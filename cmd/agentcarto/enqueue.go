@@ -88,8 +88,13 @@ var spawnWorker = detachWorker
 // StartSummaryWorker starts a detached worker if the queue holds work and none
 // is running. Commands call it on their way out, once whatever they were asked
 // for has been printed.
-func StartSummaryWorker(cfg config.Config) {
-	if cfg.Summary.Agent == "" {
+//
+// A run with no cache starts nothing. --no-cache says not to touch the store on
+// this run, and a worker is a process that writes summaries into it — one whose
+// own cache the flag would not reach, since it is started detached and reads the
+// configuration for itself.
+func StartSummaryWorker(cfg config.Config, db *cache.DB) {
+	if cfg.Summary.Agent == "" || db == nil {
 		return
 	}
 	q, err := summary.OpenQueue(queueDir())
@@ -120,7 +125,7 @@ func StartSummaryWorker(cfg config.Config) {
 // half on.
 func QueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, sessions []domain.Session) {
 	EnqueueSummaries(ctx, a, cfg, db, sessions)
-	StartSummaryWorker(cfg)
+	StartSummaryWorker(cfg, db)
 }
 
 // anyReady reports whether the queue holds work a worker would act on now.
@@ -304,9 +309,10 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 			fmt.Fprintf(os.Stderr, "agentcarto: %d turns to summarize, queued behind a run already going — `agentcarto show %s --turns N` reads a turn now\n", turnsIn(r), ref)
 			return false
 		}
-		if err := spawnWorker(); err != nil {
-			return false
-		}
+		// The worker is started on the way out of show, not here: showCmd defers
+		// one, and starting a second from inside would spawn a process that
+		// takes the lock's refusal and exits, writing a line to the log for
+		// nothing.
 		fmt.Fprintf(os.Stderr, "agentcarto: %d turns to summarize, running in the background — `agentcarto show %s --turns N` reads a turn now, and the summaries appear here on a later run\n",
 			turnsIn(r), ref)
 		return false
@@ -315,6 +321,12 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	if err != nil {
 		return false
 	}
+	// The request leaves the queue before the call, not after. A worker started
+	// by an earlier command reads the queue once and then works through it for
+	// minutes; taking the request out now is what stops it from generating this
+	// same session alongside — it checks each request is still there before
+	// spending on it. Nothing is lost if this fails: the request goes back below.
+	_ = q.Done(r)
 	fmt.Fprintf(os.Stderr, "agentcarto: summarizing %d turns of this session (about half a minute)…\n", turnsIn(r))
 	out, err := gen.Generate(ctx, summary.System, r.Prompts[0])
 	if err == nil {
@@ -324,13 +336,12 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		}
 	}
 	if err != nil {
-		// The request stays queued with the failure recorded, so a worker picks
-		// it up later rather than show trying again on every run.
+		// Back in the queue with the failure recorded, so a worker picks it up
+		// later rather than show trying again on every run.
 		_ = q.Retry(r, time.Now())
 		fmt.Fprintf(os.Stderr, "agentcarto: could not summarize this session: %v\n", err)
 		return false
 	}
-	_ = q.Done(r)
 	return true
 }
 

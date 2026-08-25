@@ -25,6 +25,11 @@ import (
 // Only the turns that have none are asked about, so a session that grew since
 // it was last summarized costs the new turns rather than all of them.
 func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, args []string, w io.Writer) {
+	// Like the other commands: the scan this runs queues whatever else needs
+	// summarizing, and a worker takes it once this session is done. Without it
+	// the requests this command's own scan added would sit until some other
+	// command happened to run, and age out of the queue after two days.
+	defer StartSummaryWorker(cfg, db)
 	fs := flag.NewFlagSet("summarize", flag.ExitOnError)
 	source := fs.String("source", "", "the session's log path, when an id is ambiguous")
 	force := fs.Bool("force", false, "discard the stored summaries and make them again")

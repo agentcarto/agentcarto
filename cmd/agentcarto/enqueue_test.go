@@ -379,6 +379,33 @@ func TestTheCommandLineQueuesAndStartsAWorker(t *testing.T) {
 	}
 }
 
+// --no-cache says not to touch the store on this run. It reaches the commands
+// as a nil cache, and a worker is a process that writes summaries into that
+// store — one the flag cannot reach, since it is detached and reads the
+// configuration for itself. Splitting queueing from starting made this possible
+// for the first time: the old shape returned on a nil cache before it got as
+// far as starting anything.
+func TestNoCacheStartsNothing(t *testing.T) {
+	_, started := summaryFixture(t)
+	a, cfg := settledApp()
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 20
+	// An earlier run, made with the cache, left work behind.
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Add(summary.Request{PluginID: "claude", SessionID: "left-over", Queued: time.Now(), Prompts: []string{"doc"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var b bytes.Buffer
+	listCmd(context.Background(), a, cfg, nil, nil, false, &b) // nil cache: --no-cache
+
+	if *started != 0 {
+		t.Errorf("--no-cache started %d workers", *started)
+	}
+}
+
 // Nothing is queued and nothing is spawned while the feature is off, which is
 // how it ships. A command that quietly spent money on a machine that never
 // asked for summaries would be a poor thing to hand anyone.
@@ -436,9 +463,46 @@ func TestEnqueueDoesNotStartAWorker(t *testing.T) {
 		t.Error("the scan started a worker instead of leaving it to the command")
 	}
 	// And the command's half does start one, on a queue it added nothing to.
-	StartSummaryWorker(cfg)
+	StartSummaryWorker(cfg, d)
 	if *started != 1 {
 		t.Errorf("a worker was started %d times, want once", *started)
+	}
+}
+
+// A session too long to summarize inline is handed to the background, and the
+// worker for it is the one showCmd defers — not a second one started here.
+// Starting both spawns a process that arrives to find the lock taken and exits,
+// writing a line to the log for nothing.
+func TestShowHandsOffWithoutStartingItsOwnWorker(t *testing.T) {
+	_, started := summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "long", Fingerprint: "fp1"}
+	// Two prompts: more than one call, so this is the hand-off branch and no
+	// generation happens here.
+	if err := q.Add(summary.Request{
+		PluginID: "claude", SessionID: "long", Queued: time.Now(),
+		Batches: [][]int{{1}, {2}}, Prompts: []string{"a", "b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Summary: config.Summary{Agent: "claude", Model: "claude-sonnet-5"}}
+	if summarizeForShow(ctx, nil, cfg, d, s, "long") {
+		t.Error("a session needing several calls was reported as summarized")
+	}
+	if *started != 0 {
+		t.Errorf("summarizeForShow started %d workers; showCmd's deferred one is the only one", *started)
+	}
+	if _, ok := q.Find("claude", "long"); !ok {
+		t.Error("the request was dropped instead of being left for the worker")
 	}
 }
 
