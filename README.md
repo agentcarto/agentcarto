@@ -53,6 +53,38 @@ text, or step along its branches.
 | `▶N` | queued inputs (typed but not yet sent) |
 | `⤷N` | background task / sub-agent notifications |
 
+### Have a session summarized (off by default)
+
+A headline says what was asked for; a summary says what came of it. AgentCarto can generate one
+per turn and one per session, and then `show` prints them, the turn view leads with them, and
+`search` can find a session through them.
+
+It stays off until you set `summary.agent`, because generating costs money and **sends the
+session's text to that agent's provider**: it runs the agent's own CLI (`claude` or `codex`), so
+it is billed to your account there.
+
+```yaml
+summary:
+  agent: claude           # or codex; "" (the default) generates nothing
+  model: claude-sonnet-5
+  max_per_run: 20         # sessions one background run summarizes
+```
+
+Once it is on, summaries appear without being asked for. Every command that lists sessions queues
+what has none, and a **detached worker** generates them, so quitting the TUI — or the command —
+does not take the work with it. `agentcarto show <id>` summarizes the session you asked for on the
+spot when one call will do (about half a minute); a longer one goes to the background and says so.
+`agentcarto summarize <id>` does one by hand, and `agentcarto doctor` says whether a worker is
+running and how many sessions are waiting.
+
+**The oldest sessions go first.** A summary is a kilobyte that outlives what it was made from:
+agents rotate their own logs away, and the cache evicts conversations when it is over its size
+limit, while nothing collects summaries. The newest sessions get theirs from `show`, at the moment
+they are read.
+
+**Generated text is marked as generated** wherever it appears — which model wrote it, and that the
+turns themselves are verbatim. A session summary written before the newest turns says so too.
+
 ### Act on a session (where the agent supports it)
 - **Resume** a session in its own agent, right from the list.
 - **Fork** from any turn into a brand-new session — the original is never modified.
@@ -61,7 +93,8 @@ text, or step along its branches.
 ### Stay safe and local
 Browsing, search, and status are **read-only**; the only writes are the fork and relocate
 actions you confirm. Conversations are cached in a local SQLite database and never leave
-your machine.
+your machine — with one exception, which is off unless you switch it on: generated summaries
+send session text to the agent's provider (see above).
 
 ## Supported agents
 
@@ -127,6 +160,7 @@ agentcarto plugins list     list plugins and capabilities
 agentcarto doctor           diagnose config, executables, and storage
 agentcarto search "query"   search sessions and print where the query was found
 agentcarto show <session>   print a session's outline, or the turns you ask for
+agentcarto summarize <id>   generate this session's summaries now (costs money; off by default)
 agentcarto cache stats|clear
 ```
 
@@ -191,6 +225,17 @@ the whole session.
 | `--source PATH` | the log's path, when an id is ambiguous (a fork keeps its parent's id) |
 
 An id can be given as a prefix (`8f3a2b1c`), the way the list and the search results show it.
+
+**Generated summaries, where a session has them.** With
+[summaries switched on](#have-a-session-summarized-off-by-default), `show` prints the session's own
+under the header and marks each turn's with `↳` in the outline — a turn with no `↳` is one nothing
+has been written about yet, not one that was left out. `search` falls back to them when the
+conversation itself says nothing, and reports `"match": "summary"` for such a session. That is what
+finds a session whose log an agent rotated away and whose cached conversation the store has since
+evicted: a kilobyte of summary is all it has left. In those rows the hits are **generated text**,
+and turn `0` is the session's own summary rather than a turn — the table prints it as `whole`.
+A summary is only ever offered against a turn it was actually made from, so a rewound session
+never shows one against whatever turn now carries that number.
 
 A search or a listing narrowed with `--cwd` that finds nothing reports how many sessions are
 outside the filter and where they are, with the directory containing yours named first — the
@@ -298,7 +343,9 @@ OS user-config file → a `--config` file.
 
 [`config.example.yaml`](./config.example.yaml) is a ready-to-use starting point (set each
 agent's storage directory and executable, colors, cache size, …). Validate a file with
-`agentcarto config validate`.
+`agentcarto config validate`. The one section that changes what agentcarto does with your data
+rather than how it looks is `summary` — see
+[Have a session summarized](#have-a-session-summarized-off-by-default).
 
 ## How it works
 
