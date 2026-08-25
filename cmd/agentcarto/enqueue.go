@@ -39,6 +39,27 @@ func detachWorker() error {
 // does not wait at all. On this machine that is 150 of 222 sessions.
 const settleBefore = 10 * time.Minute
 
+// regenerateWithin is the shortest gap between summarizing the same session
+// twice unasked. A session someone is working in grows all day, and every new
+// turn makes its session summary out of date again; without a floor, a scan
+// every few seconds would pay for a new one every few seconds.
+const regenerateWithin = time.Hour
+
+// tooSoon reports whether a session was summarized recently enough that doing
+// it again would be waste rather than an update.
+//
+// It guards the sessions nobody asked about — see EnqueueSummaries, its only
+// caller. A request somebody made by name is answered whatever its age.
+//
+// The window also covers a store that cannot be read at all: Summaries folds an
+// unreadable database into "nothing is summarized", which would otherwise look
+// like an unsummarized session on every run and be paid for every time. A
+// session that has genuinely grown is still summarized again once the window
+// passes, and only its new turns are asked about.
+func tooSoon(when time.Time, summarized bool, now time.Time) bool {
+	return summarized && now.Sub(when) < regenerateWithin
+}
+
 // EnqueueSummaries queues the sessions that have no summary. It is what makes
 // summaries appear without anyone asking: scanning already happens on every
 // run, and this rides along.

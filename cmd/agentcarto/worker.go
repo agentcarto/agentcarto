@@ -20,12 +20,6 @@ import (
 // prompt built from a conversation that no longer looks like that.
 const staleRequest = 48 * time.Hour
 
-// regenerateWithin is the shortest gap between summarizing the same session
-// twice. The store reports a summary as missing when it cannot be read at all —
-// a corrupt database reads as "nothing is summarized" — and without this the
-// worker would regenerate the same session on every run, spending each time.
-const regenerateWithin = time.Hour
-
 // summarizeWorkerCmd drains the summary queue. It is not in the help: the host
 // starts it, detached, and a person has `agentcarto summarize` for doing one
 // session by hand.
@@ -122,9 +116,19 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 // run.
 func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.DB, gen summary.Generator, r summary.Request) bool {
 	s := domain.Session{PluginID: r.PluginID, SessionID: r.SessionID}
-	when, ok := db.SummarizedAt(ctx, s)
-	if tooSoon(when, ok, time.Now()) {
-		fmt.Fprintf(log, "%s %s/%s: summarized %s ago, skipping\n", stamp(), r.PluginID, short8(r.SessionID), time.Since(when).Round(time.Minute))
+	// Summarized after this request was written, so what it asked for has been
+	// answered — by a `show` that generated the session itself, or by a run that
+	// reached it first.
+	//
+	// The question is deliberately "since this was queued" and not "within the
+	// hour": a request here can be one somebody asked for by name. `show` leaves
+	// a session needing several calls to the worker and tells the reader the
+	// summaries will appear, and an hourly guard applied here would drop that
+	// request unsummarized and make that a lie. What holds a growing session to
+	// one summary an hour is EnqueueSummaries, which is the only thing that
+	// queues without being asked.
+	if when, ok := db.SummarizedAt(ctx, s); ok && when.After(r.Queued) {
+		fmt.Fprintf(log, "%s %s/%s: summarized %s after this was queued, skipping\n", stamp(), r.PluginID, short8(r.SessionID), when.Sub(r.Queued).Round(time.Second))
 		_ = q.Done(r)
 		return false
 	}
@@ -180,18 +184,6 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s\n", stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), len(r.Prompts), gen.Name())
 	_ = q.Done(r)
 	return true
-}
-
-// tooSoon reports whether a session was summarized recently enough that doing
-// it again would be waste rather than an update.
-//
-// The guard exists because Summaries folds an unreadable store into "nothing is
-// summarized": a database that cannot be read would otherwise look like an
-// unsummarized session on every run and be paid for every time. A session that
-// has genuinely grown is still summarized again once the window passes, and
-// only its new turns are asked about.
-func tooSoon(when time.Time, summarized bool, now time.Time) bool {
-	return summarized && now.Sub(when) < regenerateWithin
 }
 
 // openWorkerLog appends to the worker's log, which is the only place its

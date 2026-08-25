@@ -317,6 +317,38 @@ func TestARecentlySummarizedSessionIsNotQueuedAgain(t *testing.T) {
 	}
 }
 
+// The guard is against queueing in a loop, not against regenerating at all: a
+// session that grew must still be summarized again once the window passes.
+func TestTooSoon(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		when       time.Time
+		summarized bool
+		want       bool
+	}{
+		{"never summarized", time.Time{}, false, false},
+		{"just now", now.Add(-time.Minute), true, true},
+		{"inside the window", now.Add(-regenerateWithin + time.Minute), true, true},
+		{"exactly the window", now.Add(-regenerateWithin), true, false},
+		{"past the window", now.Add(-regenerateWithin - time.Minute), true, false},
+		{"long ago", now.Add(-30 * 24 * time.Hour), true, false},
+		// An unreadable store answers "not summarized" with a zero time. Treating
+		// that as recent would stop summarizing entirely; treating it as never is
+		// what the guard is for — the caller then pays once, not on every run,
+		// because a successful write moves the time forward.
+		{"unreadable store", time.Time{}, false, false},
+		// A clock that moved backwards (a laptop waking, an NTP step) must not
+		// make a summary look like it comes from the future and block forever.
+		{"written in the future", now.Add(time.Hour), true, true},
+	}
+	for _, c := range cases {
+		if got := tooSoon(c.when, c.summarized, now); got != c.want {
+			t.Errorf("%s: tooSoon=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestPickForSummaryOnNothing(t *testing.T) {
 	if got := pickForSummary(nil, time.Now()); len(got) != 0 {
 		t.Errorf("picked %v from no sessions", got)

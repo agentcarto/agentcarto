@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -12,38 +13,6 @@ import (
 	"github.com/agentcarto/agentcarto/internal/summary"
 	"github.com/agentcarto/core/domain"
 )
-
-// The guard is against regenerating in a loop, not against regenerating at all:
-// a session that grew must still be summarized again once the window passes.
-func TestTooSoon(t *testing.T) {
-	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	cases := []struct {
-		name       string
-		when       time.Time
-		summarized bool
-		want       bool
-	}{
-		{"never summarized", time.Time{}, false, false},
-		{"just now", now.Add(-time.Minute), true, true},
-		{"inside the window", now.Add(-regenerateWithin + time.Minute), true, true},
-		{"exactly the window", now.Add(-regenerateWithin), true, false},
-		{"past the window", now.Add(-regenerateWithin - time.Minute), true, false},
-		{"long ago", now.Add(-30 * 24 * time.Hour), true, false},
-		// An unreadable store answers "not summarized" with a zero time. Treating
-		// that as recent would stop summarizing entirely; treating it as never is
-		// what the guard is for — the caller then pays once, not on every run,
-		// because a successful write moves the time forward.
-		{"unreadable store", time.Time{}, false, false},
-		// A clock that moved backwards (a laptop waking, an NTP step) must not
-		// make a summary look like it comes from the future and block forever.
-		{"written in the future", now.Add(time.Hour), true, true},
-	}
-	for _, c := range cases {
-		if got := tooSoon(c.when, c.summarized, now); got != c.want {
-			t.Errorf("%s: tooSoon=%v want %v", c.name, got, c.want)
-		}
-	}
-}
 
 func TestShort8(t *testing.T) {
 	if got := short8("f64330cd-b244-4e5d"); got != "f64330cd" {
@@ -77,16 +46,17 @@ func TestSkippedRequestsDoNotUseTheBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Five sessions, all summarized just now, all queued again.
+	// Five requests queued an hour ago, every one of them summarized since — by
+	// another run, or by the `show` of somebody reading that session.
 	for i := range 5 {
 		s := domain.Session{PluginID: "claude", SessionID: fmt.Sprintf("s%d", i), Fingerprint: "fp1"}
-		if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "既にある要約", Model: "m"}}); err != nil {
-			t.Fatal(err)
-		}
 		if err := q.Add(summary.Request{
-			PluginID: "claude", SessionID: s.SessionID, Queued: time.Now(),
+			PluginID: "claude", SessionID: s.SessionID, Queued: time.Now().Add(-time.Hour),
 			Batches: [][]int{{1}}, Prompts: []string{"doc"},
 		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "既にある要約", Model: "m"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -103,5 +73,66 @@ func TestSkippedRequestsDoNotUseTheBudget(t *testing.T) {
 			left = append(left, r.SessionID)
 		}
 		t.Errorf("the run stopped with %v still queued — skips used the budget", left)
+	}
+}
+
+// fakeGenerator stands in for the agent CLI: it records that it was asked and
+// answers in the marker format Parse reads, so a test can tell a request that
+// was answered from one that was thrown away.
+type fakeGenerator struct {
+	out   string
+	calls int
+}
+
+func (g *fakeGenerator) Generate(context.Context, string, string) (string, error) {
+	g.calls++
+	return g.out, nil
+}
+func (g *fakeGenerator) Name() string { return "fake m" }
+
+// A request in the queue can be one somebody asked for by name: `show` hands a
+// session needing several calls to the worker and tells the reader the
+// summaries will appear on a later run. Dropping it because the session was
+// summarized within the hour — before the turns it is being asked about existed
+// — would make that a lie, and leave the reader with nothing for an hour.
+//
+// What holds a session that keeps growing to one summary an hour is
+// EnqueueSummaries, which is the only thing that queues without being asked.
+func TestARequestQueuedAfterTheLastSummaryIsAnswered(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "grown", Fingerprint: "fp1"}
+	// Summarized moments ago, and then grown: turn 2 is what the request asks
+	// about, and it did not exist when the stored summary was made.
+	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "古いセッション要約", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	r := summary.Request{
+		PluginID: "claude", SessionID: "grown", Queued: time.Now(),
+		Nodes: map[int]string{2: "n2"}, Batches: [][]int{{2}}, Prompts: []string{"doc"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeGenerator{out: "@@TURN 2\n新しいターンの要約\n"}
+	var log bytes.Buffer
+
+	if spent := runRequest(ctx, &log, q, d, g, r); !spent {
+		t.Fatalf("the request was dropped instead of answered: %s", log.String())
+	}
+	if g.calls != 1 {
+		t.Errorf("the generator was called %d times, want 1", g.calls)
+	}
+	if got := d.Summaries(ctx, s, map[int]string{2: "n2"}); got[2].Text != "新しいターンの要約" {
+		t.Errorf("the new turn was not stored: %q", got[2].Text)
 	}
 }
