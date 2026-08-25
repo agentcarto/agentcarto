@@ -216,7 +216,7 @@ func TestASessionWithNothingToSummarizeIsNotOpenedTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if queueOne(ctx, a, d, q, s) {
+	if queued, _ := queueOne(ctx, a, d, q, s); queued {
 		t.Fatal("a session with no turns was queued")
 	}
 	if worthOpening(ctx, d, q, s) {
@@ -295,7 +295,7 @@ func TestQueueOneSkipsWithoutParsing(t *testing.T) {
 		if err := q.Add(summary.Request{PluginID: "claude", SessionID: "s1", Prompts: []string{"doc"}}); err != nil {
 			t.Fatal(err)
 		}
-		if queueOne(ctx, nil, d, q, s) {
+		if queued, _ := queueOne(ctx, nil, d, q, s); queued {
 			t.Error("a session already in the queue was queued again")
 		}
 	})
@@ -308,7 +308,7 @@ func TestQueueOneSkipsWithoutParsing(t *testing.T) {
 		if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "the session"}}); err != nil {
 			t.Fatal(err)
 		}
-		if queueOne(ctx, nil, d, q, s) {
+		if queued, _ := queueOne(ctx, nil, d, q, s); queued {
 			t.Error("a session whose log has not moved since it was summarized was queued")
 		}
 	})
@@ -331,7 +331,7 @@ func TestQueueOneSkipsWithoutParsing(t *testing.T) {
 				t.Error("a session whose log grew was skipped without parsing")
 			}
 		}()
-		queueOne(ctx, nil, d, q, grown)
+		_, _ = queueOne(ctx, nil, d, q, grown)
 	})
 }
 
@@ -687,7 +687,7 @@ func TestShowActsOnAQueuedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	// queueOne says false here (already queued), which must not end it.
-	if queueOne(ctx, nil, d, q, s) {
+	if queued, _ := queueOne(ctx, nil, d, q, s); queued {
 		t.Fatal("a queued session was queued again")
 	}
 	r, ok := q.Find("claude", "s1")
@@ -709,5 +709,55 @@ func TestShowActsOnAQueuedSession(t *testing.T) {
 	r2, _ := q.Find("claude", "s1")
 	if r2.Ready(time.Now()) {
 		t.Error("a request inside its backoff is ready")
+	}
+}
+
+// Noticing that a session has nothing new to summarize must not destroy the
+// summary it already has. Turn 0 is upserted to carry the current fingerprint —
+// that is the only cheap way to recognize a session as done — and writing a
+// blank row there wipes text somebody paid for.
+//
+// It is reached the ordinary way: a summarized session grows by one turn that
+// renders to no document (a command with no reply), so there is nothing to ask
+// about and the marker is written.
+func TestNoticingThereIsNothingToAddKeepsTheSummary(t *testing.T) {
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	s := domain.Session{PluginID: "claude", SessionID: "s1", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "一日かけて作った要約", Model: "claude claude-sonnet-5"}}); err != nil {
+		t.Fatal(err)
+	}
+	grown := s
+	grown.Fingerprint = "fp2" // the log moved
+
+	markNothingToSummarize(ctx, d, grown)
+
+	got := d.Summaries(ctx, grown, nil)
+	if got[0].Text != "一日かけて作った要約" {
+		t.Fatalf("the session summary was destroyed by the marker: %q", got[0].Text)
+	}
+	if got[0].Model != "claude claude-sonnet-5" {
+		t.Errorf("the marker lost which model wrote the summary: %q", got[0].Model)
+	}
+	// And it did what it is for: the session is not opened again at this version.
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worthOpening(ctx, d, q, grown) {
+		t.Error("the marker did not record the version the log moved to")
+	}
+	// A session that never had one still gets the blank record.
+	fresh := domain.Session{PluginID: "claude", SessionID: "s2", Fingerprint: "fp1"}
+	markNothingToSummarize(ctx, d, fresh)
+	if worthOpening(ctx, d, q, fresh) {
+		t.Error("a session with nothing to summarize would be opened again")
+	}
+	if sums, _, _ := storedSummaries(ctx, d, fresh, nil); len(sums) != 0 {
+		t.Errorf("the blank record reads back as a summary: %v", sums)
 	}
 }

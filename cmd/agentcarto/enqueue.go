@@ -70,14 +70,12 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// queues nothing, and never reaches the rest.
 	opened := 0
 	for _, s := range pickForSummary(sessions, time.Now()) {
-		if !worthOpening(ctx, db, q, s) {
+		if _, didOpen := queueOne(ctx, a, db, q, s); !didOpen {
 			continue
 		}
-		if opened >= cfg.Summary.MaxPerRun {
+		if opened++; opened >= cfg.Summary.MaxPerRun {
 			break
 		}
-		queueOne(ctx, a, db, q, s)
-		opened++
 	}
 }
 
@@ -226,30 +224,36 @@ func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.
 	return true
 }
 
-// queueOne writes the request for one session, and reports whether it did.
+// queueOne writes the request for one session. It reports whether it wrote one,
+// and whether deciding took opening the session — which is what a run's budget
+// counts, since the sessions it can rule out cheaply cost it nothing.
+//
 // Parsing the conversation is the expensive part and happens here, in the
 // program that already has the plugin running — the worker would otherwise have
 // to launch plugins of its own, and the two could disagree about what the turns
 // are.
-func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s domain.Session) bool {
+func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s domain.Session) (queued, opened bool) {
 	if !worthOpening(ctx, db, q, s) {
-		return false
+		return false, false
 	}
 	conv, err := a.Conversation(ctx, s)
 	if err != nil || conv == nil {
 		// A plugin that is down reads the same way as a session with nothing in
 		// it, so this one is not recorded: it is the answer that might be
 		// different tomorrow.
-		return false
+		return false, true
 	}
 	turns := transcript.Turns(*conv, conv.ActivePath())
 	if len(turns) == 0 {
-		return markNothingToSummarize(ctx, db, s)
+		return markNothingToSummarize(ctx, db, s), true
 	}
 	nodes := summary.NodesByTurn(turns)
 	want := pendingTurns(turns, db.Summaries(ctx, s, nodes))
 	if len(want) == 0 {
-		return false
+		// Every turn is described already. The log moved — worthOpening let this
+		// through — but not in a way that added anything to say, so record the
+		// version it moved to rather than opening the session again next run.
+		return markNothingToSummarize(ctx, db, s), true
 	}
 	r := summary.Request{PluginID: s.PluginID, SessionID: s.SessionID, Queued: time.Now(), Nodes: nodes}
 	for _, batch := range summary.Batch(*conv, turns, want, s.CWD) {
@@ -261,25 +265,28 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 		r.Prompts = append(r.Prompts, doc)
 	}
 	if len(r.Prompts) == 0 {
-		return markNothingToSummarize(ctx, db, s)
+		return markNothingToSummarize(ctx, db, s), true
 	}
-	return q.Add(r) == nil
+	return q.Add(r) == nil, true
 }
 
-// markNothingToSummarize records that this session, as it stands, renders to no
-// document — it holds only commands, or injected messages, or no turns at all.
-// It always reports false: nothing was queued.
+// markNothingToSummarize records that this session, as it stands, adds nothing
+// to summarize — it renders to no document at all, or every turn it has is
+// already described. It always reports false: nothing was queued.
 //
-// Without the record such a session is opened again on every run, since the only
-// cheap way to recognize a session as done is the fingerprint on turn 0. It
-// would also hold a place in the per-run budget forever, and enough of them at
-// the old end of the list would stop the sweep from ever reaching the rest.
+// What it writes is turn 0 at the session's current fingerprint, which is the
+// only cheap way to recognize a session as done: worthOpening reads exactly
+// that. Without the record such a session is opened again on every run, holds a
+// place in the per-run budget forever, and enough of them at the old end of the
+// list stops the sweep from ever reaching the rest.
 //
-// The row carries no text, which is what makes it invisible: every reader tests
-// a summary for content before printing it, so a blank one shows nowhere. If the
-// log grows the fingerprint no longer matches and the session is reconsidered.
+// Whatever text turn 0 already holds is written back rather than cleared. That
+// row is a summary somebody paid for, and a session that grew by a turn holding
+// nothing to describe — a command with no reply — would otherwise have its
+// session summary destroyed by the act of noticing that it had nothing to add.
 func markNothingToSummarize(ctx context.Context, db *cache.DB, s domain.Session) bool {
-	_ = db.PutSummaries(ctx, s, []cache.Summary{{Turn: 0}})
+	kept := db.Summaries(ctx, s, nil)[0]
+	_ = db.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: kept.Text, Model: kept.Model}})
 	return false
 }
 
@@ -307,7 +314,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// and those want opposite things here: a session waiting its turn behind
 	// sixty others is exactly the one someone just asked to read. What decides
 	// is whether a request exists afterwards, not whether this call created it.
-	queueOne(ctx, a, db, q, s)
+	_, _ = queueOne(ctx, a, db, q, s)
 	r, ok := q.Find(s.PluginID, s.SessionID)
 	if !ok {
 		return false
@@ -346,7 +353,12 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// by an earlier command reads the queue once and then works through it for
 	// minutes; taking the request out now is what stops it from generating this
 	// same session alongside — it checks each request is still there before
-	// spending on it. Nothing is lost if this fails: the request goes back below.
+	// spending on it.
+	//
+	// A call that returns puts the request back below. One that does not — this
+	// process killed mid-generation — loses the record of how often the session
+	// has failed, and the next scan queues it afresh. That costs a backoff, not a
+	// summary.
 	_ = q.Done(r)
 	fmt.Fprintf(os.Stderr, "agentcarto: summarizing %d turns of this session (about half a minute)…\n", turnsIn(r))
 	out, err := gen.Generate(ctx, summary.System, r.Prompts[0])
