@@ -269,6 +269,54 @@ func TestPickForSummarySkipsWhatIsStillMoving(t *testing.T) {
 	}
 }
 
+// A session summarized within the hour is not queued again, however much it has
+// grown. Every scan would otherwise open it, queue it and spawn a worker that
+// throws the request away for the rest of the hour — and the TUI scans every
+// few seconds.
+func TestARecentlySummarizedSessionIsNotQueuedAgain(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	src := "/logs/open.jsonl"
+	s := domain.Session{
+		PluginID: "claude", AgentType: "claude", SessionID: "open", CWD: "/repo/app", Title: "open",
+		UpdatedAt: now, LastKind: domain.EventTurnComplete,
+		Fingerprint: "fp1", SourceRef: domain.SessionRef{Source: src},
+	}
+	conv := domain.NewConversation([]domain.ConvNode{{ID: "u1", Timestamp: now, Events: talk("質問", "答え")}})
+	a, cfg := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{src: conv})
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 4
+
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{s})
+	r, ok := q.Find("claude", "open")
+	if !ok {
+		t.Fatal("an unsummarized open session was not queued")
+	}
+	// Summarized, and out of the queue, as a worker leaves it.
+	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "done"}, {Turn: 1, Text: "turn"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Done(r); err != nil {
+		t.Fatal(err)
+	}
+	// Then the user sends another prompt: same session, a log that moved.
+	grown := s
+	grown.Fingerprint = "fp2"
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{grown})
+	if reqs, _ := q.List(); len(reqs) != 0 {
+		t.Errorf("a session summarized moments ago was queued again: %v", reqs)
+	}
+}
+
 func TestPickForSummaryOnNothing(t *testing.T) {
 	if got := pickForSummary(nil, time.Now()); len(got) != 0 {
 		t.Errorf("picked %v from no sessions", got)

@@ -79,7 +79,8 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// which of them are already done — stops the sweep dead: the first max_per_run
 	// of them get summarized, and every later run picks the same ones, queues
 	// nothing, and never reaches the rest.
-	cand := pickForSummary(sessions, time.Now())
+	now := time.Now()
+	cand := pickForSummary(sessions, now)
 	opened, oldEnd := 0, true
 	for lo, hi := 0, len(cand)-1; lo <= hi && opened < cfg.Summary.MaxPerRun; {
 		s := cand[lo]
@@ -87,6 +88,17 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 			lo++
 		} else {
 			s, hi = cand[hi], hi-1
+		}
+		// Summarized within the hour, and grown since. The worker would take such
+		// a request straight back out without spending on it, and the next scan —
+		// seconds later in the TUI — would queue it afresh and spawn a worker to
+		// throw it away again, for as long as the window lasts. Asking here costs
+		// a row lookup, so the session does not count against the budget.
+		//
+		// Deliberately not in worthOpening: `show` reaches queueOne through it,
+		// and a session someone just asked to read has to be generated now.
+		if when, ok := db.SummarizedAt(ctx, s); tooSoon(when, ok, now) {
+			continue
 		}
 		if _, didOpen := queueOne(ctx, a, db, q, s); didOpen {
 			opened, oldEnd = opened+1, !oldEnd
