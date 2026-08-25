@@ -226,6 +226,69 @@ func TestSummarizedAt(t *testing.T) {
 	}
 }
 
+// MarkExamined says "looked at, nothing to make", which is a different fact from
+// "summarized". It has to record the version it looked at without touching the
+// summary that is there or the time one was last made: the hourly guard reads
+// that time, and a session being worked in is examined on every scan.
+func TestMarkExaminedRecordsTheVersionWithoutClaimingASummary(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1", Fingerprint: "fp1"}
+	if e := d.PutSummaries(ctx, s, []Summary{{Turn: 0, Text: "セッション全体", Model: "m"}}); e != nil {
+		t.Fatal(e)
+	}
+	// Summarized an hour ago, so that a write of `created` here is visible rather
+	// than landing in the same second.
+	hourAgo := time.Now().Add(-time.Hour).Unix()
+	if _, e := d.db.ExecContext(ctx, "UPDATE summaries SET created=? WHERE plugin_id='p' AND session_id='s1'", hourAgo); e != nil {
+		t.Fatal(e)
+	}
+	grown := s
+	grown.Fingerprint = "fp2"
+
+	if e := d.MarkExamined(ctx, grown); e != nil {
+		t.Fatal(e)
+	}
+
+	got := d.Summaries(ctx, grown, nil)
+	if got[0].Text != "セッション全体" || got[0].Model != "m" {
+		t.Errorf("the summary was overwritten: %q by %q", got[0].Text, got[0].Model)
+	}
+	if got[0].Fingerprint != "fp2" {
+		t.Errorf("fingerprint=%q, want the version that was examined", got[0].Fingerprint)
+	}
+	when, ok := d.SummarizedAt(ctx, grown)
+	if !ok || when.Unix() != hourAgo {
+		t.Errorf("SummarizedAt=%v (%s), want the hour-old time it was actually summarized", ok, when)
+	}
+}
+
+// A session that was never summarized is marked with a blank row, and that row
+// must not make it look summarized — neither to a reader nor to the hourly
+// guard. created stays 0, which SummarizedAt reads as "never".
+func TestMarkExaminedOnASessionWithNoSummaries(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1", Fingerprint: "fp1"}
+
+	if e := d.MarkExamined(ctx, s); e != nil {
+		t.Fatal(e)
+	}
+
+	if got := d.Summaries(ctx, s, nil); got[0].Text != "" {
+		t.Errorf("the blank record holds text: %q", got[0].Text)
+	}
+	if got := d.Summaries(ctx, s, nil); got[0].Fingerprint != "fp1" {
+		t.Errorf("fingerprint=%q, want the version that was examined", got[0].Fingerprint)
+	}
+	if when, ok := d.SummarizedAt(ctx, s); ok {
+		t.Errorf("a session that was only examined reports having been summarized at %s", when)
+	}
+	if _, ok := d.SummaryTexts(ctx)[s.Key()]; ok {
+		t.Error("the blank record came back as searchable text")
+	}
+}
+
 // A search asks "could this query be in this session's summaries" of everything
 // on the machine, so it is answered for every session in one query rather than
 // one lookup each. Blank rows — the store's record that a session renders to no

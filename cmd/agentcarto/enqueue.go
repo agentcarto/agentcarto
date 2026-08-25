@@ -328,19 +328,21 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 // to summarize — it renders to no document at all, or every turn it has is
 // already described. It always reports false: nothing was queued.
 //
-// What it writes is turn 0 at the session's current fingerprint, which is the
-// only cheap way to recognize a session as done: worthOpening reads exactly
+// What it writes is the session's current fingerprint against turn 0, which is
+// the only cheap way to recognize a session as done: worthOpening reads exactly
 // that. Without the record such a session is opened again on every run, holds a
 // place in the per-run budget forever, and enough of them at the old end of the
 // list stops the sweep from ever reaching the rest.
 //
-// Whatever text turn 0 already holds is written back rather than cleared. That
-// row is a summary somebody paid for, and a session that grew by a turn holding
-// nothing to describe — a command with no reply — would otherwise have its
-// session summary destroyed by the act of noticing that it had nothing to add.
+// MarkExamined rather than PutSummaries, for two reasons. Whatever text turn 0
+// holds stays: that row is a summary somebody paid for, and a session that grew
+// by a turn holding nothing to describe — a command with no reply — would
+// otherwise have its session summary destroyed by the act of noticing that it
+// had nothing to add. And the time the session was last summarized stays where
+// it is, so the hourly guard keeps measuring from the last summary rather than
+// from the last time anything looked.
 func markNothingToSummarize(ctx context.Context, db *cache.DB, s domain.Session) bool {
-	kept := db.Summaries(ctx, s, nil)[0]
-	_ = db.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: kept.Text, Model: kept.Model}})
+	_ = db.MarkExamined(ctx, s)
 	return false
 }
 

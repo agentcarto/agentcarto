@@ -854,6 +854,13 @@ func TestNoticingThereIsNothingToAddKeepsTheSummary(t *testing.T) {
 	if sums, _, _ := storedSummaries(ctx, d, fresh, nil); len(sums) != 0 {
 		t.Errorf("the blank record reads back as a summary: %v", sums)
 	}
+	// And it does not read as one to the hourly guard either. Noticing that a
+	// session has nothing to add is not summarizing it, and a marker that counted
+	// as one would hold the session off for an hour from the moment it was looked
+	// at rather than from the last summary anybody paid for.
+	if when, ok := d.SummarizedAt(ctx, fresh); ok {
+		t.Errorf("noticing there was nothing to add recorded the session as summarized at %s", when)
+	}
 }
 
 // The turn between the two ends passes on an open, not on a candidate. An end

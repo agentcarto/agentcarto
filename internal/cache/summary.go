@@ -164,6 +164,31 @@ func (d *DB) DropSummaries(ctx context.Context, s domain.Session) error {
 	return e
 }
 
+// MarkExamined records the fingerprint a session was last looked at, without
+// claiming anything was summarized.
+//
+// It is for the session a scan opened and found nothing to ask about: every turn
+// it holds is described already, or none of them renders to a document. Recording
+// the fingerprint is what stops the next scan from opening it again for the same
+// answer.
+//
+// Recording it through PutSummaries would also stamp created, and SummarizedAt
+// would come to mean "last looked at" rather than "last summarized". The hourly
+// guard against re-summarizing reads that time, so a session examined often
+// enough would hold itself off from the moment it was looked at rather than from
+// the last summary anybody paid for.
+//
+// Turn 0 is the row it writes: worthOpening reads exactly that one, and the
+// per-turn rows keep the fingerprint each summary was actually made from. Where
+// there is no row yet, a blank one is created with created=0, which SummarizedAt
+// reads as never summarized — which is the truth.
+func (d *DB) MarkExamined(ctx context.Context, s domain.Session) error {
+	_, e := d.db.ExecContext(ctx,
+		"INSERT INTO summaries VALUES(?,?,0,'','','',?,0) ON CONFLICT(plugin_id,session_id,turn_index) DO UPDATE SET fingerprint=excluded.fingerprint",
+		s.PluginID, s.SessionID, s.Fingerprint)
+	return e
+}
+
 // SummarizedAt reports when a session was last summarized, and whether it ever
 // was. It is the guard against regenerating in a loop: Summaries folds a failed
 // read into "nothing is stored", so a database that cannot be read would
