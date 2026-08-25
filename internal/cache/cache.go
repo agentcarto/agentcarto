@@ -225,6 +225,7 @@ func (d *DB) Save(ctx context.Context, s []domain.Session) error {
 	}
 	return tx.Commit()
 }
+
 // Prune drops the rows of sessions that are neither on disk nor readable from
 // here. A session whose log was deleted is kept as long as its conversation was
 // stored — this is the only copy of it now, and letting it expire would throw
