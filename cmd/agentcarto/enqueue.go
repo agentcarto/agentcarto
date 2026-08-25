@@ -62,19 +62,34 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	if err != nil {
 		return
 	}
-	// The budget is spent on sessions this run actually opens, and the sessions
-	// it can rule out without opening do not count against it. Capping the
-	// candidate list first — before knowing which of them are already done —
-	// stops the sweep dead: with the list in a fixed order, once the first
-	// max_per_run of them are summarized every later run picks the same ones,
-	// queues nothing, and never reaches the rest.
-	opened := 0
-	for _, s := range pickForSummary(sessions, time.Now()) {
-		if _, didOpen := queueOne(ctx, a, db, q, s); !didOpen {
-			continue
+	// Half the budget from each end of the list, taken in turn.
+	//
+	// The oldest sessions are the ones with a deadline: a summary outlives the log
+	// an agent rotates away and the conversation the cache evicts, and once both
+	// are gone it can no longer be made. The newest are the ones being read. Spent
+	// entirely on the old end — which is what this did — a machine with a backlog
+	// summarizes its history while the sessions on screen have nothing, and the
+	// TUI, unlike `show`, does not generate what it is missing.
+	//
+	// The turn passes on an open rather than on a candidate, so an end that is all
+	// cheap skips gives up none of its half.
+	//
+	// The budget counts sessions this run opens; the ones it can rule out without
+	// opening cost it nothing. Capping the candidate list first — before knowing
+	// which of them are already done — stops the sweep dead: the first max_per_run
+	// of them get summarized, and every later run picks the same ones, queues
+	// nothing, and never reaches the rest.
+	cand := pickForSummary(sessions, time.Now())
+	opened, oldEnd := 0, true
+	for lo, hi := 0, len(cand)-1; lo <= hi && opened < cfg.Summary.MaxPerRun; {
+		s := cand[lo]
+		if oldEnd {
+			lo++
+		} else {
+			s, hi = cand[hi], hi-1
 		}
-		if opened++; opened >= cfg.Summary.MaxPerRun {
-			break
+		if _, didOpen := queueOne(ctx, a, db, q, s); didOpen {
+			opened, oldEnd = opened+1, !oldEnd
 		}
 	}
 }
@@ -142,18 +157,15 @@ func anyReady(q *summary.Queue) bool {
 
 // pickForSummary chooses which sessions to offer the worker.
 //
-// Oldest first, because a summary is the one thing that outlives everything it
-// was made from. Agents rotate their own history away after a month or so; the
-// cache keeps a copy of the conversation, but Enforce evicts those when it is
-// over its size and Prune drops what is left after max_age. Nothing collects
-// summaries — neither of those touches the table — and a summary is a kilobyte
-// against a conversation of a hundred times that. So an old session is the one
-// closer to having nothing left to summarize from, and it goes first.
+// The order is oldest first, which is the order of what is about to become
+// impossible: a summary outlives everything it was made from — agents rotate
+// their own history away after a month or so, Enforce evicts the cached
+// conversation when the store is over its size, and Prune drops what is left
+// after max_age — while nothing collects summaries, and one is a kilobyte
+// against a conversation of a hundred times that.
 //
-// The newest sessions are not left out in the cold by this. `show` summarizes
-// the session it was asked for on the spot, so the ones being read get theirs at
-// the moment they are read. This background sweep is for the rest, and there the
-// order that matters is which will still be summarizable tomorrow.
+// EnqueueSummaries reads this list from both ends, not just the old one. What
+// the order gives it is which end is which; see the split there.
 //
 // Idle ones only: a session being worked in right now would be summarized and
 // then immediately outgrow it.

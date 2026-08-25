@@ -62,10 +62,13 @@ func TestPickForSummary(t *testing.T) {
 // at once — and every later run has to reach further than the last, or the
 // backfill never finishes.
 //
-// The order is fixed (oldest first), so a budget applied to the candidate list
-// before knowing which of them are already summarized picks the same sessions
-// forever: the first max_per_run of them are done, nothing is queued, and the
-// rest are never reached. The budget therefore counts the sessions a run opens.
+// Two rules are checked here because they live in the same loop. Half the budget
+// goes to each end of the list: the oldest sessions are the ones about to lose
+// what they would be summarized from, the newest are the ones being read. And
+// the budget counts the sessions a run opens — applied to the candidate list
+// before knowing which of them are already summarized, it picks the same ones
+// forever: the first max_per_run get done, nothing is queued, and the rest are
+// never reached.
 func TestTheSweepAdvancesPastWhatIsAlreadyDone(t *testing.T) {
 	_, _ = summaryFixture(t)
 	ctx := context.Background()
@@ -91,14 +94,14 @@ func TestTheSweepAdvancesPastWhatIsAlreadyDone(t *testing.T) {
 		sort.Strings(ids)
 		return ids
 	}
-	// The fixture's sessions are s0 (newest) … s5 (oldest), so the oldest two are
-	// s5 and s4.
+	// The fixture's sessions are s0 (newest) … s5 (oldest), and the budget is two:
+	// one from each end.
 	sessions := scanSessions(ctx, a, cfg, d)
-	if got := queued(); len(got) != 2 || got[0] != "s4" || got[1] != "s5" {
-		t.Fatalf("the first run queued %v, want the oldest two [s4 s5]", got)
+	if got := queued(); len(got) != 2 || got[0] != "s0" || got[1] != "s5" {
+		t.Fatalf("the first run queued %v, want one from each end [s0 s5]", got)
 	}
 	// They are summarized and leave the queue, as a worker would leave them.
-	for _, id := range []string{"s4", "s5"} {
+	for _, id := range []string{"s0", "s5"} {
 		s := domain.Session{PluginID: "claude", SessionID: id}
 		for _, x := range sessions {
 			if x.SessionID == id {
@@ -117,10 +120,11 @@ func TestTheSweepAdvancesPastWhatIsAlreadyDone(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The next run must reach the two after them, not pick s4 and s5 again.
+	// The next run must reach the two after them, one end at a time again, and
+	// not pick s0 and s5 a second time.
 	scanSessions(ctx, a, cfg, d)
-	if got := queued(); len(got) != 2 || got[0] != "s2" || got[1] != "s3" {
-		t.Fatalf("the second run queued %v, want the next two [s2 s3] — the sweep stalled", got)
+	if got := queued(); len(got) != 2 || got[0] != "s1" || got[1] != "s4" {
+		t.Fatalf("the second run queued %v, want the next from each end [s1 s4] — the sweep stalled", got)
 	}
 }
 
@@ -759,5 +763,59 @@ func TestNoticingThereIsNothingToAddKeepsTheSummary(t *testing.T) {
 	}
 	if sums, _, _ := storedSummaries(ctx, d, fresh, nil); len(sums) != 0 {
 		t.Errorf("the blank record reads back as a summary: %v", sums)
+	}
+}
+
+// The turn between the two ends passes on an open, not on a candidate. An end
+// whose first sessions are already summarized costs a row lookup each to walk
+// past, and must not spend its half of the budget doing so — otherwise the half
+// meant for the old sessions is quietly handed to the new ones.
+func TestTheSplitTurnsOnAnOpenNotACandidate(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	a, cfg := settledAppN(10)
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 2
+
+	// s6…s9 — the four oldest — are summarized already. The oldest session still
+	// worth opening is s5.
+	scanned := app.FilterSessions(scanSessions(ctx, a, cfg, d), app.SessionFilter{})
+	by := map[string]domain.Session{}
+	for _, x := range scanned {
+		by[x.SessionID] = x
+	}
+	for _, id := range []string{"s6", "s7", "s8", "s9"} {
+		if err := d.PutSummaries(ctx, by[id], []cache.Summary{{Turn: 0, Text: "done"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs, _ := q.List()
+	for _, r := range reqs {
+		if err := q.Done(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	EnqueueSummaries(ctx, a, cfg, d, scanned)
+
+	reqs, _ = q.List()
+	var ids []string
+	for _, r := range reqs {
+		ids = append(ids, r.SessionID)
+	}
+	sort.Strings(ids)
+	// One from each end: the newest, and the oldest that still needs opening.
+	// Turning on a candidate instead would have spent both on the new end, since
+	// the four skips at the old end would each have cost it a turn.
+	if len(ids) != 2 || ids[0] != "s0" || ids[1] != "s5" {
+		t.Fatalf("queued %v, want [s0 s5] — one end each, with the skips costing neither", ids)
 	}
 }
