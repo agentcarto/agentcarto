@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -573,6 +576,94 @@ func TestShowHandsOffWithoutStartingItsOwnWorker(t *testing.T) {
 	}
 	if _, ok := q.Find("claude", "long"); !ok {
 		t.Error("the request was dropped instead of being left for the worker")
+	}
+}
+
+// capturingStderr runs f with os.Stderr replaced, and returns what it wrote.
+func capturingStderr(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var b bytes.Buffer
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+	f()
+	os.Stderr = prev
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
+}
+
+// A session waiting out a failure is the one session a reader is told nothing
+// about: it is not summarized, and nothing is being done about it right now.
+// Silence there reads as "this session has nothing to say".
+func TestShowSaysWhyASessionIsWaitingOutAFailure(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "failing", Fingerprint: "fp1"}
+	cfg := config.Config{Summary: config.Summary{Agent: "claude", Model: "claude-sonnet-5"}}
+	base := summary.Request{PluginID: "claude", SessionID: "failing", Queued: time.Now(), Batches: [][]int{{1}}, Prompts: []string{"doc"}}
+
+	// Failed once, inside the backoff: it comes back on its own.
+	base.Attempts, base.LastTried = 1, time.Now()
+	if err := q.Add(base); err != nil {
+		t.Fatal(err)
+	}
+	out := capturingStderr(t, func() { summarizeForShow(ctx, nil, cfg, d, s, "failing") })
+	if !strings.Contains(out, "tried again in") || !strings.Contains(out, "agentcarto summarize failing") {
+		t.Errorf("a session inside its backoff explains neither the wait nor the way past it: %q", out)
+	}
+
+	// Failed often enough to stop: nothing will pick it up, so saying "later"
+	// would be a lie.
+	base.Attempts = summary.MaxAttempts
+	if err := q.Add(base); err != nil {
+		t.Fatal(err)
+	}
+	out = capturingStderr(t, func() { summarizeForShow(ctx, nil, cfg, d, s, "failing") })
+	if !strings.Contains(out, "no longer retried") {
+		t.Errorf("a session that is done being tried is reported as waiting: %q", out)
+	}
+}
+
+// An outline with no summaries under any turn is the shape this feature exists
+// to replace. A reader who never turned it on cannot tell that from a session
+// nothing could be written about.
+func TestShowSaysWhenSummariesCouldNotHaveBeenMade(t *testing.T) {
+	off := config.Config{}
+	if n := summariesOffNotice(off, nil); !strings.Contains(n, "summary.agent") {
+		t.Errorf("with the feature off the notice does not say how to turn it on: %q", n)
+	}
+	on := config.Config{Summary: config.Summary{Agent: "claude"}}
+	if n := summariesOffNotice(on, nil); !strings.Contains(n, "--no-cache") {
+		t.Errorf("with no cache the notice does not name the reason: %q", n)
+	}
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	// Configured and able to write: this run could have made summaries, so the
+	// absence of one is about the session and the paths that know it speak up.
+	if n := summariesOffNotice(on, d); n != "" {
+		t.Errorf("a run that could have summarized still explained itself: %q", n)
 	}
 }
 

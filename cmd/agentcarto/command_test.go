@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/agentcarto/agentcarto/internal/app"
+	"github.com/agentcarto/agentcarto/internal/cache"
 	"github.com/agentcarto/agentcarto/internal/catalog"
 	"github.com/agentcarto/agentcarto/internal/config"
 	"github.com/agentcarto/agentcarto/internal/transcript"
@@ -413,6 +414,49 @@ func runShow(t *testing.T, args ...string) string {
 	var b bytes.Buffer
 	showCmd(context.Background(), a, cfg, nil, args, &b)
 	return b.String()
+}
+
+// A session summary describes the session as it was when it was written, and a
+// session goes on. The store records the fingerprint it was made from so that
+// show can say which it is holding — and the two halves of that, reading the
+// store and rendering the header, are joined by one assignment. This drives the
+// whole way through, because an assignment is exactly what went missing when
+// this feature first shipped.
+func TestShowMarksAStaleSessionSummary(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	a, cfg := settledAppN(1)
+	s := app.FilterSessions(scanSessions(ctx, a, cfg, d), app.SessionFilter{})[0]
+
+	// Written from a version of the log that is not this one.
+	older := s
+	older.Fingerprint = s.Fingerprint + "-older"
+	if err := d.PutSummaries(ctx, older, []cache.Summary{{Turn: 0, Text: "セッション全体", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	showCmd(ctx, a, cfg, d, []string{s.SessionID}, &b)
+	if !strings.Contains(b.String(), "**Stale**") {
+		t.Errorf("a stale session summary is printed as current:\n%s", b.String())
+	}
+	if !strings.Contains(b.String(), "セッション全体") {
+		t.Errorf("the stale summary was dropped instead of flagged:\n%s", b.String())
+	}
+
+	// Written from this very version: nothing to warn about.
+	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "セッション全体", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	b.Reset()
+	showCmd(ctx, a, cfg, d, []string{s.SessionID}, &b)
+	if strings.Contains(b.String(), "**Stale**") {
+		t.Errorf("a current summary was called stale:\n%s", b.String())
+	}
 }
 
 func TestShowCommandOutlineAndTurns(t *testing.T) {

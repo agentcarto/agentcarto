@@ -313,7 +313,15 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		return false
 	}
 	if !r.Ready(time.Now()) {
-		// Waiting out a failure. Trying again here would repeat it on every run.
+		// Waiting out a failure. Trying again here would repeat it on every run —
+		// but saying nothing leaves a reader to wonder why the session it just
+		// asked for is the one session without a summary.
+		if r.Attempts >= summary.MaxAttempts {
+			fmt.Fprintf(os.Stderr, "agentcarto: summarizing this session failed %d times and is no longer retried — `agentcarto summarize %s` reports why\n", r.Attempts, ref)
+		} else {
+			fmt.Fprintf(os.Stderr, "agentcarto: summarizing this session failed; it is tried again in %s, or now with `agentcarto summarize %s`\n",
+				(summary.RetryAfter - time.Since(r.LastTried)).Round(time.Minute), ref)
+		}
 		return false
 	}
 	if len(r.Prompts) > 1 {

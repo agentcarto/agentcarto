@@ -92,6 +92,13 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 		opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns)
 	}
 	if selectors == 0 {
+		// An outline with no `↳` under any turn is the shape this feature exists to
+		// replace, and a reader who has never turned it on has no way to tell that
+		// from a session nothing could be written about. Only the outline says so:
+		// whoever asked for one turn asked to read it, not to configure anything.
+		if n := summariesOffNotice(cfg, db); n != "" && len(opts.Summaries) == 0 {
+			fmt.Fprintln(os.Stderr, n)
+		}
 		fmt.Fprintln(w, transcript.Outline(s, *conv, turns, opts))
 		return
 	}
@@ -146,6 +153,24 @@ func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns 
 		}
 	}
 	return out, model, stale
+}
+
+// summariesOffNotice explains why this run could not have generated summaries at
+// all, or returns "" when it could have.
+//
+// It answers from the configuration alone, so it says nothing about whether this
+// particular session has anything to summarize — the paths that know that speak
+// for themselves: summarizeForShow names a session gone to the background and
+// one waiting out a failure, and a session that renders to no document is one
+// the outline already shows in full.
+func summariesOffNotice(cfg config.Config, db *cache.DB) string {
+	switch {
+	case cfg.Summary.Agent == "":
+		return "agentcarto: no generated summaries — set summary.agent (claude or codex) in the config to have them written"
+	case db == nil:
+		return "agentcarto: --no-cache — generated summaries are read from the cache, so none are shown"
+	}
+	return ""
 }
 
 // selectedTurnsLabel names the turns that were asked for, for a message about
