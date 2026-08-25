@@ -9,11 +9,24 @@ import (
 	"time"
 )
 
-func TestDefaults(t *testing.T) {
-	c, e := Load("")
-	if e != nil {
+// builtinDefaults decodes the shipped defaults on their own.
+//
+// The tests that follow are about what agentcarto does before anyone has
+// configured it, and Load merges whatever the machine running them keeps in its
+// own config. Asking Load makes those tests report the developer's settings:
+// once summaries are switched on there — which the feature exists to invite —
+// "the default is off" fails for having done what it was told.
+func builtinDefaults(t *testing.T) Config {
+	t.Helper()
+	var c Config
+	if e := decode([]byte(defaults), &c); e != nil {
 		t.Fatal(e)
 	}
+	return c
+}
+
+func TestDefaults(t *testing.T) {
+	c := builtinDefaults(t)
 	if c.Version != 1 || len(c.Plugins) != 5 {
 		t.Fatalf("unexpected defaults: %#v", c)
 	}
@@ -117,10 +130,7 @@ func nodeScalar(n yaml.Node, key string) string {
 // Summaries cost money and send session text off the machine, so the shipped
 // default generates none. An upgrade must not start spending on its own.
 func TestSummaryIsOffByDefault(t *testing.T) {
-	c, e := Load("")
-	if e != nil {
-		t.Fatal(e)
-	}
+	c := builtinDefaults(t)
 	if c.Summary.Agent != "" {
 		t.Errorf("the built-in default enables summaries with agent %q", c.Summary.Agent)
 	}
