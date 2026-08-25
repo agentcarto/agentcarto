@@ -182,12 +182,35 @@ func TestTurnFullSearchExpandsAndJumps(t *testing.T) {
 	for _, r := range "ok3" {
 		send(keyRunes(string(r)))
 	}
-	if len(m.turnFullHits()) == 0 {
+	if len(m.turnFullHits(m.turnFullLines())) == 0 {
 		t.Fatal("in-turn search found no hits (block auto-expansion missed)")
 	}
 	send(tea.KeyMsg{Type: tea.KeyEnter})
 	lines := m.turnFullLines()
 	if m.turnCursor < 0 || m.turnCursor >= len(lines) || !strings.Contains(strings.ToLower(lines[m.turnCursor].text), "ok3") {
 		t.Fatalf("Enter did not jump to the hit line: cursor=%d", m.turnCursor)
+	}
+}
+
+// The turn-list hits are derived state on the Model, recomputed only when the
+// query or the rows change. Opening a session with a query already set (the list
+// carries its query into the turn list) must produce them: they arrive with the
+// conversation, not with a keystroke.
+func TestTurnListHitsComputedWhenConversationArrives(t *testing.T) {
+	m := turnListModel(t)
+	c, s := *m.detail, *m.detailSession
+	m = Model{width: 120, height: 20, detailSession: &s, turnQuery: "りんご"}
+	u, _ := m.Update(convMsg{c: &c, reset: true})
+	m = u.(Model)
+	if n := len(m.turnListHits()); n != 2 {
+		t.Fatalf("hits for an inherited query=%d want 2", n)
+	}
+	// Descending to another branch renumbers the rows, so the hits must not
+	// survive as stale indices into the old rows.
+	(&m).rebuildDetailRows(nil)
+	u, _ = m.Update(blinkMsg(time.Now()))
+	m = u.(Model)
+	if n := len(m.turnListHits()); n != 0 {
+		t.Fatalf("hits into rebuilt (empty) rows=%d want 0", n)
 	}
 }

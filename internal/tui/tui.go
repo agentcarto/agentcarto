@@ -87,8 +87,9 @@ type Model struct {
 	detailTurns       [][]string
 	detailRows        []detailRow
 	detailPathStack   []detailFrame
-	detailNewestChron int  // chronological index of the newest displayed turn (for the in-progress ●). -1 if none.
-	blinkOn           bool // blink phase for the elapsed time of the selected in-progress turn (true=background lit, false=no background).
+	detailActive      map[string]bool // nodes on the active path (see activePathSet), rebuilt with detailRows
+	detailNewestChron int             // chronological index of the newest displayed turn (for the in-progress ●). -1 if none.
+	blinkOn           bool            // blink phase for the elapsed time of the selected in-progress turn (true=background lit, false=no background).
 	detailCursor      int
 	detailOffset      int
 	turnOpen          bool
@@ -99,6 +100,12 @@ type Model struct {
 	turnSearching     bool   // entering a search query in the turn list
 	turnQuery         string // search query for the turn list
 	turnSearchPos     int    // current position within the hit list (-1 = none selected)
+	// turnHits are the detailRows indices matching turnQuery. Finding them reads
+	// the text of every turn, i.e. the whole conversation, so it is derived state
+	// kept up to date by syncTurnHits on each update; a render only reads it.
+	turnHits          []int
+	turnHitsQuery     string // the query turnHits was computed for
+	turnHitsStale     bool   // set when detailRows is rebuilt, invalidating the indices
 	turnFullSearching bool   // entering a search query in the full turn view
 	turnFullQuery     string // search query for the full turn view
 	flash             string
@@ -449,6 +456,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	prev := m.flash
 	model, cmd := m.update(msg)
 	mm := model.(Model)
+	// Refresh the derived search state once per update rather than per frame. Doing
+	// it here instead of at each assignment to turnQuery means no key path can leave
+	// the cache stale.
+	(&mm).syncTurnHits()
 	// If this update set a new flash (non-empty and different from before), record the
 	// current time and arm an expiry timer. The expiry handler checks flashAt so an
 	// older timer does not clear a newer message.
@@ -1793,6 +1804,13 @@ func (m Model) detailView() string {
 	b.WriteString(clip(m.detailLead(s), max(20, m.width-1)) + "\n")
 	b.WriteString(m.detailCWDLine(s) + "\n")
 	b.WriteString(m.detailSubLine(s) + "\n")
+	// turnHits is ascending over all rows; only the visible ones are rendered.
+	hit := map[int]bool{}
+	for _, i := range m.turnHits {
+		if i >= offset && i < end {
+			hit[i] = true
+		}
+	}
 	bodyLines := []string{}
 	for i := offset; i < end; i++ {
 		rowData := m.detailRows[i]
@@ -1800,7 +1818,7 @@ func (m Model) detailView() string {
 		if rowData.Kind == "branch" {
 			bodyLines = append(bodyLines, m.detailBranchLine(rowData, selected))
 		} else {
-			bodyLines = append(bodyLines, m.detailTurnLine(s, rowData, selected, colW, modelW))
+			bodyLines = append(bodyLines, m.detailTurnLine(s, rowData, selected, colW, modelW, hit[i]))
 		}
 	}
 	if len(bodyLines) > bodyRows {
@@ -1952,7 +1970,7 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool) string {
 
 // detailTurnLine renders a turn row: the leading marker, turn number, timestamp, the
 // turn-mark columns (reply/tool/edit counts), and the headline.
-func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected bool, colW [9]int, modelW int) string {
+func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected bool, colW [9]int, modelW int, hit bool) string {
 	turn := rowData.Turn
 	chronIndex := rowData.TurnIndex
 	events := m.turnEvents(turn)
@@ -2011,7 +2029,7 @@ func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected boo
 	}
 	remain := max(1, m.width-1-lipgloss.Width(row.String()))
 	headColor := lipgloss.Color("")
-	if !selected && m.turnQuery != "" && strings.Contains(m.detailRowText(rowData), strings.ToLower(m.turnQuery)) {
+	if !selected && hit {
 		headColor = roleColor("meta") // emphasize the headline of a search hit
 	}
 	row.WriteString(styled(clip(convlogic.TurnHeadline(*m.detail, turn), remain), headColor, selected, false))
@@ -2189,9 +2207,15 @@ func (m *Model) rebuildDetailRows(path []string) {
 	m.detailTurns = nil
 	m.detailRows = nil
 	m.detailNewestChron = -1
+	m.turnHitsStale = true
+	m.detailActive = nil
 	if m.detail == nil {
 		return
 	}
+	// The active-path set only changes with the conversation, and a new
+	// conversation always rebuilds the rows, so this is the one place it has to be
+	// computed. It is O(nodes), which is why no render may build it.
+	m.detailActive = m.activePathSet()
 	active := map[string]bool{}
 	for _, id := range path {
 		active[id] = true
@@ -2248,18 +2272,27 @@ func (m Model) detailRowText(r detailRow) string {
 }
 
 // turnListHits returns the indices of detailRows matching the query (in display order, newest first).
-func (m Model) turnListHits() []int {
+func (m Model) turnListHits() []int { return m.turnHits }
+
+// syncTurnHits recomputes turnListHits when the query changed or the rows its
+// indices point into were rebuilt. It is a no-op otherwise, so the common update
+// (a cursor move, the blink tick) costs one comparison.
+func (m *Model) syncTurnHits() {
+	if !m.turnHitsStale && m.turnQuery == m.turnHitsQuery {
+		return
+	}
+	m.turnHitsStale = false
+	m.turnHitsQuery = m.turnQuery
+	m.turnHits = nil
 	if strings.TrimSpace(m.turnQuery) == "" {
-		return nil
+		return
 	}
 	q := strings.ToLower(m.turnQuery)
-	var hits []int
 	for i, r := range m.detailRows {
 		if strings.Contains(m.detailRowText(r), q) {
-			hits = append(hits, i)
+			m.turnHits = append(m.turnHits, i)
 		}
 	}
-	return hits
 }
 
 func (m *Model) jumpTurnHit(forward bool) {
@@ -2279,14 +2312,16 @@ func (m *Model) jumpTurnHit(forward bool) {
 	m.ensureDetailOffset()
 }
 
-// turnFullHits returns the indices of turnFullLines matching the query.
-func (m Model) turnFullHits() []int {
+// turnFullHits returns the indices of lines matching the query. It takes the
+// lines rather than building them so a render, which already has them, does not
+// lay out the whole turn a second time.
+func (m Model) turnFullHits(lines []turnLine) []int {
 	if strings.TrimSpace(m.turnFullQuery) == "" {
 		return nil
 	}
 	q := strings.ToLower(m.turnFullQuery)
 	var hits []int
-	for i, ln := range m.turnFullLines() {
+	for i, ln := range lines {
 		if strings.Contains(strings.ToLower(ln.text), q) {
 			hits = append(hits, i)
 		}
@@ -2318,7 +2353,7 @@ func (m *Model) applyTurnFullSearch() {
 }
 
 func (m *Model) jumpTurnFullHit(forward bool) {
-	hits := m.turnFullHits()
+	hits := m.turnFullHits(m.turnFullLines())
 	if len(hits) == 0 {
 		return
 	}
@@ -2716,7 +2751,7 @@ func (m Model) turnFullView(row detailRow) string {
 	}
 	var foot string
 	if m.turnFullSearching || m.turnFullQuery != "" {
-		hits := m.turnFullHits()
+		hits := m.turnFullHits(lines)
 		pos := -1
 		for i, h := range hits {
 			if h == m.turnCursor {
@@ -2869,6 +2904,25 @@ func (m Model) turnRunningNow(s *domain.Session, chronIndex int) time.Time {
 	}
 	return time.Time{}
 }
+
+// activePathSet is the set of nodes on the conversation's active path, used to
+// tell a turn's abandoned sub-branches from its continuation. It is O(nodes), so
+// it is built once with the rows (see rebuildDetailRows) and kept on the Model.
+func (m Model) activePathSet() map[string]bool {
+	if m.detail == nil {
+		return nil
+	}
+	path := m.detail.ActivePath()
+	active := make(map[string]bool, len(path))
+	for _, id := range path {
+		active[id] = true
+	}
+	return active
+}
+
+// turnMarkParts reads the active-path set from the Model rather than building
+// its own: see activePathSet. Building it here would be O(nodes of the whole
+// conversation) on every row of every frame.
 func (m Model) turnMarkParts(ids []string, now time.Time) [9]string {
 	events := m.turnEvents(ids)
 	tools, replies, queued := 0, 0, 0
@@ -2887,11 +2941,7 @@ func (m Model) turnMarkParts(ids []string, now time.Time) [9]string {
 	}
 	trivial := 0
 	if m.detail != nil {
-		active := map[string]bool{}
-		for _, id := range m.detail.ActivePath() {
-			active[id] = true
-		}
-		trivial, _ = convlogic.TurnBranches(*m.detail, ids, active)
+		trivial, _ = convlogic.TurnBranches(*m.detail, ids, m.detailActive)
 	}
 	files, added, removed := editStats(events)
 	var out [9]string
