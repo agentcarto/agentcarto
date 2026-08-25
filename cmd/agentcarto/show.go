@@ -84,12 +84,12 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 	path := conv.ActivePath()
 	turns := transcript.Turns(*conv, path)
 	opts.Branches = transcript.Branches(*conv, path)
-	opts.Summaries, opts.SummaryModel = storedSummaries(ctx, db, s, turns)
+	opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns)
 
 	// Summarizing comes before printing, not after: whoever ran this asked to
 	// read the session, and an outline of "done", "y" and "1" is not that.
 	if len(opts.Summaries) == 0 && summarizeForShow(ctx, a, cfg, db, s, ref) {
-		opts.Summaries, opts.SummaryModel = storedSummaries(ctx, db, s, turns)
+		opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns)
 	}
 	if selectors == 0 {
 		fmt.Fprintln(w, transcript.Outline(s, *conv, turns, opts))
@@ -115,16 +115,16 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 // agent working through many sessions, and a command that quietly spent money
 // per session would be a poor thing to hand one. `agentcarto summarize` is
 // where that happens.
-func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns []transcript.Turn) (map[int]string, string) {
+func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns []transcript.Turn) (map[int]string, string, bool) {
 	if db == nil {
-		return nil, "" // --no-cache: summaries live in the cache
+		return nil, "", false // --no-cache: summaries live in the cache
 	}
 	stored := db.Summaries(ctx, s, summary.NodesByTurn(turns))
 	if len(stored) == 0 {
-		return nil, ""
+		return nil, "", false
 	}
 	out := make(map[int]string, len(stored))
-	model := ""
+	model, stale := "", false
 	for n, sum := range stored {
 		if strings.TrimSpace(sum.Text) == "" {
 			// A blank row is the store's record that this session renders to no
@@ -138,8 +138,14 @@ func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns 
 			// for a reader deciding how much to trust what it is reading.
 			model = sum.Model
 		}
+		// Turn 0 is the one that can describe a session that has since gone on:
+		// the per-turn summaries are held against the node they were made from and
+		// withheld when it moves, so a stale one is never returned at all.
+		if n == 0 && sum.Fingerprint != s.Fingerprint {
+			stale = true
+		}
 	}
-	return out, model
+	return out, model, stale
 }
 
 // selectedTurnsLabel names the turns that were asked for, for a message about

@@ -121,6 +121,37 @@ func TestTheSweepAdvancesPastWhatIsAlreadyDone(t *testing.T) {
 	}
 }
 
+// The session summary is the one that can describe a session that has since
+// gone on: it has no turn to be anchored to, while every per-turn summary is
+// held against the id of its terminal node and withheld when that moves. The
+// store records the fingerprint it was made from, and show compares it.
+func TestAGrownSessionReportsItsSummaryAsStale(t *testing.T) {
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	s := domain.Session{PluginID: "claude", SessionID: "s1", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "セッション全体", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, stale := storedSummaries(ctx, d, s, nil); stale {
+		t.Error("a summary made from this very version of the log reads as stale")
+	}
+	grown := s
+	grown.Fingerprint = "fp2"
+	sums, model, stale := storedSummaries(ctx, d, grown, nil)
+	if !stale {
+		t.Error("a summary made before the newest turns does not report itself as stale")
+	}
+	// It is still printed: an out-of-date summary of a session beats none, as
+	// long as the document says which it is.
+	if sums[0] == "" || model == "" {
+		t.Errorf("the stale summary was dropped instead of flagged: %v %q", sums, model)
+	}
+}
+
 // A session whose log is gone can still be summarized, as long as the cache
 // kept its conversation — App.Conversation reads a deleted session back from
 // there, which is what makes `show` work on one. It is also the session with the
@@ -190,8 +221,8 @@ func TestASessionWithNothingToSummarizeIsNotOpenedTwice(t *testing.T) {
 	}
 	// The record must not show up as a summary: it has no text, and every reader
 	// tests for that before printing.
-	if sums, model := storedSummaries(ctx, d, s, nil); len(sums) != 0 || model != "" {
-		t.Errorf("the blank record reads back as a summary: %v %q", sums, model)
+	if sums, model, stale := storedSummaries(ctx, d, s, nil); len(sums) != 0 || model != "" || stale {
+		t.Errorf("the blank record reads back as a summary: %v %q stale=%v", sums, model, stale)
 	}
 	// A log that grew is reconsidered: the fingerprint no longer matches.
 	grown := s

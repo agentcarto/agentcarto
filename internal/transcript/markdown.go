@@ -82,6 +82,13 @@ type Options struct {
 	// that was said. Which model matters too — the same prompt through a smaller
 	// one drops identifiers and mangles sentences.
 	SummaryModel string
+	// SummaryStale says the session's own summary — Summaries[0], the paragraph
+	// under the header — was written from an earlier version of the log than the
+	// one being printed. The per-turn summaries cannot go stale this way: each is
+	// held against the id of the turn's terminal node and withheld if that moved.
+	// The session summary has no turn to be anchored to, so it is the one that can
+	// describe a session that has since gone on.
+	SummaryStale bool
 }
 
 // Markdown renders the given turns of a session as one document and reports how
@@ -194,6 +201,13 @@ func header(s domain.Session, turns int, o Options) []string {
 			model = "an AI agent"
 		}
 		add("Summaries", fmt.Sprintf("written by %s — the lines below marked `↳`, and the paragraph under this list, are generated and may be wrong. The turns themselves are verbatim; `--turns N` prints one in full", model))
+		if o.SummaryStale && strings.TrimSpace(o.Summaries[0]) != "" {
+			// Only the paragraph is called out, because only the paragraph can be
+			// wrong this way: a turn's summary is withheld unless it belongs to the
+			// turn being printed, so the ones that do appear describe what is there.
+			// A turn with no `↳` is a turn nothing has been written about yet.
+			add("Stale", "the session has gone on since the paragraph below was written; the turns are current")
+		}
 	}
 	out = append(out, "")
 	// The session's own summary reads as prose, so it goes below the metadata

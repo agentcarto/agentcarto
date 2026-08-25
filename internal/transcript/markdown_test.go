@@ -584,6 +584,41 @@ func TestSummariesAreLabelledAsGenerated(t *testing.T) {
 	}
 }
 
+// A session that has gone on since its summary was written says so. Only the
+// paragraph can be wrong that way: a turn's summary is withheld unless it
+// belongs to the turn being printed, so the ones that do appear are current.
+func TestAStaleSessionSummarySaysSo(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "できた"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	turns := Turns(c, c.ActivePath())
+	o := Options{Summaries: map[int]string{0: "全体", 1: "ターン1"}, SummaryModel: "m", SummaryStale: true}
+
+	for _, got := range []string{Outline(s, c, turns, o), first(Markdown(s, c, turns, o))} {
+		if !strings.Contains(got, "**Stale**") {
+			t.Errorf("a stale session summary is printed as current:\n%s", got)
+		}
+		if !strings.Contains(got, "the turns are current") {
+			t.Errorf("the notice does not say the turns are unaffected:\n%s", got)
+		}
+	}
+	// Current summaries say nothing.
+	o.SummaryStale = false
+	if got := Outline(s, c, turns, o); strings.Contains(got, "**Stale**") {
+		t.Errorf("a current summary was called stale:\n%s", got)
+	}
+	// And neither does a session with only turn summaries: there is no paragraph
+	// to be out of date, so the notice would point at nothing.
+	stale := Options{Summaries: map[int]string{1: "ターン1"}, SummaryModel: "m", SummaryStale: true}
+	if got := Outline(s, c, turns, stale); strings.Contains(got, "**Stale**") {
+		t.Errorf("a session with no paragraph was called stale:\n%s", got)
+	}
+}
+
+func first(doc string, _ int) string { return doc }
+
 // A map holding only blanks is a map holding nothing: a document that prints no
 // summaries must not claim to carry generated text.
 func TestNoNoticeWhenNoSummaryShows(t *testing.T) {
