@@ -104,6 +104,15 @@ type Summary struct {
 	// claude-sonnet-5 and two minutes on claude-haiku-4-5 when this was
 	// measured; the largest sessions are far slower.
 	Timeout Duration `yaml:"timeout"`
+	// SessionInterval is the shortest gap between two writes of a session's own
+	// summary — the one that describes the whole session rather than a turn.
+	//
+	// Turn summaries are not held back by it: a turn that finished is described
+	// as soon as a scan sees it, and one call covers it. The session summary is
+	// different — it has to be made again from every turn summary each time,
+	// which is a call of its own, and a session someone is working in would
+	// otherwise pay for one after every prompt.
+	SessionInterval Duration `yaml:"session_interval"`
 	// MaxPerRun is how many sessions one background run summarizes. It is what
 	// keeps a first run over a machine's whole history from spending without
 	// warning.
@@ -122,7 +131,7 @@ const defaults = `version: 1
 ui: {refresh_interval: 2s, rescan_interval: 3s, default_view: time}
 index: {max_chars_per_session: 131072}
 cache: {enabled: true, cache_conversations: true, max_size: 512MiB, max_age: 720h}
-summary: {agent: "", model: claude-sonnet-5, timeout: 10m, max_per_run: 20}
+summary: {agent: "", model: claude-sonnet-5, timeout: 10m, max_per_run: 20, session_interval: 1h}
 plugins:
   - {id: claude, type: claude, enabled: true, color: cyan, options: {}}
   - {id: codex, type: codex, enabled: true, color: red, options: {}}
@@ -286,6 +295,9 @@ func Validate(c Config) error {
 		}
 		if c.Summary.MaxPerRun <= 0 {
 			return fmt.Errorf("summary.max_per_run: must be positive")
+		}
+		if c.Summary.SessionInterval <= 0 {
+			return fmt.Errorf("summary.session_interval: must be positive")
 		}
 	}
 	colors := map[string]bool{"default": true, "black": true, "red": true, "green": true, "yellow": true, "blue": true, "magenta": true, "cyan": true, "white": true, "orange": true}

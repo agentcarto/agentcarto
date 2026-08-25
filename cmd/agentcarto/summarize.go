@@ -77,8 +77,6 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 	if len(turns) == 0 {
 		fail(fmt.Errorf("summarize %s: the session holds no turns", s.SessionID))
 	}
-	nodes := summary.NodesByTurn(turns)
-
 	// --force asks about every turn, but nothing is dropped until the new
 	// summaries are in hand: dropping first would lose what was already paid for
 	// whenever the generation fails, and a mistyped model name is enough.
@@ -87,6 +85,7 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 	// does not stop the store from withholding a summary whose node moved, so
 	// --force would buy a summary nobody ever sees.
 	open := hasOpenTurn(turns, path, s.LastKind, time.Since(s.UpdatedAt))
+	nodes := summary.NodesByTurn(summarizableTurns(turns, open))
 	want := map[int]bool{}
 	if *force {
 		for _, t := range summarizableTurns(turns, open) {
@@ -240,6 +239,57 @@ func sessionSummary(ctx context.Context, gen summary.Generator, s domain.Session
 	}
 	fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be made: %v\n", err)
 	return ""
+}
+
+// sessionSummaryDue reports whether the session's own summary is old enough to
+// be made again.
+//
+// The pace is its own because the cost is its own. A turn that finished is
+// described by the call that was going to be made anyway; the session summary
+// has to be built from every turn summary, which is a call of its own, and a
+// session someone works in all day would buy one after every prompt.
+func sessionSummaryDue(ctx context.Context, db *cache.DB, s domain.Session, every time.Duration) bool {
+	when, ok := db.SessionSummarizedAt(ctx, s)
+	return !ok || time.Since(when) >= every
+}
+
+// storeSessionSummary writes the session's own summary when this run is the one
+// to write it, and reports whether it spent a call doing so.
+//
+// fromWholeSession is the answer of a call that saw every turn of the session —
+// a first summary of a short one. That answer already describes the session, so
+// it is stored as it stands.
+//
+// Otherwise the summary is made again from the turn summaries, and only once the
+// interval has passed. What is never done is storing the session summary of a
+// call that saw part of the session: it describes those turns, not the session
+// (SessionSystem says as much), and doing it is what made a long session's
+// summary read as a list of its newest turns.
+func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generator, s domain.Session, nodes map[int]string, fromWholeSession string, every time.Duration, w io.Writer) bool {
+	if fromWholeSession != "" {
+		if err := storeSummaries(ctx, db, s, summary.Result{Session: fromWholeSession}, nodes, gen.Name(), false); err != nil && w != nil {
+			fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be: %v\n", err)
+		}
+		return false
+	}
+	if !sessionSummaryDue(ctx, db, s, every) {
+		return false
+	}
+	turns := map[int]string{}
+	for n, sum := range db.Summaries(ctx, s, nodes) {
+		if n != 0 && sum.Text != "" {
+			turns[n] = sum.Text
+		}
+	}
+	if len(turns) == 0 {
+		return false // nothing to build one from
+	}
+	if text := sessionSummary(ctx, gen, s, turns, w); text != "" {
+		if err := storeSummaries(ctx, db, s, summary.Result{Session: text}, nodes, gen.Name(), false); err != nil && w != nil {
+			fmt.Fprintf(w, "  the session summary was made but could not be stored: %v\n", err)
+		}
+	}
+	return true
 }
 
 // storeSummaries writes one batch's result. replace is set for the first batch

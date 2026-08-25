@@ -226,6 +226,51 @@ func TestSummarizedAt(t *testing.T) {
 	}
 }
 
+// What paces the session summary has to look at the session summary alone.
+// SummarizedAt reads MAX(created) over every row, so a turn summary stored a
+// moment ago makes a session summary from yesterday look fresh.
+func TestSessionSummarizedAtIgnoresTurnSummaries(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1", Fingerprint: "fp1"}
+	if _, ok := d.SessionSummarizedAt(ctx, s); ok {
+		t.Error("a session with nothing stored reports a session summary")
+	}
+	if e := d.PutSummaries(ctx, s, []Summary{{Turn: 0, Text: "セッション全体", Model: "m"}}); e != nil {
+		t.Fatal(e)
+	}
+	// Move the session summary back a day, then store a turn summary now.
+	dayAgo := time.Now().Add(-24 * time.Hour).Unix()
+	if _, e := d.db.ExecContext(ctx, "UPDATE summaries SET created=? WHERE turn_index=0", dayAgo); e != nil {
+		t.Fatal(e)
+	}
+	if e := d.PutSummaries(ctx, s, []Summary{{Turn: 3, NodeID: "n3", Text: "ターン3", Model: "m"}}); e != nil {
+		t.Fatal(e)
+	}
+	when, ok := d.SessionSummarizedAt(ctx, s)
+	if !ok || when.Unix() != dayAgo {
+		t.Errorf("SessionSummarizedAt=%v (%s), want the day-old session summary", ok, when)
+	}
+	if when, _ := d.SummarizedAt(ctx, s); when.Unix() == dayAgo {
+		t.Error("SummarizedAt was expected to move with the turn summary; the two now answer the same question")
+	}
+}
+
+// A blank turn-0 record is the store's "looked at, nothing to make" marker, not
+// a summary. Counting it would put the first session summary an interval after
+// a scan happened to look at the session rather than at the first opportunity.
+func TestSessionSummarizedAtIgnoresTheBlankRecord(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "s1", Fingerprint: "fp1"}
+	if e := d.MarkExamined(ctx, s); e != nil {
+		t.Fatal(e)
+	}
+	if when, ok := d.SessionSummarizedAt(ctx, s); ok {
+		t.Errorf("the examined marker reads as a session summary written at %s", when)
+	}
+}
+
 // MarkExamined says "looked at, nothing to make", which is a different fact from
 // "summarized". It has to record the version it looked at without touching the
 // summary that is there or the time one was last made: the hourly guard reads

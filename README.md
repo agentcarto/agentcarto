@@ -68,6 +68,7 @@ summary:
   agent: claude           # or codex; "" (the default) generates nothing
   model: claude-sonnet-5
   max_per_run: 20         # sessions one background run summarizes
+  session_interval: 1h    # how often a session's own summary is remade
 ```
 
 Once it is on, summaries appear without being asked for. Every command that lists sessions queues
@@ -76,6 +77,10 @@ does not take the work with it. `agentcarto show <id>` summarizes the session yo
 spot when one call will do (about half a minute); a longer one goes to the background and says so.
 `agentcarto summarize <id>` does one by hand, and `agentcarto doctor` says whether a worker is
 running and how many sessions are waiting.
+
+**A turn is described as soon as it finishes**, including in the session you are working in right
+now. The session's own summary is different: it has to be built from every turn summary, which is a
+call of its own, so it is remade at most once every `summary.session_interval`.
 
 **The oldest sessions go first.** A summary is a kilobyte that outlives what it was made from:
 agents rotate their own logs away, and the cache evicts conversations when it is over its size

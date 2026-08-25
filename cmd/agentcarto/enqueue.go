@@ -26,35 +26,20 @@ func detachWorker() error {
 	return platform.Detach("summarize-worker")
 }
 
-// regenerateWithin is the shortest gap between summarizing the same session
-// twice unasked. A session someone is working in grows all day, and every new
-// turn makes its session summary out of date again; without a floor, a scan
-// every few seconds would pay for a new one every few seconds.
-const regenerateWithin = time.Hour
-
-// tooSoon reports whether a session was summarized recently enough that doing
-// it again would be waste rather than an update.
-//
-// It guards the sessions nobody asked about — see EnqueueSummaries, its only
-// caller. A request somebody made by name is answered whatever its age.
-//
-// The window also covers a store that cannot be read at all: Summaries folds an
-// unreadable database into "nothing is summarized", which would otherwise look
-// like an unsummarized session on every run and be paid for every time. A
-// session that has genuinely grown is still summarized again once the window
-// passes, and only its new turns are asked about.
-func tooSoon(when time.Time, summarized bool, now time.Time) bool {
-	return summarized && now.Sub(when) < regenerateWithin
-}
-
 // EnqueueSummaries queues the sessions that have no summary. It is what makes
 // summaries appear without anyone asking: scanning already happens on every
 // run, and this rides along.
 //
-// Nothing here waits, and nothing here generates. The cost of being wrong about
-// which sessions are worth summarizing is money, so the choosing is deliberate:
-// nothing still being worked in, and never more in one go than the worker will
-// actually process.
+// Nothing here waits, and nothing here generates. A turn that finished is
+// queued as soon as a scan sees it — there is no window a session has to sit
+// out first. What bounds the spending is that queueOne only writes a request
+// when there is a turn without a summary, and that a run opens no more sessions
+// than the worker will process.
+//
+// The pace that does exist is the session summary's, and it is applied where
+// that summary is written rather than here (see storeSessionSummary): holding
+// the whole session back to pace one of its summaries is what made a finished
+// turn wait an hour to be described.
 //
 // Starting a worker is StartSummaryWorker's job and deliberately not this one's.
 // A scan happens before a command has printed anything, and `show` summarizes
@@ -87,7 +72,6 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// which of them are already done — stops the sweep dead: the first max_per_run
 	// of them get summarized, and every later run picks the same ones, queues
 	// nothing, and never reaches the rest.
-	now := time.Now()
 	cand := pickForSummary(sessions)
 	opened, oldEnd := 0, true
 	for lo, hi := 0, len(cand)-1; lo <= hi && opened < cfg.Summary.MaxPerRun; {
@@ -96,17 +80,6 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 			lo++
 		} else {
 			s, hi = cand[hi], hi-1
-		}
-		// Summarized within the hour, and grown since. The worker would take such
-		// a request straight back out without spending on it, and the next scan —
-		// seconds later in the TUI — would queue it afresh and spawn a worker to
-		// throw it away again, for as long as the window lasts. Asking here costs
-		// a row lookup, so the session does not count against the budget.
-		//
-		// Deliberately not in worthOpening: `show` reaches queueOne through it,
-		// and a session someone just asked to read has to be generated now.
-		if when, ok := db.SummarizedAt(ctx, s); tooSoon(when, ok, now) {
-			continue
 		}
 		if _, didOpen := queueOne(ctx, a, db, q, s); didOpen {
 			opened, oldEnd = opened+1, !oldEnd
@@ -201,8 +174,10 @@ func anyReady(q *summary.Queue) bool {
 // sessions a run opens, and whether a session needs opening is not known until
 // the cheap checks in worthOpening have been made — see EnqueueSummaries.
 //
-// The price of taking a session that is being worked in is that its session
-// summary is remade as it grows. The `tooSoon` guard holds that to once an hour.
+// The price of taking a session that is being worked in is that it is opened and
+// parsed on every scan while it grows. Its finished turns are described as they
+// arrive, which is the point; what is paced is the session's own summary, and
+// that is paced where it is written (storeSessionSummary).
 func pickForSummary(sessions []domain.Session) []domain.Session {
 	var out []domain.Session
 	for _, s := range sessions {
@@ -275,8 +250,14 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 	if len(turns) == 0 {
 		return markNothingToSummarize(ctx, db, s), true
 	}
-	nodes := summary.NodesByTurn(turns)
-	want := pendingTurns(turns, db.Summaries(ctx, s, nodes), hasOpenTurn(turns, path, s.LastKind, time.Since(s.UpdatedAt)))
+	open := hasOpenTurn(turns, path, s.LastKind, time.Since(s.UpdatedAt))
+	// The nodes of the turns this request can be about, which is every turn but
+	// one being written. It is also what tells a run whether a single call
+	// covered the session: measured against every turn, a session with a turn in
+	// progress would never look covered, and the run would pay for a second call
+	// to remake a session summary the first call had just made.
+	nodes := summary.NodesByTurn(summarizableTurns(turns, open))
+	want := pendingTurns(turns, db.Summaries(ctx, s, nodes), open)
 	if len(want) == 0 {
 		// Every turn is described already. The log moved — worthOpening let this
 		// through — but not in a way that added anything to say, so record the
@@ -395,7 +376,19 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	if err == nil {
 		var res summary.Result
 		if res, err = summary.Parse(out, r.Batches[0]); err == nil {
-			err = storeSummaries(ctx, db, s, res, r.Nodes, gen.Name(), false)
+			// The turns, and the session summary only if this call saw the whole
+			// session or the interval has passed — the same rule the worker
+			// follows, for the same reason (storeSessionSummary).
+			if err = storeSummaries(ctx, db, s, summary.Result{Turns: res.Turns}, r.Nodes, gen.Name(), false); err == nil {
+				var whole string
+				if len(r.Batches[0]) == len(r.Nodes) {
+					whole = res.Session
+				}
+				storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), os.Stderr)
+				// The version is answered either way — see the worker, which does
+				// the same for the same reason.
+				_ = db.MarkExamined(ctx, s)
+			}
 		}
 	}
 	if err != nil {

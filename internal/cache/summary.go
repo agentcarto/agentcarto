@@ -190,12 +190,36 @@ func (d *DB) MarkExamined(ctx context.Context, s domain.Session) error {
 	return e
 }
 
-// SummarizedAt reports when a session was last summarized, and whether it ever
-// was. It is the guard against regenerating in a loop: Summaries folds a failed
-// read into "nothing is stored", so a database that cannot be read would
-// otherwise look like an unsummarized session on every run and be paid for
-// every time. This asks the narrower question, which a failed read answers with
-// false rather than with a misleading zero.
+// SessionSummarizedAt reports when the session's own summary — turn 0 — was last
+// written, and whether it ever was.
+//
+// It is the narrower question SummarizedAt cannot answer: that one reads
+// MAX(created) across every row, so it moves whenever a turn summary is stored.
+// What paces the session summary has to look at the session summary alone.
+//
+// A blank turn-0 record (MarkExamined, created=0) is not a summary and answers
+// false, which is what puts the next session summary at the first opportunity
+// rather than an interval after a scan happened to look.
+func (d *DB) SessionSummarizedAt(ctx context.Context, s domain.Session) (time.Time, bool) {
+	var unix int64
+	e := d.db.QueryRowContext(ctx,
+		"SELECT created FROM summaries WHERE plugin_id=? AND session_id=? AND turn_index=0 AND summary <> ''",
+		s.PluginID, s.SessionID).Scan(&unix)
+	if e != nil || unix == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(unix, 0), true
+}
+
+// SummarizedAt reports when anything was last stored for a session — a turn
+// summary or the session's own — and whether anything ever was.
+//
+// The worker reads it to tell whether a request it is holding was already
+// answered by someone else while it waited. It asks a narrower question than
+// Summaries, which folds a failed read into "nothing is stored"; here a failed
+// read answers false rather than a misleading zero.
+//
+// For the session's own summary alone, see SessionSummarizedAt.
 func (d *DB) SummarizedAt(ctx context.Context, s domain.Session) (time.Time, bool) {
 	var unix int64
 	e := d.db.QueryRowContext(ctx, "SELECT MAX(created) FROM summaries WHERE plugin_id=? AND session_id=?", s.PluginID, s.SessionID).Scan(&unix)

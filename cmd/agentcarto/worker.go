@@ -97,7 +97,7 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		if _, still := q.Find(r.PluginID, r.SessionID); !still {
 			continue
 		}
-		if runRequest(ctx, log, q, db, gen, r) {
+		if runRequest(ctx, log, q, db, gen, r, time.Duration(cfg.Summary.SessionInterval)) {
 			done++
 		}
 	}
@@ -114,7 +114,7 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 // summarized session, and a session whose generation failed for a reason that
 // will fail again — because a request that stays costs another call on the next
 // run.
-func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.DB, gen summary.Generator, r summary.Request) bool {
+func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.DB, gen summary.Generator, r summary.Request, sessionEvery time.Duration) bool {
 	// The fingerprint travels with the request rather than being looked up here.
 	// It has to be the version the prompts were built from — the session may have
 	// grown while the request waited — and it is what every reader compares
@@ -124,13 +124,13 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	// answered — by a `show` that generated the session itself, or by a run that
 	// reached it first.
 	//
-	// The question is deliberately "since this was queued" and not "within the
-	// hour": a request here can be one somebody asked for by name. `show` leaves
-	// a session needing several calls to the worker and tells the reader the
-	// summaries will appear, and an hourly guard applied here would drop that
-	// request unsummarized and make that a lie. What holds a growing session to
-	// one summary an hour is EnqueueSummaries, which is the only thing that
-	// queues without being asked.
+	// The question is deliberately "since this was queued" and not "recently
+	// enough": a request here can be one somebody asked for by name. `show`
+	// leaves a session needing several calls to the worker and tells the reader
+	// the summaries will appear, and a window applied here would drop that
+	// request unsummarized and make that a lie. Nothing else needs a window:
+	// queueOne writes a request only for a turn that has no summary, so a session
+	// with nothing new to describe is never queued in the first place.
 	if when, ok := db.SummarizedAt(ctx, s); ok && when.After(r.Queued) {
 		fmt.Fprintf(log, "%s %s/%s: summarized %s after this was queued, skipping\n", stamp(), r.PluginID, short8(r.SessionID), when.Sub(r.Queued).Round(time.Second))
 		_ = q.Done(r)
@@ -138,6 +138,10 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	}
 
 	all := summary.Result{Turns: map[int]string{}}
+	// whole is the session summary of a call that saw every turn there is. Only
+	// such a call can describe the session; see storeSessionSummary.
+	var whole string
+	asked := 0
 	for i, prompt := range r.Prompts {
 		if ctx.Err() != nil {
 			return true // leave the request queued: this is not the session's fault
@@ -157,35 +161,39 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 			_ = q.Retry(r, time.Now())
 			return true
 		}
-		if res.Session != "" {
-			all.Session = res.Session
+		asked += len(r.Batches[i])
+		if res.Session != "" && len(r.Prompts) == 1 && asked == len(r.Nodes) {
+			whole = res.Session
 		}
 		for n, text := range res.Turns {
 			all.Turns[n] = text
 		}
-		if err := storeSummaries(ctx, db, s, res, r.Nodes, gen.Name(), false); err != nil {
+		// The turns only. What this call said about the session waits for the
+		// decision below: an answer built from part of a session describes those
+		// turns, not the session.
+		if err := storeSummaries(ctx, db, s, summary.Result{Turns: res.Turns}, r.Nodes, gen.Name(), false); err != nil {
 			fmt.Fprintf(log, "%s %s/%s: storing call %d failed: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, err)
 			_ = q.Retry(r, time.Now())
 			return true
 		}
 	}
 
-	if len(r.Prompts) > 1 && len(all.Turns) > 0 {
-		// No single call saw the whole session, so none of their session
-		// summaries describes it.
-		out, err := gen.Generate(ctx, summary.SessionSystem, summary.SessionPrompt(s, all.Turns))
-		if err == nil {
-			var res summary.Result
-			if res, err = summary.Parse(out, nil); err == nil && res.Session != "" {
-				err = storeSummaries(ctx, db, s, summary.Result{Session: res.Session}, r.Nodes, gen.Name(), false)
-			}
-		}
-		if err != nil {
-			fmt.Fprintf(log, "%s %s/%s: turns stored, session summary failed: %v\n", stamp(), r.PluginID, short8(r.SessionID), err)
-		}
+	calls := len(r.Prompts)
+	if storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, log) {
+		calls++
 	}
+	// This version of the session has been answered, whatever came of it. Turn 0
+	// carries the version, and worthOpening reads exactly that, so recording it
+	// is what stops the next scan asking the same question.
+	//
+	// It matters most when the answer held nothing. Parse drops a turn the model
+	// declined to describe rather than failing — an answer with @@SESSION and no
+	// @@TURN parses clean with no turns — and then nothing above writes a row.
+	// Without this the turn is still wanted, the request is written again, and a
+	// scan every few seconds pays for that call every few seconds.
+	_ = db.MarkExamined(ctx, s)
 
-	fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s\n", stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), len(r.Prompts), gen.Name())
+	fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s\n", stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), calls, gen.Name())
 	_ = q.Done(r)
 	return true
 }

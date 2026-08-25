@@ -126,7 +126,7 @@ func TestARequestQueuedAfterTheLastSummaryIsAnswered(t *testing.T) {
 	g := &fakeGenerator{out: "@@TURN 2\n新しいターンの要約\n"}
 	var log bytes.Buffer
 
-	if spent := runRequest(ctx, &log, q, d, g, r); !spent {
+	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour); !spent {
 		t.Fatalf("the request was dropped instead of answered: %s", log.String())
 	}
 	if g.calls != 1 {
@@ -141,5 +141,187 @@ func TestARequestQueuedAfterTheLastSummaryIsAnswered(t *testing.T) {
 	// changed" check never matched — the session was reparsed on every scan.
 	if got := d.Summaries(ctx, s, map[int]string{2: "n2"}); got[2].Fingerprint != "fp1" {
 		t.Errorf("fingerprint=%q, want the version the prompts were built from", got[2].Fingerprint)
+	}
+}
+
+// An incremental call sees the turns it was asked about and nothing else, so the
+// session summary it returns describes those turns rather than the session.
+// Storing it is what made a long session's summary read as a list of its newest
+// turns — f64330cd's said "…（ターン353）…（ターン365・366）" for a 366-turn session.
+//
+// Within the interval the stored one is left alone, and no second call is made.
+func TestAnIncrementalCallDoesNotOverwriteTheSessionSummary(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "long", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, s, []cache.Summary{
+		{Turn: 0, Text: "セッション全体を語る要約", Model: "m"},
+		{Turn: 1, NodeID: "n1", Text: "ターン1", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Three turns exist; this request asks about the newest one only.
+	r := summary.Request{
+		PluginID: "claude", SessionID: "long", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes:   map[int]string{1: "n1", 2: "n2", 3: "n3"},
+		Batches: [][]int{{3}}, Prompts: []string{"doc"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeGenerator{out: "@@SESSION\n直近のターンだけを見た要約\n\n@@TURN 3\nターン3の要約\n"}
+	var log bytes.Buffer
+
+	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour); !spent {
+		t.Fatalf("the request was dropped: %s", log.String())
+	}
+	if g.calls != 1 {
+		t.Errorf("the generator was called %d times, want 1 — no session summary was due", g.calls)
+	}
+	got := d.Summaries(ctx, s, r.Nodes)
+	if got[3].Text != "ターン3の要約" {
+		t.Errorf("the new turn was not stored: %q", got[3].Text)
+	}
+	if got[0].Text != "セッション全体を語る要約" {
+		t.Errorf("the session summary was overwritten with a partial view: %q", got[0].Text)
+	}
+}
+
+// Once the interval has passed, the session summary is made again — from the
+// turn summaries, not from the call that saw one turn. That is a call of its
+// own, which is why it has a pace of its own.
+func TestTheSessionSummaryIsRemadeFromTheTurnsWhenItIsDue(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "long", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, s, []cache.Summary{
+		{Turn: 0, Text: "古いセッション要約", Model: "m"},
+		{Turn: 1, NodeID: "n1", Text: "ターン1", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := summary.Request{
+		PluginID: "claude", SessionID: "long", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes:   map[int]string{1: "n1", 2: "n2"},
+		Batches: [][]int{{2}}, Prompts: []string{"doc"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	// The answer serves both calls: the turn call parses @@TURN 2, and the
+	// session call parses @@SESSION.
+	g := &fakeGenerator{out: "@@SESSION\nターン要約から作り直した要約\n\n@@TURN 2\nターン2の要約\n"}
+	var log bytes.Buffer
+
+	// An interval of zero: the session summary is always due.
+	if spent := runRequest(ctx, &log, q, d, g, r, 0); !spent {
+		t.Fatalf("the request was dropped: %s", log.String())
+	}
+	if g.calls != 2 {
+		t.Fatalf("the generator was called %d times, want 2 (the turn, then the session)", g.calls)
+	}
+	if got := d.Summaries(ctx, s, r.Nodes); got[0].Text != "ターン要約から作り直した要約" {
+		t.Errorf("the session summary was not remade: %q", got[0].Text)
+	}
+}
+
+// A model that answers without describing the turn it was asked about must not
+// leave the session looking untouched. Parse drops a missing @@TURN rather than
+// failing, so nothing is stored — and with no pace left on queueing, the same
+// turn would be wanted, requested and paid for on every scan, which in the TUI
+// is every few seconds.
+//
+// Recording the version answers it: worthOpening sees the log has not moved and
+// leaves the session alone until it does.
+func TestAnAnswerWithNoTurnStillRecordsTheVersion(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "quiet", Fingerprint: "fp1"}
+	// An incremental request: two turns exist, this one asks about the newer.
+	r := summary.Request{
+		PluginID: "claude", SessionID: "quiet", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1", 2: "n2"}, Batches: [][]int{{2}}, Prompts: []string{"doc"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	// The model answered, but said nothing about turn 2. Its session summary is
+	// not usable either: this call saw one turn of a two-turn session.
+	g := &fakeGenerator{out: "@@SESSION\n1ターンしか見ていない話\n"}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, time.Hour)
+
+	if worthOpening(ctx, d, q, s) {
+		t.Error("the session would be opened, requested and paid for again on the next scan")
+	}
+	// And the empty answer was not mistaken for a summary.
+	if when, ok := d.SummarizedAt(ctx, s); ok {
+		t.Errorf("a session with no stored summary reports having been summarized at %s", when)
+	}
+}
+
+// A single call that covered every turn already describes the whole session, so
+// its answer is stored as it stands and no second call is made. This is a first
+// summary of a short session — the common case on a machine being backfilled.
+func TestACallThatSawEveryTurnWritesTheSessionSummaryItself(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "short", Fingerprint: "fp1"}
+	r := summary.Request{
+		PluginID: "claude", SessionID: "short", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes:   map[int]string{1: "n1", 2: "n2"},
+		Batches: [][]int{{1, 2}}, Prompts: []string{"doc"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeGenerator{out: "@@SESSION\n全体を見た要約\n\n@@TURN 1\nターン1\n\n@@TURN 2\nターン2\n"}
+	var log bytes.Buffer
+
+	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour); !spent {
+		t.Fatalf("the request was dropped: %s", log.String())
+	}
+	if g.calls != 1 {
+		t.Errorf("the generator was called %d times, want 1 — the one call saw everything", g.calls)
+	}
+	if got := d.Summaries(ctx, s, r.Nodes); got[0].Text != "全体を見た要約" {
+		t.Errorf("session summary=%q, want the answer of the call that saw every turn", got[0].Text)
 	}
 }

@@ -275,11 +275,11 @@ func TestPickForSummaryTakesSessionsThatAreStillMoving(t *testing.T) {
 	}
 }
 
-// A session summarized within the hour is not queued again, however much it has
-// grown. Every scan would otherwise open it, queue it and spawn a worker that
-// throws the request away for the rest of the hour — and the TUI scans every
-// few seconds.
-func TestARecentlySummarizedSessionIsNotQueuedAgain(t *testing.T) {
+// A turn that finished is queued the moment a scan sees it, however recently the
+// session was summarized. Waiting was what made a session someone works in all
+// day sit an hour behind: the finished turns were held back to pace the session
+// summary, which is now paced where it is written (storeSessionSummary).
+func TestAFinishedTurnIsQueuedWithoutWaiting(t *testing.T) {
 	_, _ = summaryFixture(t)
 	ctx := context.Background()
 	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
@@ -293,65 +293,40 @@ func TestARecentlySummarizedSessionIsNotQueuedAgain(t *testing.T) {
 	}
 	now := time.Now()
 	src := "/logs/open.jsonl"
+	// Two turns; the first is described already, from the version before the
+	// second one existed.
+	conv := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: now, Events: talk("最初の質問", "最初の答え")},
+		{ID: "u2", Parent: "u1", Timestamp: now, Events: talk("次の質問", "次の答え")},
+	})
+	done := domain.Session{PluginID: "claude", SessionID: "open", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, done, []cache.Summary{
+		{Turn: 0, Text: "セッション要約", Model: "m"},
+		{Turn: 1, NodeID: "u1", Text: "ターン1", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The same session as the scan sees it now: one turn newer.
 	s := domain.Session{
 		PluginID: "claude", AgentType: "claude", SessionID: "open", CWD: "/repo/app", Title: "open",
 		UpdatedAt: now, LastKind: domain.EventTurnComplete,
-		Fingerprint: "fp1", SourceRef: domain.SessionRef{Source: src},
+		Fingerprint: "fp2", SourceRef: domain.SessionRef{Source: src},
 	}
-	conv := domain.NewConversation([]domain.ConvNode{{ID: "u1", Timestamp: now, Events: talk("質問", "答え")}})
 	a, cfg := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{src: conv})
 	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 4
 
 	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{s})
+
 	r, ok := q.Find("claude", "open")
 	if !ok {
-		t.Fatal("an unsummarized open session was not queued")
+		t.Fatal("a finished turn was not queued — the session was summarized moments ago, which is no longer a reason to wait")
 	}
-	// Summarized, and out of the queue, as a worker leaves it.
-	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "done"}, {Turn: 1, Text: "turn"}}); err != nil {
-		t.Fatal(err)
+	var asked []int
+	for _, b := range r.Batches {
+		asked = append(asked, b...)
 	}
-	if err := q.Done(r); err != nil {
-		t.Fatal(err)
-	}
-	// Then the user sends another prompt: same session, a log that moved.
-	grown := s
-	grown.Fingerprint = "fp2"
-	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{grown})
-	if reqs, _ := q.List(); len(reqs) != 0 {
-		t.Errorf("a session summarized moments ago was queued again: %v", reqs)
-	}
-}
-
-// The guard is against queueing in a loop, not against regenerating at all: a
-// session that grew must still be summarized again once the window passes.
-func TestTooSoon(t *testing.T) {
-	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	cases := []struct {
-		name       string
-		when       time.Time
-		summarized bool
-		want       bool
-	}{
-		{"never summarized", time.Time{}, false, false},
-		{"just now", now.Add(-time.Minute), true, true},
-		{"inside the window", now.Add(-regenerateWithin + time.Minute), true, true},
-		{"exactly the window", now.Add(-regenerateWithin), true, false},
-		{"past the window", now.Add(-regenerateWithin - time.Minute), true, false},
-		{"long ago", now.Add(-30 * 24 * time.Hour), true, false},
-		// An unreadable store answers "not summarized" with a zero time. Treating
-		// that as recent would stop summarizing entirely; treating it as never is
-		// what the guard is for — the caller then pays once, not on every run,
-		// because a successful write moves the time forward.
-		{"unreadable store", time.Time{}, false, false},
-		// A clock that moved backwards (a laptop waking, an NTP step) must not
-		// make a summary look like it comes from the future and block forever.
-		{"written in the future", now.Add(time.Hour), true, true},
-	}
-	for _, c := range cases {
-		if got := tooSoon(c.when, c.summarized, now); got != c.want {
-			t.Errorf("%s: tooSoon=%v want %v", c.name, got, c.want)
-		}
+	if len(asked) != 1 || asked[0] != 2 {
+		t.Errorf("queued turns %v, want only the new one (2)", asked)
 	}
 }
 
@@ -906,6 +881,57 @@ func TestASessionWaitingOnAnOpenTurnIsNotHeldOffForAnHour(t *testing.T) {
 	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{done})
 	if _, queued := q.Find("claude", "live"); !queued {
 		t.Error("the finished turn was not queued")
+	}
+}
+
+// A request carries the nodes of the turns it can be about, which leaves out the
+// one being written. That count is how a run tells whether a single call covered
+// the session: measured against every turn instead, a session with a turn in
+// progress would never look covered, and the run would pay for a second call to
+// remake a session summary the first call had just made.
+func TestAQueuedRequestLeavesTheOpenTurnOutOfItsNodes(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	src := "/logs/live.jsonl"
+	conv := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: now, Events: talk("終わった質問", "終わった答え")},
+		{ID: "u2", Parent: "u1", Timestamp: now, Events: talk("いま聞いていること", "書きかけ")},
+	})
+	s := domain.Session{
+		PluginID: "claude", AgentType: "claude", SessionID: "live", CWD: "/repo/app", Title: "live",
+		UpdatedAt: now, LastKind: domain.EventStream, // the second turn is being written
+		Fingerprint: "fp1", SourceRef: domain.SessionRef{Source: src},
+	}
+	a, cfg := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{src: conv})
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 4
+
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{s})
+
+	r, ok := q.Find("claude", "live")
+	if !ok {
+		t.Fatal("the finished turn was not queued")
+	}
+	if len(r.Nodes) != 1 || r.Nodes[1] == "" {
+		t.Fatalf("nodes=%v, want only the finished turn — the open one is not summarizable", r.Nodes)
+	}
+	// So a single call asking about that turn covers everything this request is
+	// about, and its session summary can be used as it stands.
+	asked := 0
+	for _, b := range r.Batches {
+		asked += len(b)
+	}
+	if len(r.Prompts) != 1 || asked != len(r.Nodes) {
+		t.Errorf("prompts=%d asked=%d nodes=%d, want one call covering every summarizable turn", len(r.Prompts), asked, len(r.Nodes))
 	}
 }
 

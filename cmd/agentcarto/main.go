@@ -543,7 +543,8 @@ func summaryDoctor(cfg config.Config) {
 		fmt.Println("summary      off (set summary.agent to claude or codex)")
 		return
 	}
-	fmt.Printf("summary      %s %s, up to %d sessions per run\n", cfg.Summary.Agent, cfg.Summary.Model, cfg.Summary.MaxPerRun)
+	fmt.Printf("summary      %s %s, up to %d sessions per run, session summary every %s\n",
+		cfg.Summary.Agent, cfg.Summary.Model, cfg.Summary.MaxPerRun, time.Duration(cfg.Summary.SessionInterval))
 
 	if pid, taken, err := summary.LockHolder(lockPath()); err == nil {
 		fmt.Printf("  worker     running as pid %d since %s — stop it with: kill %d\n", pid, taken.Format("15:04:05"), pid)
