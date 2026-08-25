@@ -76,9 +76,14 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		return
 	}
 
+	// max_per_run bounds what one run spends, and what it spends is calls. A
+	// request that turns out to need none — one whose session another run
+	// summarized minutes ago — costs a single query, so counting it would let a
+	// queue full of those use the whole budget and generate nothing, while the
+	// requests behind them wait for a run that never reaches them.
 	reqs, _ := q.List()
 	done := 0
-	for _, r := range reqs {
+	for i, r := range reqs {
 		if !r.Ready(time.Now()) {
 			// Failed recently, or failed often enough to stop. Sweep takes the
 			// ones that are done being tried.
@@ -86,7 +91,7 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		}
 		if done >= cfg.Summary.MaxPerRun {
 			fmt.Fprintf(log, "%s worker: stopping at %d sessions (summary.max_per_run); %d still queued\n",
-				stamp(), done, len(reqs)-done)
+				stamp(), done, len(reqs)-i)
 			break
 		}
 		if ctx.Err() != nil {
@@ -98,31 +103,36 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		if _, still := q.Find(r.PluginID, r.SessionID); !still {
 			continue
 		}
-		runRequest(ctx, log, q, db, gen, r)
-		done++
+		if runRequest(ctx, log, q, db, gen, r) {
+			done++
+		}
 	}
 	if done > 0 {
 		fmt.Fprintf(log, "%s worker: finished %d sessions\n", stamp(), done)
 	}
 }
 
-// runRequest summarizes one queued session. The request leaves the queue in
-// every case that retrying cannot improve — a summarized session, and a session
-// whose generation failed for a reason that will fail again — because a request
-// that stays costs another call on the next run.
-func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.DB, gen summary.Generator, r summary.Request) {
+// runRequest summarizes one queued session, and reports whether it spent a call
+// on it — which is what the run's budget counts. A failed call counts: it was
+// made, and may well have been billed.
+//
+// The request leaves the queue in every case that retrying cannot improve — a
+// summarized session, and a session whose generation failed for a reason that
+// will fail again — because a request that stays costs another call on the next
+// run.
+func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.DB, gen summary.Generator, r summary.Request) bool {
 	s := domain.Session{PluginID: r.PluginID, SessionID: r.SessionID}
 	when, ok := db.SummarizedAt(ctx, s)
 	if tooSoon(when, ok, time.Now()) {
 		fmt.Fprintf(log, "%s %s/%s: summarized %s ago, skipping\n", stamp(), r.PluginID, short8(r.SessionID), time.Since(when).Round(time.Minute))
 		_ = q.Done(r)
-		return
+		return false
 	}
 
 	all := summary.Result{Turns: map[int]string{}}
 	for i, prompt := range r.Prompts {
 		if ctx.Err() != nil {
-			return // leave the request queued: this is not the session's fault
+			return true // leave the request queued: this is not the session's fault
 		}
 		out, err := gen.Generate(ctx, summary.System, prompt)
 		if err != nil {
@@ -131,13 +141,13 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 			// session again and the same call is paid for again, over and over.
 			fmt.Fprintf(log, "%s %s/%s: call %d of %d failed: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts), err)
 			_ = q.Retry(r, time.Now())
-			return
+			return true
 		}
 		res, err := summary.Parse(out, r.Batches[i])
 		if err != nil {
 			fmt.Fprintf(log, "%s %s/%s: call %d of %d: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts), err)
 			_ = q.Retry(r, time.Now())
-			return
+			return true
 		}
 		if res.Session != "" {
 			all.Session = res.Session
@@ -148,7 +158,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		if err := storeSummaries(ctx, db, s, res, r.Nodes, gen.Name(), false); err != nil {
 			fmt.Fprintf(log, "%s %s/%s: storing call %d failed: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, err)
 			_ = q.Retry(r, time.Now())
-			return
+			return true
 		}
 	}
 
@@ -169,6 +179,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 
 	fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s\n", stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), len(r.Prompts), gen.Name())
 	_ = q.Done(r)
+	return true
 }
 
 // tooSoon reports whether a session was summarized recently enough that doing
