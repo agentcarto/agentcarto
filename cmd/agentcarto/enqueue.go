@@ -26,19 +26,6 @@ func detachWorker() error {
 	return platform.Detach("summarize-worker")
 }
 
-// settleBefore is how long a session whose last turn did not finish has to sit
-// still before it is worth summarizing.
-//
-// The wait is not about the session growing — turns that are already summarized
-// stay summarized, and a session that gains a turn is only asked about that
-// turn. It is about the turn in progress: summarizing one that is still being
-// written pays for a summary whose terminal node is about to change, and the
-// store withholds a summary whose node moved. That money buys nothing.
-//
-// A session whose log ends at a completed turn has no turn in progress, so it
-// does not wait at all. On this machine that is 150 of 222 sessions.
-const settleBefore = 10 * time.Minute
-
 // regenerateWithin is the shortest gap between summarizing the same session
 // twice unasked. A session someone is working in grows all day, and every new
 // turn makes its session summary out of date again; without a floor, a scan
@@ -101,7 +88,7 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// of them get summarized, and every later run picks the same ones, queues
 	// nothing, and never reaches the rest.
 	now := time.Now()
-	cand := pickForSummary(sessions, now)
+	cand := pickForSummary(sessions)
 	opened, oldEnd := 0, true
 	for lo, hi := 0, len(cand)-1; lo <= hi && opened < cfg.Summary.MaxPerRun; {
 		s := cand[lo]
@@ -200,25 +187,23 @@ func anyReady(q *summary.Queue) bool {
 // EnqueueSummaries reads this list from both ends, not just the old one. What
 // the order gives it is which end is which; see the split there.
 //
-// Idle ones only — where idle means nothing is being written, not that nobody
-// is attached. A session someone has open whose last turn is complete
-// (StatusReady) is taken like any other: there is nothing in flight, so the
-// summary is not paid for twice. What is skipped is a session actually mid-turn,
-// which would be summarized and then immediately outgrow it.
+// Every session is a candidate, including the one an agent is working in right
+// now. What must not be summarized is a turn still being written, not a session
+// someone is sitting in, and that is decided per turn where the turns are known
+// — see summarizableTurns. Held back by session, as this was, the finished turns
+// of the session being read waited for the unfinished one.
+//
+// Status is not consulted at all any more, which is also what makes the CLI and
+// the TUI agree: DetectActive only runs for the TUI and `active`, so from a
+// plain command every session looked unattached regardless.
 //
 // The per-run budget is not applied here. What it has to bound is the number of
 // sessions a run opens, and whether a session needs opening is not known until
 // the cheap checks in worthOpening have been made — see EnqueueSummaries.
 //
-// Status is only filled in by DetectActive, which the TUI and `active` run and
-// a plain command does not — so from the command line every session looks
-// unattached anyway. Taking StatusReady is what makes the two agree, rather than
-// the sessions on screen being the only ones held back.
-//
-// The price of taking them is that a session still being worked in has its
-// session summary remade after the next prompt. The `tooSoon` guard holds that
-// to once an hour.
-func pickForSummary(sessions []domain.Session, now time.Time) []domain.Session {
+// The price of taking a session that is being worked in is that its session
+// summary is remade as it grows. The `tooSoon` guard holds that to once an hour.
+func pickForSummary(sessions []domain.Session) []domain.Session {
 	var out []domain.Session
 	for _, s := range sessions {
 		if s.EmptyFork {
@@ -231,18 +216,6 @@ func pickForSummary(sessions []domain.Session, now time.Time) []domain.Session {
 		// the conversation it came from is a hundred times that and does get
 		// evicted. Whether a copy was in fact kept is worthOpening's question: it
 		// takes a row lookup, and this function does not read the store.
-		// Ready is an open session whose last turn is complete: an agent is
-		// attached, but it is waiting for a prompt, not writing. It is not the state
-		// a tool runs in: mid-tool the last event says so, and the claude plugin
-		// additionally downgrades Ready to Running while a shell child is alive.
-		if s.Status != "" && s.Status != domain.StatusReady {
-			continue // an agent is working in it right now
-		}
-		// A log that ends at a completed turn has nothing in flight: whatever is
-		// there is final, and summarizing it now is not paid for twice.
-		if s.LastKind != domain.EventTurnComplete && now.Sub(s.UpdatedAt) < settleBefore {
-			continue
-		}
 		out = append(out, s)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.Before(out[j].UpdatedAt) })
@@ -297,12 +270,13 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 		// different tomorrow.
 		return false, true
 	}
-	turns := transcript.Turns(*conv, conv.ActivePath())
+	path := conv.ActivePath()
+	turns := transcript.Turns(*conv, path)
 	if len(turns) == 0 {
 		return markNothingToSummarize(ctx, db, s), true
 	}
 	nodes := summary.NodesByTurn(turns)
-	want := pendingTurns(turns, db.Summaries(ctx, s, nodes))
+	want := pendingTurns(turns, db.Summaries(ctx, s, nodes), hasOpenTurn(turns, path, s.LastKind, time.Since(s.UpdatedAt)))
 	if len(want) == 0 {
 		// Every turn is described already. The log moved — worthOpening let this
 		// through — but not in a way that added anything to say, so record the
@@ -325,8 +299,9 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 }
 
 // markNothingToSummarize records that this session, as it stands, adds nothing
-// to summarize — it renders to no document at all, or every turn it has is
-// already described. It always reports false: nothing was queued.
+// to summarize — it renders to no document at all, every turn it has is already
+// described, or the only turn left is the one being written. It always reports
+// false: nothing was queued.
 //
 // What it writes is the session's current fingerprint against turn 0, which is
 // the only cheap way to recognize a session as done: worthOpening reads exactly
@@ -336,11 +311,10 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 //
 // MarkExamined rather than PutSummaries, for two reasons. Whatever text turn 0
 // holds stays: that row is a summary somebody paid for, and a session that grew
-// by a turn holding nothing to describe — a command with no reply — would
-// otherwise have its session summary destroyed by the act of noticing that it
-// had nothing to add. And the time the session was last summarized stays where
-// it is, so the hourly guard keeps measuring from the last summary rather than
-// from the last time anything looked.
+// by a turn holding nothing to describe would otherwise have its session summary
+// destroyed by the act of noticing that it had nothing to add. And the time the
+// session was last summarized stays where it is — see MarkExamined, which a
+// session being worked in reaches on every scan.
 func markNothingToSummarize(ctx context.Context, db *cache.DB, s domain.Session) bool {
 	_ = db.MarkExamined(ctx, s)
 	return false

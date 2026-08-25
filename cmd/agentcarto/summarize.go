@@ -72,7 +72,8 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 	if conv == nil {
 		fail(fmt.Errorf("summarize %s: the plugin returned no conversation", s.SessionID))
 	}
-	turns := transcript.Turns(*conv, conv.ActivePath())
+	path := conv.ActivePath()
+	turns := transcript.Turns(*conv, path)
 	if len(turns) == 0 {
 		fail(fmt.Errorf("summarize %s: the session holds no turns", s.SessionID))
 	}
@@ -81,16 +82,30 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 	// --force asks about every turn, but nothing is dropped until the new
 	// summaries are in hand: dropping first would lose what was already paid for
 	// whenever the generation fails, and a mistyped model name is enough.
+	//
+	// A turn still being written is left out even here. Asking for it by name
+	// does not stop the store from withholding a summary whose node moved, so
+	// --force would buy a summary nobody ever sees.
+	open := hasOpenTurn(turns, path, s.LastKind, time.Since(s.UpdatedAt))
 	want := map[int]bool{}
 	if *force {
-		for _, t := range turns {
+		for _, t := range summarizableTurns(turns, open) {
 			want[t.Index+1] = true
 		}
 	} else {
-		want = pendingTurns(turns, db.Summaries(ctx, s, nodes))
+		want = pendingTurns(turns, db.Summaries(ctx, s, nodes), open)
 	}
 	if len(want) == 0 {
-		fmt.Fprintf(w, "%s: all %d turns are summarized already (use --force to make them again)\n", s.SessionID, len(turns))
+		if open && len(turns) == 1 {
+			fmt.Fprintf(w, "%s: its only turn is still being written — summarize it once the agent is done\n", s.SessionID)
+			return
+		}
+		done := len(summarizableTurns(turns, open))
+		if open {
+			fmt.Fprintf(w, "%s: all %d finished turns are summarized already; the last one is still being written\n", s.SessionID, done)
+			return
+		}
+		fmt.Fprintf(w, "%s: all %d turns are summarized already (use --force to make them again)\n", s.SessionID, done)
 		return
 	}
 
@@ -172,7 +187,12 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		// --force wants the turns it no longer generates gone. That cleanup can
 		// only happen once everything is in hand: doing it up front, or per
 		// batch, is what would lose summaries when a later call fails.
-		if err := storeSummaries(ctx, db, s, all, nodes, gen.Name(), true); err != nil {
+		//
+		// And not at all when a turn was held back. The turn being written was
+		// never offered to this run, so it is not in `all`; replacing with `all`
+		// would delete the summary it has from before it reopened — one this run
+		// cannot remake, and no later run will either while the turn stays open.
+		if err := storeSummaries(ctx, db, s, all, nodes, gen.Name(), !open); err != nil {
 			printSummaries(w, all)
 			fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
 		}
@@ -256,6 +276,62 @@ func printSummaries(w io.Writer, res summary.Result) {
 	}
 }
 
+// abandonedAfter is how long a turn has to sit untouched before it counts as
+// abandoned rather than in progress.
+//
+// Nobody is writing a turn whose log stopped moving ten minutes ago: the agent
+// was interrupted, or crashed, or the machine went to sleep. Its terminal node
+// will never move again, so a summary of it is shown rather than withheld — and
+// nothing else will ever ask for that turn, since a log that does not grow keeps
+// its fingerprint and the session is never opened again. Waiting ten minutes is
+// the cheap side of this trade; waiting forever is not.
+const abandonedAfter = 10 * time.Minute
+
+// hasOpenTurn reports whether the last turn in turns is one an agent is still
+// writing — one whose terminal node is expected to move again.
+//
+// Four things have to hold, and anything unknown answers no. The costs are not
+// symmetric: a turn wrongly called open is never summarized at all — nothing
+// asks for it again — while one wrongly called finished costs a single call
+// whose answer the store then withholds.
+//
+//   - The plugin says what the log ends with. An empty LastKind is not "mid-turn"
+//     but "not reported": plugin-copilot reads exported VS Code chat files and
+//     leaves it unset, and plugin-grok returns it for a session whose events
+//     file is missing.
+//   - What it ends with is not a finished turn.
+//   - The log moved recently enough that the turn is still being written rather
+//     than abandoned — see abandonedAfter.
+//   - The turn in question is the one at the end of the branch. transcript.Turns
+//     drops a trailing turn holding nothing but a compact summary, and when it
+//     does, the last turn it returned is a finished one.
+func hasOpenTurn(turns []transcript.Turn, path []string, lastKind domain.EventKind, idleFor time.Duration) bool {
+	if lastKind == "" || lastKind == domain.EventTurnComplete {
+		return false
+	}
+	if idleFor >= abandonedAfter {
+		return false
+	}
+	if len(turns) == 0 || len(path) == 0 {
+		return false
+	}
+	last := turns[len(turns)-1].Nodes
+	return len(last) > 0 && last[len(last)-1] == path[len(path)-1]
+}
+
+// summarizableTurns drops the turn an agent is still writing.
+//
+// A turn in progress has its terminal node move as the agent writes, and the
+// store withholds a summary whose node moved (see cache.Summaries), so paying
+// for one buys nothing. Every earlier turn on the branch is final by definition
+// — only the last one can be open, which is what hasOpenTurn decides.
+func summarizableTurns(turns []transcript.Turn, openLast bool) []transcript.Turn {
+	if !openLast || len(turns) == 0 {
+		return turns
+	}
+	return turns[:len(turns)-1]
+}
+
 // pendingTurns names the turns that still need a summary: the ones the store
 // did not return. The store leaves out both what was never generated and what
 // was generated against a different node — a rewind moves a turn number onto
@@ -264,9 +340,9 @@ func printSummaries(w io.Writer, res summary.Result) {
 //
 // The session summary (turn 0) is not a turn here; it is rewritten whenever any
 // turn is, since adding turns is what makes it out of date.
-func pendingTurns(turns []transcript.Turn, stored map[int]cache.Summary) map[int]bool {
+func pendingTurns(turns []transcript.Turn, stored map[int]cache.Summary, openLast bool) map[int]bool {
 	want := map[int]bool{}
-	for _, t := range turns {
+	for _, t := range summarizableTurns(turns, openLast) {
 		if _, ok := stored[t.Index+1]; !ok {
 			want[t.Index+1] = true
 		}

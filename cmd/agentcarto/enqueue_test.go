@@ -19,9 +19,9 @@ import (
 	"github.com/agentcarto/core/domain"
 )
 
-// Choosing wrongly costs money, so the choosing is deliberate: oldest first and
-// nothing still being worked in. The per-run budget is not applied here — see
-// TestTheSweepAdvancesPastWhatIsAlreadyDone.
+// Choosing wrongly costs money, so the choosing is deliberate: oldest first, and
+// only the sessions there is nothing to be had from are left out. The per-run
+// budget is not applied here — see TestTheSweepAdvancesPastWhatIsAlreadyDone.
 func TestPickForSummary(t *testing.T) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
@@ -35,19 +35,25 @@ func TestPickForSummary(t *testing.T) {
 		{SessionID: "log-gone", UpdatedAt: ago(2 * time.Hour), LogDeleted: true},
 		{SessionID: "empty-fork", UpdatedAt: ago(2 * time.Hour), EmptyFork: true},
 	}
-	got := pickForSummary(sessions, now)
+	got := pickForSummary(sessions)
 	var ids []string
 	for _, s := range got {
 		ids = append(ids, s.SessionID)
 	}
 	// Oldest first: those are the ones whose logs are about to be rotated away.
-	// just-finished is eligible despite its age — its last turn is complete, so
-	// there is nothing in flight to pay for twice — but it goes last.
+	//
+	// running and just-touched are both in the list. What must not be summarized
+	// is the turn being written, not the session holding it, and that is decided
+	// per turn once the turns are known (summarizableTurns). Holding the session
+	// back made its finished turns wait for the unfinished one.
 	//
 	// log-gone is in the list. Its log is what is gone, not its conversation: the
 	// cache keeps that, and it is the session with the most to lose. Whether a
 	// copy was actually kept takes a store lookup, which is worthOpening's job.
-	want := []string{"oldest", "older", "log-gone", "newest", "just-finished"}
+	//
+	// empty-fork is the only one left out: a full-copy fork nobody continued has
+	// nothing of its own to describe.
+	want := []string{"oldest", "older", "log-gone", "running", "newest", "just-touched", "just-finished"}
 	if len(ids) != len(want) {
 		t.Fatalf("picked %v, want %v", ids, want)
 	}
@@ -239,43 +245,33 @@ func TestASessionWithNothingToSummarizeIsNotOpenedTwice(t *testing.T) {
 	}
 }
 
-// A session being worked in right now would be summarized and then immediately
-// outgrow it — paid for, and out of date before the call returned.
-func TestPickForSummarySkipsWhatIsStillMoving(t *testing.T) {
+// A session being worked in is a candidate like any other. What must not be
+// summarized is the turn being written, and that is decided per turn, where the
+// turns are known — see TestPendingTurnsLeavesOutTheTurnStillBeingWritten.
+//
+// Held back by session, as this was, a session someone is working in all day
+// never had its finished turns summarized: the very sessions a reader wants.
+func TestPickForSummaryTakesSessionsThatAreStillMoving(t *testing.T) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	for _, s := range []domain.Session{
-		// Running: an agent is in it right now, whatever the log says.
-		{SessionID: "running", UpdatedAt: now.Add(-time.Hour), Status: domain.StatusRunning, LastKind: domain.EventTurnComplete},
-		// Other: attached, and what it is doing is not one of the states that can be
-		// read as finished. Not knowing is a reason to leave it alone.
-		{SessionID: "other", UpdatedAt: now.Add(-time.Hour), Status: domain.StatusOther, LastKind: domain.EventUser},
-		// Mid-turn and recent: the turn being written would change under the
-		// summary, and the store would withhold what was paid for.
+		// An agent is in it right now, mid-tool.
+		{SessionID: "running", UpdatedAt: now.Add(-time.Second), Status: domain.StatusRunning, LastKind: domain.EventToolCall},
+		// Attached, and what it is doing is not a state the status display names.
+		{SessionID: "other", UpdatedAt: now.Add(-time.Second), Status: domain.StatusOther, LastKind: domain.EventUser},
+		// Being written this very second.
 		{SessionID: "seconds-ago", UpdatedAt: now.Add(-time.Second), LastKind: domain.EventStream},
-		{SessionID: "just-inside", UpdatedAt: now.Add(-settleBefore + time.Second), LastKind: domain.EventToolCall},
+		// Open, and waiting for a prompt.
+		{SessionID: "ready", UpdatedAt: now.Add(-time.Second), Status: domain.StatusReady, LastKind: domain.EventTurnComplete},
 	} {
-		if got := pickForSummary([]domain.Session{s}, now); len(got) != 0 {
-			t.Errorf("%s was picked", s.SessionID)
+		if got := pickForSummary([]domain.Session{s}); len(got) != 1 {
+			t.Errorf("%s was left out", s.SessionID)
 		}
 	}
-	// Once it has settled, it is picked even mid-turn: at that age the turn was
-	// abandoned rather than being written.
-	s := domain.Session{SessionID: "settled", UpdatedAt: now.Add(-settleBefore - time.Second), LastKind: domain.EventStream}
-	if got := pickForSummary([]domain.Session{s}, now); len(got) != 1 {
-		t.Error("a settled session was not picked")
-	}
-	// A finished turn waits for nothing. Most sessions on a machine are in this
-	// state, so making them wait ten minutes delayed nearly everything.
-	fresh := domain.Session{SessionID: "finished", UpdatedAt: now.Add(-time.Second), LastKind: domain.EventTurnComplete}
-	if got := pickForSummary([]domain.Session{fresh}, now); len(got) != 1 {
-		t.Error("a session whose last turn completed was made to wait")
-	}
-	// Open, and waiting for a prompt. Holding these back would exclude the
-	// sessions being worked in today — the ones a reader is most likely to want —
-	// and only in the TUI, since a plain command never fills Status in at all.
-	ready := domain.Session{SessionID: "ready", UpdatedAt: now.Add(-time.Second), Status: domain.StatusReady, LastKind: domain.EventTurnComplete}
-	if got := pickForSummary([]domain.Session{ready}, now); len(got) != 1 {
-		t.Error("an open session sitting at a completed turn was not picked")
+	// The one exclusion left: a full-copy fork nobody ever continued holds
+	// nothing of its own to describe.
+	fork := domain.Session{SessionID: "empty-fork", UpdatedAt: now.Add(-time.Hour), EmptyFork: true}
+	if got := pickForSummary([]domain.Session{fork}); len(got) != 0 {
+		t.Error("a fork that was never continued was picked")
 	}
 }
 
@@ -360,7 +356,7 @@ func TestTooSoon(t *testing.T) {
 }
 
 func TestPickForSummaryOnNothing(t *testing.T) {
-	if got := pickForSummary(nil, time.Now()); len(got) != 0 {
+	if got := pickForSummary(nil); len(got) != 0 {
 		t.Errorf("picked %v from no sessions", got)
 	}
 }
@@ -475,8 +471,8 @@ func TestAnyReady(t *testing.T) {
 	}
 }
 
-// settledAppN serves n sessions whose last turn is complete, so that none is
-// held back by settleBefore and what a test sees is the queueing itself. They
+// settledAppN serves n sessions whose last turn is complete, so that every turn
+// they hold is summarizable and what a test sees is the queueing itself. They
 // are named s0 (newest) through s<n-1> (oldest), one hour apart.
 func settledAppN(n int) (*app.App, config.Config) {
 	now := time.Now()
@@ -854,12 +850,153 @@ func TestNoticingThereIsNothingToAddKeepsTheSummary(t *testing.T) {
 	if sums, _, _ := storedSummaries(ctx, d, fresh, nil); len(sums) != 0 {
 		t.Errorf("the blank record reads back as a summary: %v", sums)
 	}
-	// And it does not read as one to the hourly guard either. Noticing that a
-	// session has nothing to add is not summarizing it, and a marker that counted
-	// as one would hold the session off for an hour from the moment it was looked
-	// at rather than from the last summary anybody paid for.
+	// And it does not read as one to the hourly guard either. A session being
+	// worked in reaches the marker on every scan — its newest turn is the open
+	// one, which cannot be summarized yet — so a marker that counted as
+	// summarizing would hold that session off for an hour at a time, forever.
 	if when, ok := d.SummarizedAt(ctx, fresh); ok {
 		t.Errorf("noticing there was nothing to add recorded the session as summarized at %s", when)
+	}
+}
+
+// The turn an agent is writing is not summarizable, so a session whose finished
+// turns are all described has nothing to ask about — every scan, for as long as
+// someone works in it. That must not count as summarizing it: the hourly guard
+// reads the same time, and the finished turns that arrive next would wait it out.
+func TestASessionWaitingOnAnOpenTurnIsNotHeldOffForAnHour(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := "/logs/open.jsonl"
+	// One turn, and the agent is still writing it.
+	open := domain.Session{
+		PluginID: "claude", AgentType: "claude", SessionID: "live", CWD: "/repo/app", Title: "live",
+		UpdatedAt: time.Now(), LastKind: domain.EventStream,
+		Fingerprint: "fp1", SourceRef: domain.SessionRef{Source: src},
+	}
+	conv := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Now(), Events: talk("いま聞いていること", "書きかけの答え")},
+	})
+	a, cfg := fixtureApp([]domain.Session{open}, map[string]domain.Conversation{src: conv})
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 4
+
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{open})
+
+	if reqs, _ := q.List(); len(reqs) != 0 {
+		t.Fatalf("the turn being written was queued: %v", reqs)
+	}
+	if _, ok := d.SummarizedAt(ctx, open); ok {
+		t.Error("a session that could not be summarized was recorded as summarized")
+	}
+	if worthOpening(ctx, d, q, open) {
+		t.Error("nothing changed, yet the session would be opened and parsed again")
+	}
+	// The turn finishes. Nothing holds the session back now — least of all a
+	// guard armed by the scan that found the turn unfinished.
+	done := open
+	done.Fingerprint, done.LastKind = "fp2", domain.EventTurnComplete
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{done})
+	if _, queued := q.Find("claude", "live"); !queued {
+		t.Error("the finished turn was not queued")
+	}
+}
+
+// A session abandoned mid-turn — Ctrl+C, a crash, a laptop closed — is
+// summarized in full once it has sat still. Its log never moves again, so
+// waiting for the turn to finish means never summarizing it: the fingerprint
+// stays put and nothing opens the session a second time.
+//
+// settleBefore did this for the whole session; the window now applies to the one
+// turn it is about, so a session's finished turns never wait for it.
+func TestASessionAbandonedMidTurnIsSummarizedOnceItHasSatStill(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := "/logs/abandoned.jsonl"
+	s := domain.Session{
+		PluginID: "claude", AgentType: "claude", SessionID: "abandoned", CWD: "/repo/app", Title: "abandoned",
+		// Stopped mid-turn two days ago: nobody is writing this.
+		UpdatedAt: time.Now().Add(-48 * time.Hour), LastKind: domain.EventStream,
+		Fingerprint: "fp1", SourceRef: domain.SessionRef{Source: src},
+	}
+	conv := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Now().Add(-48 * time.Hour), Events: talk("中断された作業", "途中で切れた答え")},
+	})
+	a, cfg := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{src: conv})
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 4
+
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{s})
+
+	r, ok := q.Find("claude", "abandoned")
+	if !ok {
+		t.Fatal("a session abandoned mid-turn was never queued — its last turn is lost for good")
+	}
+	var asked []int
+	for _, b := range r.Batches {
+		asked = append(asked, b...)
+	}
+	if len(asked) != 1 || asked[0] != 1 {
+		t.Errorf("queued turns %v, want the abandoned turn", asked)
+	}
+}
+
+// A plugin need not report what its log ends with, and a session whose LastKind
+// is unset must still be summarized in full. plugin-copilot reads exported
+// VS Code chat files and never sets it; read as "mid-turn", every one of those
+// sessions would be queued with its newest turn held back — and nothing would
+// ever ask for that turn again, because a static file does not grow.
+func TestASessionWhosePluginReportsNoLastKindIsSummarizedInFull(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := "/logs/exported.json"
+	s := domain.Session{
+		PluginID: "claude", AgentType: "claude", SessionID: "exported", CWD: "/repo/app", Title: "exported",
+		UpdatedAt: time.Now(), Fingerprint: "fp1", SourceRef: domain.SessionRef{Source: src},
+		// LastKind deliberately unset: the plugin does not report one.
+	}
+	conv := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Now(), Events: talk("書き出されたやりとり", "その答え")},
+	})
+	a, cfg := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{src: conv})
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 4
+
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{s})
+
+	r, ok := q.Find("claude", "exported")
+	if !ok {
+		t.Fatal("a session with no reported last kind was not queued at all")
+	}
+	var asked []int
+	for _, b := range r.Batches {
+		asked = append(asked, b...)
+	}
+	if len(asked) != 1 || asked[0] != 1 {
+		t.Errorf("queued turns %v, want the session's one and only turn", asked)
 	}
 }
 
