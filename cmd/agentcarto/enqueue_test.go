@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/agentcarto/agentcarto/internal/app"
 	"github.com/agentcarto/agentcarto/internal/cache"
+	"github.com/agentcarto/agentcarto/internal/config"
 	"github.com/agentcarto/agentcarto/internal/summary"
 	"github.com/agentcarto/core/domain"
 )
@@ -209,6 +212,137 @@ func TestAnyReady(t *testing.T) {
 	}
 	if anyReady(q2) {
 		t.Error("a request inside its backoff was reported as work")
+	}
+}
+
+// settledApp serves two sessions whose last turn is complete, so that neither
+// is held back by settleBefore and what a test sees is the queueing itself.
+func settledApp() (*app.App, config.Config) {
+	now := time.Now()
+	sessions := []domain.Session{
+		{PluginID: "claude", AgentType: "claude", SessionID: "aaaa1111", CWD: "/repo/app", Title: "一つ目",
+			UpdatedAt: now, LastKind: domain.EventTurnComplete, SourceRef: domain.SessionRef{Source: "/logs/a.jsonl"}},
+		{PluginID: "claude", AgentType: "claude", SessionID: "bbbb3333", CWD: "/repo/app", Title: "二つ目",
+			UpdatedAt: now.Add(-48 * time.Hour), LastKind: domain.EventTurnComplete, SourceRef: domain.SessionRef{Source: "/logs/b.jsonl"}},
+	}
+	convs := map[string]domain.Conversation{
+		"/logs/a.jsonl": domain.NewConversation([]domain.ConvNode{
+			{ID: "u1", Timestamp: now, Events: talk("一つ目の質問", "一つ目の答え")},
+		}),
+		"/logs/b.jsonl": domain.NewConversation([]domain.ConvNode{
+			{ID: "u1", Timestamp: now, Events: talk("二つ目の質問", "二つ目の答え")},
+		}),
+	}
+	return fixtureApp(sessions, convs)
+}
+
+// summaryFixture points the queue, the lock and the log at a directory of the
+// test's own, and stops a worker from actually being spawned — under `go test`
+// that would re-execute the test binary.
+func summaryFixture(t *testing.T) (dir string, started *int) {
+	t.Helper()
+	dir = t.TempDir()
+	n := 0
+	prevRoot, prevSpawn := summaryRoot, spawnWorker
+	summaryRoot = dir
+	spawnWorker = func() error { n++; return nil }
+	t.Cleanup(func() { summaryRoot, spawnWorker = prevRoot, prevSpawn })
+	return dir, &n
+}
+
+// Summaries have to appear for someone who only ever runs the CLI. Hanging the
+// queueing on the TUI alone left the whole feature switched off for anyone
+// using `agentcarto list` and `agentcarto show`, which is how the /past-sessions
+// skill reads sessions — it shipped that way in v0.15.1.
+func TestTheCommandLineQueuesAndStartsAWorker(t *testing.T) {
+	_, started := summaryFixture(t)
+	a, cfg := settledApp()
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 20
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	var b bytes.Buffer
+	listCmd(context.Background(), a, cfg, d, nil, false, &b)
+
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs, bad := q.List()
+	if len(bad) > 0 {
+		t.Fatalf("unreadable requests: %v", bad)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("`list` queued %d of the 2 sessions it listed", len(reqs))
+	}
+	if *started != 1 {
+		t.Errorf("a worker was started %d times, want once", *started)
+	}
+}
+
+// Nothing is queued and nothing is spawned while the feature is off, which is
+// how it ships. A command that quietly spent money on a machine that never
+// asked for summaries would be a poor thing to hand anyone.
+func TestTheCommandLineQueuesNothingWhenSummariesAreOff(t *testing.T) {
+	_, started := summaryFixture(t)
+	a, cfg := commandApp() // cfg.Summary.Agent is empty
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	var b bytes.Buffer
+	listCmd(context.Background(), a, cfg, d, nil, false, &b)
+
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reqs, _ := q.List(); len(reqs) != 0 {
+		t.Errorf("%d sessions were queued with summary.agent empty", len(reqs))
+	}
+	if *started != 0 {
+		t.Error("a worker was started with summary.agent empty")
+	}
+}
+
+// The scan runs before a command has printed anything, and `show` summarizes the
+// session it was asked for itself. A worker started during the scan would be
+// picking through the queue while show generates, and the two could land on the
+// same session — so queueing and starting are separate, and only the second one
+// waits for the output.
+func TestEnqueueDoesNotStartAWorker(t *testing.T) {
+	_, started := summaryFixture(t)
+	a, cfg := settledApp()
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 20
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	sessions := scanSessions(context.Background(), a, cfg, d)
+	if len(sessions) == 0 {
+		t.Fatal("the fixture scanned nothing")
+	}
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reqs, _ := q.List(); len(reqs) == 0 {
+		t.Error("the scan queued nothing")
+	}
+	if *started != 0 {
+		t.Error("the scan started a worker instead of leaving it to the command")
+	}
+	// And the command's half does start one, on a queue it added nothing to.
+	StartSummaryWorker(cfg)
+	if *started != 1 {
+		t.Errorf("a worker was started %d times, want once", *started)
 	}
 }
 

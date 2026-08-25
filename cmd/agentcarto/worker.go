@@ -201,7 +201,17 @@ func short8(id string) string {
 	return id
 }
 
-func summaryDir() string { return filepath.Dir(cache.Path()) }
-func queueDir() string   { return filepath.Join(summaryDir(), "summarize-queue") }
+// summaryRoot is where the queue, the lock and the log live. It is the cache's
+// own directory, except in tests, which point it at somewhere they can look at
+// afterwards rather than at the machine's real queue.
+var summaryRoot string
+
+func summaryDir() string {
+	if summaryRoot != "" {
+		return summaryRoot
+	}
+	return filepath.Dir(cache.Path())
+}
+func queueDir() string { return filepath.Join(summaryDir(), "summarize-queue") }
 func lockPath() string   { return filepath.Join(summaryDir(), "summarize.lock") }
 func logPath() string    { return filepath.Join(summaryDir(), "summarize.log") }

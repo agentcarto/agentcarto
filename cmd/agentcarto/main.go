@@ -114,6 +114,9 @@ func main() {
 // When active is true it also runs active detection and keeps only the sessions
 // an agent is working on right now.
 func listCmd(ctx context.Context, a *app.App, c config.Config, db *cache.DB, args []string, active bool, w io.Writer) {
+	// Deferred so the listing is printed first: the scan queues, and the worker
+	// starts once whoever ran this has what they asked for.
+	defer StartSummaryWorker(c)
 	name := "list"
 	if active {
 		name = "active"
@@ -391,7 +394,13 @@ func scanSessions(ctx context.Context, a *app.App, c config.Config, db *cache.DB
 	// The cache is asked what the scan could not find. A log that was deleted took
 	// its session out of every listing until now, though what it takes to read it
 	// was here all along.
-	return app.MergeDeletedLogs(a.MarkEmptyForks(ctx, snap.Sessions), warm, successful)
+	sessions := app.MergeDeletedLogs(a.MarkEmptyForks(ctx, snap.Sessions), warm, successful)
+	// Every command that lists sessions feeds the summary queue, so that a machine
+	// agentcarto is only ever run from the command line on gets summaries at all.
+	// Hanging this on the TUI alone left them at whatever the TUI had happened to
+	// cover, which for anyone using the CLI is nothing.
+	EnqueueSummaries(ctx, a, c, db, sessions)
+	return sessions
 }
 
 // runTUI loads any cached sessions, runs the interactive TUI, and, if the TUI

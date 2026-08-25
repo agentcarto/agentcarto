@@ -39,15 +39,22 @@ func detachWorker() error {
 // does not wait at all. On this machine that is 150 of 222 sessions.
 const settleBefore = 10 * time.Minute
 
-// QueueSummaries queues the sessions that have no summary and starts a worker
-// for them. It is what makes summaries appear without anyone asking: scanning
-// already happens on every run, and this rides along.
+// EnqueueSummaries queues the sessions that have no summary. It is what makes
+// summaries appear without anyone asking: scanning already happens on every
+// run, and this rides along.
 //
 // Nothing here waits, and nothing here generates. The cost of being wrong about
 // which sessions are worth summarizing is money, so the choosing is deliberate:
-// newest first, nothing still being worked in, and never more in one go than
-// the worker will actually process.
-func QueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, sessions []domain.Session) {
+// nothing still being worked in, and never more in one go than the worker will
+// actually process.
+//
+// Starting a worker is StartSummaryWorker's job and deliberately not this one's.
+// A scan happens before a command has printed anything, and `show` summarizes
+// the session it was asked for itself — a worker started here would be picking
+// through the queue while show generates, and the two could land on the same
+// session at the same time. Started after the output instead, that window does
+// not exist.
+func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, sessions []domain.Session) {
 	if cfg.Summary.Agent == "" || db == nil || len(sessions) == 0 {
 		return
 	}
@@ -58,7 +65,24 @@ func QueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *cach
 	for _, s := range pickForSummary(sessions, time.Now(), cfg.Summary.MaxPerRun) {
 		queueOne(ctx, a, db, q, s)
 	}
-	// Start a worker whenever anything is waiting, not only when this scan added
+}
+
+// spawnWorker is how a worker is started. It is a variable so that a test can
+// drive a command end to end without the test binary re-executing itself.
+var spawnWorker = detachWorker
+
+// StartSummaryWorker starts a detached worker if the queue holds work and none
+// is running. Commands call it on their way out, once whatever they were asked
+// for has been printed.
+func StartSummaryWorker(cfg config.Config) {
+	if cfg.Summary.Agent == "" {
+		return
+	}
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		return
+	}
+	// Start a worker whenever anything is waiting, not only when this run added
 	// to it. A worker takes max_per_run sessions and stops, so the queue is
 	// normally left with more than it drained — and the sessions still in it are
 	// skipped by queueOne, which would leave nothing to trigger the next run.
@@ -74,7 +98,15 @@ func QueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *cach
 	}
 	// Detached, so quitting the TUI does not take the work with it. A failure to
 	// start is silent: the requests stay queued, and the next run tries again.
-	_ = detachWorker()
+	_ = spawnWorker()
+}
+
+// QueueSummaries queues and then starts a worker, which is what the TUI wants:
+// it scans every few seconds and has no "on the way out" to hang the second
+// half on.
+func QueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, sessions []domain.Session) {
+	EnqueueSummaries(ctx, a, cfg, db, sessions)
+	StartSummaryWorker(cfg)
 }
 
 // anyReady reports whether the queue holds work a worker would act on now.
@@ -217,7 +249,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 			fmt.Fprintf(os.Stderr, "agentcarto: %d turns to summarize, queued behind a run already going — `agentcarto show %s --turns N` reads a turn now\n", turnsIn(r), ref)
 			return false
 		}
-		if err := detachWorker(); err != nil {
+		if err := spawnWorker(); err != nil {
 			return false
 		}
 		fmt.Fprintf(os.Stderr, "agentcarto: %d turns to summarize, running in the background — `agentcarto show %s --turns N` reads a turn now, and the summaries appear here on a later run\n",
