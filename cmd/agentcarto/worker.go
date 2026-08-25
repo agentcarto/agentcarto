@@ -115,7 +115,11 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 // will fail again — because a request that stays costs another call on the next
 // run.
 func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.DB, gen summary.Generator, r summary.Request) bool {
-	s := domain.Session{PluginID: r.PluginID, SessionID: r.SessionID}
+	// The fingerprint travels with the request rather than being looked up here.
+	// It has to be the version the prompts were built from — the session may have
+	// grown while the request waited — and it is what every reader compares
+	// against to say whether a summary predates the newest turns.
+	s := domain.Session{PluginID: r.PluginID, SessionID: r.SessionID, Fingerprint: r.Fingerprint}
 	// Summarized after this request was written, so what it asked for has been
 	// answered — by a `show` that generated the session itself, or by a run that
 	// reached it first.

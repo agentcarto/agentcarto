@@ -283,7 +283,7 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 		// version it moved to rather than opening the session again next run.
 		return markNothingToSummarize(ctx, db, s), true
 	}
-	r := summary.Request{PluginID: s.PluginID, SessionID: s.SessionID, Queued: time.Now(), Nodes: nodes}
+	r := summary.Request{PluginID: s.PluginID, SessionID: s.SessionID, Queued: time.Now(), Fingerprint: s.Fingerprint, Nodes: nodes}
 	for _, batch := range summary.Batch(*conv, turns, want, s.CWD) {
 		doc, asked := summary.Prompt(s, *conv, turns, summary.Options{Turns: summary.TurnSet(batch)})
 		if len(asked) == 0 {

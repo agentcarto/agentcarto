@@ -29,12 +29,18 @@ type Queue struct{ dir string }
 // conversation, and a second parse in another process would be both slower and
 // a chance for the two to disagree about what the turns are.
 type Request struct {
-	PluginID  string         `json:"plugin_id"`
-	SessionID string         `json:"session_id"`
-	Queued    time.Time      `json:"queued"`
-	Nodes     map[int]string `json:"nodes"`
-	Batches   [][]int        `json:"batches"`
-	Prompts   []string       `json:"prompts"`
+	PluginID  string    `json:"plugin_id"`
+	SessionID string    `json:"session_id"`
+	Queued    time.Time `json:"queued"`
+	// Fingerprint is the version of the log the prompts were built from. The
+	// worker stores it beside the summaries it makes: a summary is of one version
+	// of a session, and the readers that ask whether it predates the newest turns
+	// compare against exactly this. Without it every summary the worker wrote
+	// read as older than the session it came from.
+	Fingerprint string         `json:"fingerprint,omitempty"`
+	Nodes       map[int]string `json:"nodes"`
+	Batches     [][]int        `json:"batches"`
+	Prompts     []string       `json:"prompts"`
 	// Attempts and LastTried record failures. Nothing else can: the guard
 	// against regenerating asks the store when a session was last summarized,
 	// and a session that has never succeeded has nothing there — so without

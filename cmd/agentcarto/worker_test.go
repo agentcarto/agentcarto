@@ -117,7 +117,7 @@ func TestARequestQueuedAfterTheLastSummaryIsAnswered(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := summary.Request{
-		PluginID: "claude", SessionID: "grown", Queued: time.Now(),
+		PluginID: "claude", SessionID: "grown", Queued: time.Now(), Fingerprint: "fp1",
 		Nodes: map[int]string{2: "n2"}, Batches: [][]int{{2}}, Prompts: []string{"doc"},
 	}
 	if err := q.Add(r); err != nil {
@@ -134,5 +134,12 @@ func TestARequestQueuedAfterTheLastSummaryIsAnswered(t *testing.T) {
 	}
 	if got := d.Summaries(ctx, s, map[int]string{2: "n2"}); got[2].Text != "新しいターンの要約" {
 		t.Errorf("the new turn was not stored: %q", got[2].Text)
+	}
+	// The version the summary was made from is stored with it. Without this every
+	// summary the worker wrote carried an empty fingerprint, so `show` called it
+	// out of date the moment it was written and worthOpening's cheap "nothing
+	// changed" check never matched — the session was reparsed on every scan.
+	if got := d.Summaries(ctx, s, map[int]string{2: "n2"}); got[2].Fingerprint != "fp1" {
+		t.Errorf("fingerprint=%q, want the version the prompts were built from", got[2].Fingerprint)
 	}
 }
