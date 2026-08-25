@@ -125,11 +125,23 @@ func anyReady(q *summary.Queue) bool {
 
 // pickForSummary chooses which sessions to offer the worker.
 //
-// Newest first, because an older session is one a reader is less likely to come
-// back to. Idle ones only: a session being worked in right now would be
-// summarized and then immediately outgrow it. And no more than the worker will
-// take in one run, so that a first run over a machine's whole history spends a
-// bounded amount rather than everything at once.
+// Oldest first, because a summary is the one thing that outlives the log. Agents
+// rotate their own history away after a month or so, and once a log is gone
+// there is no conversation left to summarize — so the window to summarize an old
+// session is closing, while a new one's is not. Nothing in the cache collects
+// summaries either: Prune and Enforce both leave the summaries table alone, so
+// what is written now is still readable after the session it describes is a
+// title and a date.
+//
+// The newest sessions are not left out in the cold by this. `show` summarizes
+// the session it was asked for on the spot, so the ones being read get theirs at
+// the moment they are read. This background sweep is for the rest, and there the
+// order that matters is which will still be summarizable tomorrow.
+//
+// Idle ones only: a session being worked in right now would be summarized and
+// then immediately outgrow it. And no more than the worker will take in one run,
+// so that a first run over a machine's whole history spends a bounded amount
+// rather than everything at once.
 func pickForSummary(sessions []domain.Session, now time.Time, max int) []domain.Session {
 	var out []domain.Session
 	for _, s := range sessions {
@@ -146,7 +158,7 @@ func pickForSummary(sessions []domain.Session, now time.Time, max int) []domain.
 		}
 		out = append(out, s)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.Before(out[j].UpdatedAt) })
 	if max > 0 && len(out) > max {
 		out = out[:max]
 	}

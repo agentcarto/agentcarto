@@ -14,7 +14,7 @@ import (
 	"github.com/agentcarto/core/domain"
 )
 
-// Choosing wrongly costs money, so the choosing is deliberate: newest first,
+// Choosing wrongly costs money, so the choosing is deliberate: oldest first,
 // nothing still being worked in, and never more than the worker will take.
 func TestPickForSummary(t *testing.T) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
@@ -34,15 +34,17 @@ func TestPickForSummary(t *testing.T) {
 	for _, s := range got {
 		ids = append(ids, s.SessionID)
 	}
-	// just-finished is the most recent of the eligible ones: its last turn is
-	// complete, so there is nothing in flight to pay for twice.
-	want := []string{"just-finished", "newest", "older", "oldest"}
+	// Oldest first: those are the ones whose logs are about to be rotated away,
+	// and a session with no log cannot be summarized at all. just-finished is
+	// eligible despite its age — its last turn is complete, so there is nothing
+	// in flight to pay for twice — but it goes last.
+	want := []string{"oldest", "older", "newest", "just-finished"}
 	if len(ids) != len(want) {
 		t.Fatalf("picked %v, want %v", ids, want)
 	}
 	for i := range want {
 		if ids[i] != want[i] {
-			t.Fatalf("picked %v, want %v (newest first)", ids, want)
+			t.Fatalf("picked %v, want %v (oldest first)", ids, want)
 		}
 	}
 }
@@ -62,10 +64,21 @@ func TestPickForSummaryRespectsTheCap(t *testing.T) {
 	if got := pickForSummary(sessions, now, 20); len(got) != 20 {
 		t.Fatalf("picked %d, want the cap of 20", len(got))
 	}
-	// The cap keeps the newest, since those are the ones a reader comes back to.
+	// The cap keeps the oldest, since those are the ones whose logs go first.
 	got := pickForSummary(sessions, now, 3)
-	if len(got) != 3 || !got[0].UpdatedAt.After(got[2].UpdatedAt) {
-		t.Fatalf("the cap did not keep the newest: %v", got)
+	if len(got) != 3 || !got[0].UpdatedAt.Before(got[2].UpdatedAt) {
+		t.Fatalf("the cap did not keep the oldest: %v", got)
+	}
+	// And they really are the oldest of the fifty, not merely sorted among
+	// themselves: a cap applied before the sort would pass the line above.
+	oldest := sessions[0].UpdatedAt
+	for _, s := range sessions {
+		if s.UpdatedAt.Before(oldest) {
+			oldest = s.UpdatedAt
+		}
+	}
+	if !got[0].UpdatedAt.Equal(oldest) {
+		t.Fatalf("the first pick is %v, not the oldest of the fifty (%v)", got[0].UpdatedAt, oldest)
 	}
 }
 
