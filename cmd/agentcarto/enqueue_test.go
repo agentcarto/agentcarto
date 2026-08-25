@@ -37,11 +37,14 @@ func TestPickForSummary(t *testing.T) {
 	for _, s := range got {
 		ids = append(ids, s.SessionID)
 	}
-	// Oldest first: those are the ones whose logs are about to be rotated away,
-	// and a session with no log cannot be summarized at all. just-finished is
-	// eligible despite its age — its last turn is complete, so there is nothing
-	// in flight to pay for twice — but it goes last.
-	want := []string{"oldest", "older", "newest", "just-finished"}
+	// Oldest first: those are the ones whose logs are about to be rotated away.
+	// just-finished is eligible despite its age — its last turn is complete, so
+	// there is nothing in flight to pay for twice — but it goes last.
+	//
+	// log-gone is in the list. Its log is what is gone, not its conversation: the
+	// cache keeps that, and it is the session with the most to lose. Whether a
+	// copy was actually kept takes a store lookup, which is worthOpening's job.
+	want := []string{"oldest", "older", "log-gone", "newest", "just-finished"}
 	if len(ids) != len(want) {
 		t.Fatalf("picked %v, want %v", ids, want)
 	}
@@ -115,6 +118,42 @@ func TestTheSweepAdvancesPastWhatIsAlreadyDone(t *testing.T) {
 	scanSessions(ctx, a, cfg, d)
 	if got := queued(); len(got) != 2 || got[0] != "s2" || got[1] != "s3" {
 		t.Fatalf("the second run queued %v, want the next two [s2 s3] — the sweep stalled", got)
+	}
+}
+
+// A session whose log is gone can still be summarized, as long as the cache
+// kept its conversation — App.Conversation reads a deleted session back from
+// there, which is what makes `show` work on one. It is also the session with the
+// most to lose: a summary is a kilobyte the cache never evicts, while the
+// conversation it came from is a hundred times that and does get evicted.
+//
+// The one that was never copied is skipped without a parse, since opening it
+// would fail every run and hold a place in the per-run budget while doing so.
+func TestALogDeletedSessionIsSummarizedFromTheCachedConversation(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := domain.Session{PluginID: "claude", SessionID: "kept", Fingerprint: "fp1", LogDeleted: true}
+	lost := domain.Session{PluginID: "claude", SessionID: "lost", Fingerprint: "fp1", LogDeleted: true}
+	conv := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Now(), Events: talk("何を決めたか", "こう決めた")},
+	})
+	if err := d.PutBlob(ctx, kept, app.ConversationArtifactKind, conv); err != nil {
+		t.Fatal(err)
+	}
+	if !worthOpening(ctx, d, q, kept) {
+		t.Error("a deleted session whose conversation was kept was ruled out")
+	}
+	if worthOpening(ctx, d, q, lost) {
+		t.Error("a deleted session with no copy would be opened, and fail, on every run")
 	}
 }
 

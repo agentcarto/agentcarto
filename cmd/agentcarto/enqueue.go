@@ -144,13 +144,13 @@ func anyReady(q *summary.Queue) bool {
 
 // pickForSummary chooses which sessions to offer the worker.
 //
-// Oldest first, because a summary is the one thing that outlives the log. Agents
-// rotate their own history away after a month or so, and once a log is gone
-// there is no conversation left to summarize — so the window to summarize an old
-// session is closing, while a new one's is not. Nothing in the cache collects
-// summaries either: Prune and Enforce both leave the summaries table alone, so
-// what is written now is still readable after the session it describes is a
-// title and a date.
+// Oldest first, because a summary is the one thing that outlives everything it
+// was made from. Agents rotate their own history away after a month or so; the
+// cache keeps a copy of the conversation, but Enforce evicts those when it is
+// over its size and Prune drops what is left after max_age. Nothing collects
+// summaries — neither of those touches the table — and a summary is a kilobyte
+// against a conversation of a hundred times that. So an old session is the one
+// closer to having nothing left to summarize from, and it goes first.
 //
 // The newest sessions are not left out in the cold by this. `show` summarizes
 // the session it was asked for on the spot, so the ones being read get theirs at
@@ -173,9 +173,16 @@ func anyReady(q *summary.Queue) bool {
 func pickForSummary(sessions []domain.Session, now time.Time) []domain.Session {
 	var out []domain.Session
 	for _, s := range sessions {
-		if s.LogDeleted || s.EmptyFork {
-			continue // nothing to read, or nothing that was ever continued
+		if s.EmptyFork {
+			continue // nothing that was ever continued
 		}
+		// A session whose log is gone is not excluded here. The cache keeps the
+		// conversation, and App.Conversation reads a deleted session back from it,
+		// so such a session can still be summarized — and it is the one with the
+		// most to lose, since a summary is a kilobyte the cache never evicts while
+		// the conversation it came from is a hundred times that and does get
+		// evicted. Whether a copy was in fact kept is worthOpening's question: it
+		// takes a row lookup, and this function does not read the store.
 		if s.Status != "" {
 			continue // an agent is working in it right now
 		}
@@ -200,6 +207,12 @@ func pickForSummary(sessions []domain.Session, now time.Time) []domain.Session {
 func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.Session) bool {
 	if _, queued := q.Find(s.PluginID, s.SessionID); queued {
 		return false // already waiting; the request holds the prompt already
+	}
+	// The log is gone, so the cached conversation is the only thing left to read.
+	// HasArtifact asks the same question App.Conversation will — same session,
+	// same fingerprint, same parser version — without reading the bytes.
+	if s.LogDeleted && !db.HasArtifact(ctx, s, app.ConversationArtifactKind) {
+		return false
 	}
 	// Turn 0 carries the fingerprint the session's summaries were made from, and
 	// comes back without needing the turns (it is the one row not matched on a
