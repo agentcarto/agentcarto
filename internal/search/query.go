@@ -137,3 +137,8 @@ func metaText(s domain.Session) string {
 // MatchesMetadata reports whether the query is answered by the session's own
 // fields rather than by anything that was said in it.
 func MatchesMetadata(s domain.Session, q Query) bool { return q.matches(metaText(s)) }
+
+// MatchesText reports whether the query is answered by this text. It is for text
+// the index does not hold — a session's generated summaries — where the caller
+// has the string in hand and only needs the same matching rules applied to it.
+func (q Query) MatchesText(s string) bool { return q.matches(fold(s)) }

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,5 +223,47 @@ func TestSummarizedAt(t *testing.T) {
 	// Another session's rows do not count.
 	if _, ok := d.SummarizedAt(ctx, domain.Session{PluginID: "p", SessionID: "other"}); ok {
 		t.Error("a different session reports a time")
+	}
+}
+
+// A search asks "could this query be in this session's summaries" of everything
+// on the machine, so it is answered for every session in one query rather than
+// one lookup each. Blank rows — the store's record that a session renders to no
+// document — are not text and do not come back.
+func TestSummaryTexts(t *testing.T) {
+	ctx := context.Background()
+	d := openTemp(t)
+	one := domain.Session{PluginID: "claude", SessionID: "s1", Fingerprint: "fp1"}
+	two := domain.Session{PluginID: "codex", SessionID: "s2", Fingerprint: "fp1"}
+	blank := domain.Session{PluginID: "claude", SessionID: "s3", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, one, []Summary{
+		{Turn: 0, Text: "セッション全体"},
+		{Turn: 1, NodeID: "n1", Text: "パレット生成"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.PutSummaries(ctx, two, []Summary{{Turn: 0, Text: "べつの話"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.PutSummaries(ctx, blank, []Summary{{Turn: 0}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := d.SummaryTexts(ctx)
+	if len(got) != 2 {
+		t.Fatalf("got %d sessions, want the two that hold text: %v", len(got), got)
+	}
+	// Every summary of a session is in one string: what a match is in only
+	// matters once the session has been chosen.
+	text := got[one.Key()]
+	if !strings.Contains(text, "セッション全体") || !strings.Contains(text, "パレット生成") {
+		t.Errorf("a session's summaries are not all searchable: %q", text)
+	}
+	if _, ok := got[blank.Key()]; ok {
+		t.Error("a blank record came back as searchable text")
+	}
+	// Sessions of different plugins that share an id stay apart.
+	if got[two.Key()] != "べつの話" {
+		t.Errorf("codex/s2 = %q", got[two.Key()])
 	}
 }

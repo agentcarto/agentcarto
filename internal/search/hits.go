@@ -117,6 +117,12 @@ func Hits(c domain.Conversation, turns []transcript.Turn, q Query, o HitOptions)
 	return hits, sum
 }
 
+// runesBefore and runeLen count runes in a folded string, which is what snippet
+// takes: folding maps one rune to one rune, so a rune offset into the folded
+// form is a rune offset into the original — which a byte offset is not.
+func runesBefore(folded string, at int) int { return utf8.RuneCountInString(folded[:at]) }
+func runeLen(s string) int                  { return utf8.RuneCountInString(s) }
+
 // snippet cuts the text around a match down to one line: the match plus ctx
 // runes on either side, with the line breaks folded away so a hit occupies one
 // line of output. An ellipsis marks each end that was cut.

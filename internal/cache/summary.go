@@ -121,6 +121,40 @@ func (d *DB) Summaries(ctx context.Context, s domain.Session, nodeByTurn map[int
 	return out
 }
 
+// SummaryTexts returns, for every session that has any, all of its summary text
+// joined into one string.
+//
+// It answers one question — could this query be in this session's summaries —
+// for every session at once, because a search asks it of everything on the
+// machine and one row lookup each would be a query per session. The text is not
+// keyed by turn: what turn a match is in only matters once a session has been
+// chosen, and Summaries answers that for the one session, with the node checks
+// this cannot do.
+func (d *DB) SummaryTexts(ctx context.Context) map[domain.SessionKey]string {
+	rows, e := d.db.QueryContext(ctx, "SELECT plugin_id,session_id,summary FROM summaries WHERE summary <> ''")
+	if e != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[domain.SessionKey]string{}
+	for rows.Next() {
+		var k domain.SessionKey
+		var text string
+		if rows.Scan(&k.PluginID, &k.SessionID, &text) != nil {
+			return nil
+		}
+		if prev := out[k]; prev != "" {
+			out[k] = prev + "\n" + text
+		} else {
+			out[k] = text
+		}
+	}
+	if rows.Err() != nil {
+		return nil
+	}
+	return out
+}
+
 // DropSummaries removes every summary of one session. It is for the reader who
 // wants a session summarized again from scratch — with a better model, or after
 // the prompt changed — since PutSummaries alone would leave the turns that are
