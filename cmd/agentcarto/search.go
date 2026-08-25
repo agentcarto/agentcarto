@@ -17,6 +17,7 @@ import (
 	"github.com/agentcarto/agentcarto/internal/cache"
 	"github.com/agentcarto/agentcarto/internal/config"
 	"github.com/agentcarto/agentcarto/internal/search"
+	"github.com/agentcarto/agentcarto/internal/summary"
 	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 )
@@ -53,10 +54,15 @@ type searchSession struct {
 	StartedAt time.Time `json:"started_at,omitzero"`
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
 	Source    string    `json:"source"`
-	// Match is "content" when the query was found in the conversation, "metadata"
-	// when only the title, path, agent or id matched — a session with no hits is
-	// then explained rather than looking like a bug — and "unknown" when the
-	// conversation could not be read, which Error then describes.
+	// Match is "content" when the query was found in the conversation, "summary"
+	// when it was found only in the generated summaries (the session said it in
+	// other words, or can no longer be read at all), "metadata" when only the
+	// title, path, agent or id matched — a session with no hits is then explained
+	// rather than looking like a bug — and "unknown" when the conversation could
+	// not be read and there was no summary either, which Error then describes.
+	//
+	// In a "summary" row the hits are generated text, not what was said. Turn 0
+	// is the session's own summary rather than a turn.
 	Match string       `json:"match"`
 	Hits  []search.Hit `json:"hits"`
 	// TotalHits is how many events the query was found in, of which Hits shows at
@@ -150,11 +156,33 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 		// Drop a previous generation of the index, which nothing else collects.
 		_ = db.DropSupersededArtifacts(ctx, app.SearchArtifactKind, app.ConversationArtifactKind)
 	}
+	// Generated summaries are searched beside the index, not inside it. The index
+	// is cached against a session's fingerprint, and summaries arrive afterwards
+	// and independently — folded in, they would be missing from every index built
+	// before them and dropped from every one rebuilt after the log grew.
+	//
+	// This is the only text a session that has lost both its log and its cached
+	// conversation still has. Without it such a session is findable by its title
+	// and working directory alone.
+	summaryText := map[domain.SessionKey]string{}
+	if db != nil {
+		summaryText = db.SummaryTexts(ctx)
+	}
 	var matched []domain.Session
+	bySummary := map[domain.SessionKey]bool{}
 	for _, s := range sessions {
-		if idx.Match(s, q) {
-			matched = append(matched, s)
+		inIndex := idx.Match(s, q)
+		// The empty string is not a session with no summaries saying nothing — it
+		// is a session with no summaries. A pattern that matches empty text would
+		// otherwise pull in every one of them.
+		text := summaryText[s.Key()]
+		if !inIndex && (text == "" || !q.MatchesText(text)) {
+			continue
 		}
+		if !inIndex {
+			bySummary[s.Key()] = true
+		}
+		matched = append(matched, s)
 	}
 	// Relevance decides the order, and the clock only separates sessions the query
 	// cannot tell apart. The session worth opening is the one that keeps coming
@@ -181,7 +209,22 @@ func searchCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB,
 	// The margin also absorbs the sessions dropped below, so a search still answers
 	// with as many sessions as it was asked for.
 	for _, s := range matched[:openCount(len(matched), *limit)] {
-		row := sessionHits(ctx, a, s, q, *perSession, *width)
+		row := sessionHits(ctx, a, db, s, q, *perSession, *width)
+		if bySummary[s.Key()] && len(row.Hits) == 0 {
+			// Nothing but the summaries put this session here, and opening it
+			// produced nothing to point at. The text was matched as one run, so an
+			// anchored pattern can match it and no single summary; and a summary of
+			// a turn the session has since rewound past is withheld rather than
+			// shown against whatever turn now carries that number.
+			//
+			// The test is on the hits and not on the kind of match: a query of
+			// several words is answered by the index only when every one of them is
+			// somewhere in the session, while a single event needs just one — so a
+			// session found through its summaries can still turn out to say part of
+			// it outright, and that is a content match worth showing.
+			result.Matched--
+			continue
+		}
 		if row.Match == "metadata" && q.IsRegexp() && !search.MatchesMetadata(s, q) {
 			// The index holds a session's text as one run, so an anchored pattern
 			// can match it there and nowhere in a single message. Such a session
@@ -274,7 +317,16 @@ func printSearchTable(w io.Writer, r searchResult, snippet int) {
 			if snippet > 0 {
 				text = short(text, snippet)
 			}
-			fmt.Fprintf(w, "  t%-4d %-10s %s\n", h.Turn, h.Kind, text)
+			turn, kind := fmt.Sprintf("t%d", h.Turn), string(h.Kind)
+			if s.Match == "summary" {
+				// The kind column says the line is generated rather than something
+				// that was said, since nothing else on the row would.
+				kind = "summary"
+				if h.Turn == 0 {
+					turn = "whole" // the session's own summary, not a turn
+				}
+			}
+			fmt.Fprintf(w, "  %-5s %-10s %s\n", turn, kind, text)
 		}
 		if s.Error != "" {
 			fmt.Fprintf(w, "  %s\n", s.Error)
@@ -389,7 +441,7 @@ func topDirs(byDir map[string]int, searched string, max int) string {
 // sessionHits opens one session and locates the query inside it. A session that
 // matched on its title or path alone has no hits to show, which the Match field
 // spells out.
-func sessionHits(ctx context.Context, a *app.App, s domain.Session, q search.Query, max, width int) searchSession {
+func sessionHits(ctx context.Context, a *app.App, db *cache.DB, s domain.Session, q search.Query, max, width int) searchSession {
 	row := searchSession{
 		SessionID: s.SessionID, PluginID: s.PluginID, AgentType: s.AgentType,
 		Title: s.Title, CWD: s.CWD, StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
@@ -398,6 +450,15 @@ func sessionHits(ctx context.Context, a *app.App, s domain.Session, q search.Que
 	}
 	conv, err := a.Conversation(ctx, s)
 	if err != nil || conv == nil {
+		// The conversation is gone, so the generated summaries are all that is
+		// left to point at — and a session in this state is the one they were
+		// worth keeping for. Turn numbers are positions along a branch and there
+		// is no branch here to check them against, so only the session summary is
+		// asked for: Summaries withholds every turn the caller cannot vouch for.
+		if hits, total := summaryHits(ctx, db, s, nil, q, max, width); total > 0 {
+			row.Match, row.Hits, row.TotalHits = "summary", hits, total
+			return row
+		}
 		// The index matched, but without the conversation there is no telling
 		// whether it matched the text or the metadata. Say so rather than pick one.
 		row.Match = "unknown"
@@ -408,17 +469,40 @@ func sessionHits(ctx context.Context, a *app.App, s domain.Session, q search.Que
 		}
 		return row
 	}
-	hits, sum := search.Hits(*conv, transcript.Turns(*conv, conv.ActivePath()), q,
-		search.HitOptions{Max: max, Context: width})
+	turns := transcript.Turns(*conv, conv.ActivePath())
+	hits, sum := search.Hits(*conv, turns, q, search.HitOptions{Max: max, Context: width})
 	if sum.Total > 0 {
 		row.Match = "content"
 		row.Hits = hits
 		row.TotalHits = sum.Total
+	} else if hits, total := summaryHits(ctx, db, s, summary.NodesByTurn(turns), q, max, width); total > 0 {
+		// Only when the session itself says nothing. A summary is a paraphrase,
+		// and a session that says the thing outright is the better answer — this
+		// is for the one that does not, or can no longer be read.
+		row.Match, row.Hits, row.TotalHits = "summary", hits, total
 	}
 	// A search for agentcarto itself is asking for these sessions, so it is not
 	// told there are none.
 	row.meta = sum.OnlyRanAgentcarto() && !search.IsSelfQuery(q)
 	return row
+}
+
+// summaryHits looks for the query in a session's generated summaries. nodeByTurn
+// names the turns the caller can vouch for; passing nil asks for the session
+// summary alone.
+func summaryHits(ctx context.Context, db *cache.DB, s domain.Session, nodeByTurn map[int]string, q search.Query, max, width int) ([]search.Hit, int) {
+	if db == nil {
+		return nil, 0
+	}
+	stored := db.Summaries(ctx, s, nodeByTurn)
+	if len(stored) == 0 {
+		return nil, 0
+	}
+	texts := make(map[int]string, len(stored))
+	for n, sum := range stored {
+		texts[n] = sum.Text
+	}
+	return search.SummaryHits(texts, q, search.HitOptions{Max: max, Context: width})
 }
 
 // parseFlags parses args in which flags and positional arguments are mixed,
