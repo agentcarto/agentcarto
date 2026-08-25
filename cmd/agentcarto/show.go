@@ -125,6 +125,12 @@ func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns 
 	out := make(map[int]string, len(stored))
 	model := ""
 	for n, sum := range stored {
+		if strings.TrimSpace(sum.Text) == "" {
+			// A blank row is the store's record that this session renders to no
+			// document, not a summary. Keeping it out here is what lets the rest
+			// of show treat "no summaries" as one thing.
+			continue
+		}
 		out[n] = sum.Text
 		if sum.Model != "" {
 			// They are normally all from one run; naming any of them is enough

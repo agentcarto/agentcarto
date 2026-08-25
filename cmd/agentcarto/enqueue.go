@@ -62,8 +62,22 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	if err != nil {
 		return
 	}
-	for _, s := range pickForSummary(sessions, time.Now(), cfg.Summary.MaxPerRun) {
+	// The budget is spent on sessions this run actually opens, and the sessions
+	// it can rule out without opening do not count against it. Capping the
+	// candidate list first — before knowing which of them are already done —
+	// stops the sweep dead: with the list in a fixed order, once the first
+	// max_per_run of them are summarized every later run picks the same ones,
+	// queues nothing, and never reaches the rest.
+	opened := 0
+	for _, s := range pickForSummary(sessions, time.Now()) {
+		if !worthOpening(ctx, db, q, s) {
+			continue
+		}
+		if opened >= cfg.Summary.MaxPerRun {
+			break
+		}
 		queueOne(ctx, a, db, q, s)
+		opened++
 	}
 }
 
@@ -139,10 +153,19 @@ func anyReady(q *summary.Queue) bool {
 // order that matters is which will still be summarizable tomorrow.
 //
 // Idle ones only: a session being worked in right now would be summarized and
-// then immediately outgrow it. And no more than the worker will take in one run,
-// so that a first run over a machine's whole history spends a bounded amount
-// rather than everything at once.
-func pickForSummary(sessions []domain.Session, now time.Time, max int) []domain.Session {
+// then immediately outgrow it.
+//
+// The per-run budget is not applied here. What it has to bound is the number of
+// sessions a run opens, and whether a session needs opening is not known until
+// the cheap checks in worthOpening have been made — see EnqueueSummaries.
+//
+// One limit worth naming: Status is only filled in by DetectActive, which only
+// `active` runs. From the command line every session therefore looks idle, so a
+// session someone is sitting in with its last turn complete is queued like any
+// other and its session summary is remade after the next prompt. The `tooSoon`
+// guard holds that to once an hour, which is the price of not making every
+// completed turn wait out settleBefore.
+func pickForSummary(sessions []domain.Session, now time.Time) []domain.Session {
 	var out []domain.Session
 	for _, s := range sessions {
 		if s.LogDeleted || s.EmptyFork {
@@ -159,10 +182,30 @@ func pickForSummary(sessions []domain.Session, now time.Time, max int) []domain.
 		out = append(out, s)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.Before(out[j].UpdatedAt) })
-	if max > 0 && len(out) > max {
-		out = out[:max]
-	}
 	return out
+}
+
+// worthOpening answers, without opening the session, whether summarizing it
+// could add anything.
+//
+// Deciding it properly takes the conversation, and a scan runs on every command
+// and every few seconds in the TUI — so the sessions that plainly need nothing
+// have to be recognized without a parse, or that answer costs a parse of
+// everything on the machine every time.
+func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.Session) bool {
+	if _, queued := q.Find(s.PluginID, s.SessionID); queued {
+		return false // already waiting; the request holds the prompt already
+	}
+	// Turn 0 carries the fingerprint the session's summaries were made from, and
+	// comes back without needing the turns (it is the one row not matched on a
+	// node). Same fingerprint means the log has not moved since, so there is
+	// nothing new to summarize.
+	if stored := db.Summaries(ctx, s, nil); len(stored) > 0 {
+		if sum, ok := stored[0]; ok && sum.Fingerprint == s.Fingerprint {
+			return false
+		}
+	}
+	return true
 }
 
 // queueOne writes the request for one session, and reports whether it did.
@@ -171,30 +214,19 @@ func pickForSummary(sessions []domain.Session, now time.Time, max int) []domain.
 // to launch plugins of its own, and the two could disagree about what the turns
 // are.
 func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s domain.Session) bool {
-	// Both checks below exist to avoid parsing. Deciding whether a session needs
-	// summarizing takes its conversation, and a scan runs every few seconds — so
-	// the sessions that plainly need nothing have to be recognized without it,
-	// or the answer costs a parse of everything on the machine every few
-	// seconds.
-	if _, queued := q.Find(s.PluginID, s.SessionID); queued {
-		return false // already waiting; the request holds the prompt already
-	}
-	// Turn 0 carries the fingerprint its summaries were made from, and comes
-	// back without needing the turns (it is the one row not matched on a node).
-	// Same fingerprint means the log has not moved since, so there is nothing
-	// new to summarize.
-	if stored := db.Summaries(ctx, s, nil); len(stored) > 0 {
-		if sum, ok := stored[0]; ok && sum.Fingerprint == s.Fingerprint {
-			return false
-		}
+	if !worthOpening(ctx, db, q, s) {
+		return false
 	}
 	conv, err := a.Conversation(ctx, s)
 	if err != nil || conv == nil {
+		// A plugin that is down reads the same way as a session with nothing in
+		// it, so this one is not recorded: it is the answer that might be
+		// different tomorrow.
 		return false
 	}
 	turns := transcript.Turns(*conv, conv.ActivePath())
 	if len(turns) == 0 {
-		return false
+		return markNothingToSummarize(ctx, db, s)
 	}
 	nodes := summary.NodesByTurn(turns)
 	want := pendingTurns(turns, db.Summaries(ctx, s, nodes))
@@ -202,12 +234,6 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 		return false
 	}
 	r := summary.Request{PluginID: s.PluginID, SessionID: s.SessionID, Queued: time.Now(), Nodes: nodes}
-	// Queueing a session again must not clear the record of it having failed;
-	// otherwise every scan would reset the backoff and the retries would be
-	// continuous after all.
-	if prev, ok := q.Find(s.PluginID, s.SessionID); ok {
-		r.Attempts, r.LastTried = prev.Attempts, prev.LastTried
-	}
 	for _, batch := range summary.Batch(*conv, turns, want, s.CWD) {
 		doc, asked := summary.Prompt(s, *conv, turns, summary.Options{Turns: summary.TurnSet(batch)})
 		if len(asked) == 0 {
@@ -217,9 +243,26 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 		r.Prompts = append(r.Prompts, doc)
 	}
 	if len(r.Prompts) == 0 {
-		return false
+		return markNothingToSummarize(ctx, db, s)
 	}
 	return q.Add(r) == nil
+}
+
+// markNothingToSummarize records that this session, as it stands, renders to no
+// document — it holds only commands, or injected messages, or no turns at all.
+// It always reports false: nothing was queued.
+//
+// Without the record such a session is opened again on every run, since the only
+// cheap way to recognize a session as done is the fingerprint on turn 0. It
+// would also hold a place in the per-run budget forever, and enough of them at
+// the old end of the list would stop the sweep from ever reaching the rest.
+//
+// The row carries no text, which is what makes it invisible: every reader tests
+// a summary for content before printing it, so a blank one shows nowhere. If the
+// log grows the fingerprint no longer matches and the session is reconsidered.
+func markNothingToSummarize(ctx context.Context, db *cache.DB, s domain.Session) bool {
+	_ = db.PutSummaries(ctx, s, []cache.Summary{{Turn: 0}})
+	return false
 }
 
 // summarizeForShow makes the summaries for a session someone just asked to see,

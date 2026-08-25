@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -14,8 +16,9 @@ import (
 	"github.com/agentcarto/core/domain"
 )
 
-// Choosing wrongly costs money, so the choosing is deliberate: oldest first,
-// nothing still being worked in, and never more than the worker will take.
+// Choosing wrongly costs money, so the choosing is deliberate: oldest first and
+// nothing still being worked in. The per-run budget is not applied here — see
+// TestTheSweepAdvancesPastWhatIsAlreadyDone.
 func TestPickForSummary(t *testing.T) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
@@ -29,7 +32,7 @@ func TestPickForSummary(t *testing.T) {
 		{SessionID: "log-gone", UpdatedAt: ago(2 * time.Hour), LogDeleted: true},
 		{SessionID: "empty-fork", UpdatedAt: ago(2 * time.Hour), EmptyFork: true},
 	}
-	got := pickForSummary(sessions, now, 0)
+	got := pickForSummary(sessions, now)
 	var ids []string
 	for _, s := range got {
 		ids = append(ids, s.SessionID)
@@ -50,35 +53,112 @@ func TestPickForSummary(t *testing.T) {
 }
 
 // A first run over a whole machine must spend a bounded amount, not everything
-// at once. The cap is the same one the worker stops at, so nothing is queued
-// that will only sit there.
-func TestPickForSummaryRespectsTheCap(t *testing.T) {
-	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	var sessions []domain.Session
-	for i := range 50 {
-		sessions = append(sessions, domain.Session{
-			SessionID: string(rune('a' + i%26)),
-			UpdatedAt: now.Add(-time.Duration(i+1) * time.Hour),
-		})
+// at once — and every later run has to reach further than the last, or the
+// backfill never finishes.
+//
+// The order is fixed (oldest first), so a budget applied to the candidate list
+// before knowing which of them are already summarized picks the same sessions
+// forever: the first max_per_run of them are done, nothing is queued, and the
+// rest are never reached. The budget therefore counts the sessions a run opens.
+func TestTheSweepAdvancesPastWhatIsAlreadyDone(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := pickForSummary(sessions, now, 20); len(got) != 20 {
-		t.Fatalf("picked %d, want the cap of 20", len(got))
+	defer d.Close()
+	a, cfg := settledAppN(6)
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 2
+
+	queued := func() []string {
+		t.Helper()
+		q, err := summary.OpenQueue(queueDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		reqs, _ := q.List()
+		var ids []string
+		for _, r := range reqs {
+			ids = append(ids, r.SessionID)
+		}
+		sort.Strings(ids)
+		return ids
 	}
-	// The cap keeps the oldest, since those are the ones whose logs go first.
-	got := pickForSummary(sessions, now, 3)
-	if len(got) != 3 || !got[0].UpdatedAt.Before(got[2].UpdatedAt) {
-		t.Fatalf("the cap did not keep the oldest: %v", got)
+	// The fixture's sessions are s0 (newest) … s5 (oldest), so the oldest two are
+	// s5 and s4.
+	sessions := scanSessions(ctx, a, cfg, d)
+	if got := queued(); len(got) != 2 || got[0] != "s4" || got[1] != "s5" {
+		t.Fatalf("the first run queued %v, want the oldest two [s4 s5]", got)
 	}
-	// And they really are the oldest of the fifty, not merely sorted among
-	// themselves: a cap applied before the sort would pass the line above.
-	oldest := sessions[0].UpdatedAt
-	for _, s := range sessions {
-		if s.UpdatedAt.Before(oldest) {
-			oldest = s.UpdatedAt
+	// They are summarized and leave the queue, as a worker would leave them.
+	for _, id := range []string{"s4", "s5"} {
+		s := domain.Session{PluginID: "claude", SessionID: id}
+		for _, x := range sessions {
+			if x.SessionID == id {
+				s = x
+			}
+		}
+		if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "done"}}); err != nil {
+			t.Fatal(err)
+		}
+		q, _ := summary.OpenQueue(queueDir())
+		r, ok := q.Find("claude", id)
+		if !ok {
+			t.Fatalf("%s is not in the queue", id)
+		}
+		if err := q.Done(r); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !got[0].UpdatedAt.Equal(oldest) {
-		t.Fatalf("the first pick is %v, not the oldest of the fifty (%v)", got[0].UpdatedAt, oldest)
+	// The next run must reach the two after them, not pick s4 and s5 again.
+	scanSessions(ctx, a, cfg, d)
+	if got := queued(); len(got) != 2 || got[0] != "s2" || got[1] != "s3" {
+		t.Fatalf("the second run queued %v, want the next two [s2 s3] — the sweep stalled", got)
+	}
+}
+
+// A session that renders to no document at all — one holding only commands, or
+// no turns — is remembered as such. Without that it is opened again on every
+// run and holds a place in the per-run budget forever, which at the old end of
+// the list stops the sweep as surely as the bug above.
+func TestASessionWithNothingToSummarizeIsNotOpenedTwice(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	now := time.Now()
+	s := domain.Session{
+		PluginID: "claude", AgentType: "claude", SessionID: "empty", Fingerprint: "fp1",
+		UpdatedAt: now.Add(-time.Hour), LastKind: domain.EventTurnComplete,
+		SourceRef: domain.SessionRef{Source: "/logs/empty.jsonl"},
+	}
+	a, _ := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{
+		"/logs/empty.jsonl": domain.NewConversation(nil),
+	})
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queueOne(ctx, a, d, q, s) {
+		t.Fatal("a session with no turns was queued")
+	}
+	if worthOpening(ctx, d, q, s) {
+		t.Error("the session would be opened again on the next run")
+	}
+	// The record must not show up as a summary: it has no text, and every reader
+	// tests for that before printing.
+	if sums, model := storedSummaries(ctx, d, s, nil); len(sums) != 0 || model != "" {
+		t.Errorf("the blank record reads back as a summary: %v %q", sums, model)
+	}
+	// A log that grew is reconsidered: the fingerprint no longer matches.
+	grown := s
+	grown.Fingerprint = "fp2"
+	if !worthOpening(ctx, d, q, grown) {
+		t.Error("a session that grew was still treated as having nothing to summarize")
 	}
 }
 
@@ -94,26 +174,26 @@ func TestPickForSummarySkipsWhatIsStillMoving(t *testing.T) {
 		{SessionID: "seconds-ago", UpdatedAt: now.Add(-time.Second), LastKind: domain.EventStream},
 		{SessionID: "just-inside", UpdatedAt: now.Add(-settleBefore + time.Second), LastKind: domain.EventToolCall},
 	} {
-		if got := pickForSummary([]domain.Session{s}, now, 0); len(got) != 0 {
+		if got := pickForSummary([]domain.Session{s}, now); len(got) != 0 {
 			t.Errorf("%s was picked", s.SessionID)
 		}
 	}
 	// Once it has settled, it is picked even mid-turn: at that age the turn was
 	// abandoned rather than being written.
 	s := domain.Session{SessionID: "settled", UpdatedAt: now.Add(-settleBefore - time.Second), LastKind: domain.EventStream}
-	if got := pickForSummary([]domain.Session{s}, now, 0); len(got) != 1 {
+	if got := pickForSummary([]domain.Session{s}, now); len(got) != 1 {
 		t.Error("a settled session was not picked")
 	}
 	// A finished turn waits for nothing. Most sessions on a machine are in this
 	// state, so making them wait ten minutes delayed nearly everything.
 	fresh := domain.Session{SessionID: "finished", UpdatedAt: now.Add(-time.Second), LastKind: domain.EventTurnComplete}
-	if got := pickForSummary([]domain.Session{fresh}, now, 0); len(got) != 1 {
+	if got := pickForSummary([]domain.Session{fresh}, now); len(got) != 1 {
 		t.Error("a session whose last turn completed was made to wait")
 	}
 }
 
 func TestPickForSummaryOnNothing(t *testing.T) {
-	if got := pickForSummary(nil, time.Now(), 20); len(got) != 0 {
+	if got := pickForSummary(nil, time.Now()); len(got) != 0 {
 		t.Errorf("picked %v from no sessions", got)
 	}
 }
@@ -228,26 +308,29 @@ func TestAnyReady(t *testing.T) {
 	}
 }
 
-// settledApp serves two sessions whose last turn is complete, so that neither
-// is held back by settleBefore and what a test sees is the queueing itself.
-func settledApp() (*app.App, config.Config) {
+// settledAppN serves n sessions whose last turn is complete, so that none is
+// held back by settleBefore and what a test sees is the queueing itself. They
+// are named s0 (newest) through s<n-1> (oldest), one hour apart.
+func settledAppN(n int) (*app.App, config.Config) {
 	now := time.Now()
-	sessions := []domain.Session{
-		{PluginID: "claude", AgentType: "claude", SessionID: "aaaa1111", CWD: "/repo/app", Title: "一つ目",
-			UpdatedAt: now, LastKind: domain.EventTurnComplete, SourceRef: domain.SessionRef{Source: "/logs/a.jsonl"}},
-		{PluginID: "claude", AgentType: "claude", SessionID: "bbbb3333", CWD: "/repo/app", Title: "二つ目",
-			UpdatedAt: now.Add(-48 * time.Hour), LastKind: domain.EventTurnComplete, SourceRef: domain.SessionRef{Source: "/logs/b.jsonl"}},
-	}
-	convs := map[string]domain.Conversation{
-		"/logs/a.jsonl": domain.NewConversation([]domain.ConvNode{
-			{ID: "u1", Timestamp: now, Events: talk("一つ目の質問", "一つ目の答え")},
-		}),
-		"/logs/b.jsonl": domain.NewConversation([]domain.ConvNode{
-			{ID: "u1", Timestamp: now, Events: talk("二つ目の質問", "二つ目の答え")},
-		}),
+	var sessions []domain.Session
+	convs := map[string]domain.Conversation{}
+	for i := range n {
+		id := fmt.Sprintf("s%d", i)
+		src := "/logs/" + id + ".jsonl"
+		sessions = append(sessions, domain.Session{
+			PluginID: "claude", AgentType: "claude", SessionID: id, CWD: "/repo/app", Title: id,
+			UpdatedAt: now.Add(-time.Duration(i+1) * time.Hour), LastKind: domain.EventTurnComplete,
+			SourceRef: domain.SessionRef{Source: src},
+		})
+		convs[src] = domain.NewConversation([]domain.ConvNode{
+			{ID: "u1", Timestamp: now, Events: talk(id+" の質問", id+" の答え")},
+		})
 	}
 	return fixtureApp(sessions, convs)
 }
+
+func settledApp() (*app.App, config.Config) { return settledAppN(2) }
 
 // summaryFixture points the queue, the lock and the log at a directory of the
 // test's own, and stops a worker from actually being spawned — under `go test`
