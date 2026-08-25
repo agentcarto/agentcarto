@@ -165,11 +165,18 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 	// The session summary that came back describes only the turns that call saw.
 	// That is the whole session when one call asked about all of it, and a
 	// fragment otherwise — a split session, or an incremental run that asked
-	// about the two turns which had grown since last time. Whenever the store
-	// holds more than was asked about, the summary is made again from the turn
-	// summaries: all of them, for a fraction of what rereading the session costs.
+	// about the two turns which had grown since last time. In both of those the
+	// summary is made again from the turn summaries: all of them, for a fraction
+	// of what rereading the session costs.
+	//
+	// Two conditions, because either alone misses a case. A run split across
+	// calls asked about every turn there is — so the store holds no more than it
+	// asked about — and yet no single call saw the session; --force on a long
+	// session is exactly that, and its last batch's answer would otherwise be
+	// stored as the session summary. An incremental run asked about fewer turns
+	// than the store holds.
 	stored := db.Summaries(ctx, s, nodes)
-	if len(stored) > len(asked)+1 { // +1: turn 0 is in the store but never asked about
+	if len(batches) > 1 || len(stored) > len(asked)+1 { // +1: turn 0 is in the store but never asked about
 		whole := map[int]string{}
 		for n, sum := range stored {
 			if n != 0 {
