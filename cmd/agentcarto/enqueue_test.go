@@ -246,6 +246,9 @@ func TestPickForSummarySkipsWhatIsStillMoving(t *testing.T) {
 	for _, s := range []domain.Session{
 		// Running: an agent is in it right now, whatever the log says.
 		{SessionID: "running", UpdatedAt: now.Add(-time.Hour), Status: domain.StatusRunning, LastKind: domain.EventTurnComplete},
+		// Other: attached, and what it is doing is not one of the states that can be
+		// read as finished. Not knowing is a reason to leave it alone.
+		{SessionID: "other", UpdatedAt: now.Add(-time.Hour), Status: domain.StatusOther, LastKind: domain.EventUser},
 		// Mid-turn and recent: the turn being written would change under the
 		// summary, and the store would withhold what was paid for.
 		{SessionID: "seconds-ago", UpdatedAt: now.Add(-time.Second), LastKind: domain.EventStream},
@@ -266,6 +269,13 @@ func TestPickForSummarySkipsWhatIsStillMoving(t *testing.T) {
 	fresh := domain.Session{SessionID: "finished", UpdatedAt: now.Add(-time.Second), LastKind: domain.EventTurnComplete}
 	if got := pickForSummary([]domain.Session{fresh}, now); len(got) != 1 {
 		t.Error("a session whose last turn completed was made to wait")
+	}
+	// Open, and waiting for a prompt. Holding these back would exclude the
+	// sessions being worked in today — the ones a reader is most likely to want —
+	// and only in the TUI, since a plain command never fills Status in at all.
+	ready := domain.Session{SessionID: "ready", UpdatedAt: now.Add(-time.Second), Status: domain.StatusReady, LastKind: domain.EventTurnComplete}
+	if got := pickForSummary([]domain.Session{ready}, now); len(got) != 1 {
+		t.Error("an open session sitting at a completed turn was not picked")
 	}
 }
 

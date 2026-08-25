@@ -200,19 +200,24 @@ func anyReady(q *summary.Queue) bool {
 // EnqueueSummaries reads this list from both ends, not just the old one. What
 // the order gives it is which end is which; see the split there.
 //
-// Idle ones only: a session being worked in right now would be summarized and
-// then immediately outgrow it.
+// Idle ones only — where idle means nothing is being written, not that nobody
+// is attached. A session someone has open whose last turn is complete
+// (StatusReady) is taken like any other: there is nothing in flight, so the
+// summary is not paid for twice. What is skipped is a session actually mid-turn,
+// which would be summarized and then immediately outgrow it.
 //
 // The per-run budget is not applied here. What it has to bound is the number of
 // sessions a run opens, and whether a session needs opening is not known until
 // the cheap checks in worthOpening have been made — see EnqueueSummaries.
 //
-// One limit worth naming: Status is only filled in by DetectActive, which only
-// `active` runs. From the command line every session therefore looks idle, so a
-// session someone is sitting in with its last turn complete is queued like any
-// other and its session summary is remade after the next prompt. The `tooSoon`
-// guard holds that to once an hour, which is the price of not making every
-// completed turn wait out settleBefore.
+// Status is only filled in by DetectActive, which the TUI and `active` run and
+// a plain command does not — so from the command line every session looks
+// unattached anyway. Taking StatusReady is what makes the two agree, rather than
+// the sessions on screen being the only ones held back.
+//
+// The price of taking them is that a session still being worked in has its
+// session summary remade after the next prompt. The `tooSoon` guard holds that
+// to once an hour.
 func pickForSummary(sessions []domain.Session, now time.Time) []domain.Session {
 	var out []domain.Session
 	for _, s := range sessions {
@@ -226,7 +231,11 @@ func pickForSummary(sessions []domain.Session, now time.Time) []domain.Session {
 		// the conversation it came from is a hundred times that and does get
 		// evicted. Whether a copy was in fact kept is worthOpening's question: it
 		// takes a row lookup, and this function does not read the store.
-		if s.Status != "" {
+		// Ready is an open session whose last turn is complete: an agent is
+		// attached, but it is waiting for a prompt, not writing. It is not the state
+		// a tool runs in: mid-tool the last event says so, and the claude plugin
+		// additionally downgrades Ready to Running while a shell child is alive.
+		if s.Status != "" && s.Status != domain.StatusReady {
 			continue // an agent is working in it right now
 		}
 		// A log that ends at a completed turn has nothing in flight: whatever is
