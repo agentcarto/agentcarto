@@ -47,11 +47,16 @@ func Turns(c domain.Conversation, path []string) []Turn {
 	return out
 }
 
-// Branches counts the lines of conversation that leave the given path: a node
-// whose parent is on the path but which is not on it. Each is a rewind or an
+// Branches counts the lines of conversation that leave the given path and are
+// worth opening: a node whose parent is on the path but which is not on it, and
+// which holds a conversation rather than a leftover. Each is a rewind or an
 // alternative the session took and abandoned, and a document that renders one
 // path says nothing about them — a reader who is told "31 turns" would otherwise
 // take that for everything that was said.
+//
+// Counting every departing node instead would report leftovers an agent wrote
+// but nobody can read, and would disagree with the TUI, which lists exactly the
+// substantial ones.
 func Branches(c domain.Conversation, path []string) int {
 	onPath := make(map[string]bool, len(path))
 	for _, id := range path {
@@ -60,7 +65,7 @@ func Branches(c domain.Conversation, path []string) int {
 	n := 0
 	for _, id := range path {
 		for _, child := range c.Children[id] {
-			if !onPath[child] {
+			if !onPath[child] && conversation.IsSubstantial(c, child) {
 				n++
 			}
 		}

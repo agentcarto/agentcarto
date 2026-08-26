@@ -113,3 +113,24 @@ func TestBranchesCountsWhatLeavesThePath(t *testing.T) {
 		t.Fatalf("branches=%d want 0 for a single line of conversation", got)
 	}
 }
+
+// What leaves the path is not always a conversation. A manual /compact strands
+// the raw "/compact" input as a childless leaf beside the compacted line, and
+// telling the reader about a branch holding nothing they can read only invents
+// something to go looking for.
+func TestBranchesSkipsWhatCannotBeRead(t *testing.T) {
+	stranded := func(id, parent string) domain.ConvNode {
+		return domain.ConvNode{ID: id, Parent: parent, Events: []domain.Event{
+			{Kind: domain.EventUser, Text: "/compact"}, // no Prompt: the plugin read it as system-injected
+		}}
+	}
+	c := conv(
+		userNode("a", "", "first"),
+		userNode("b", "a", "second"),
+		stranded("raw", "a"),
+		userNode("real", "a", "a rewind worth reading"),
+	)
+	if got := Branches(c, c.ActivePath()); got != 1 {
+		t.Fatalf("branches=%d want 1 (the readable rewind only)", got)
+	}
+}

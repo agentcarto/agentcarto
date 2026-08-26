@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 )
 
@@ -57,5 +59,32 @@ func TestDetailHeaderCWDLineFitsNarrowTerminal(t *testing.T) {
 	}
 	if !strings.Contains(line, "…") {
 		t.Fatalf("a path wider than the terminal should be truncated with an ellipsis, got %q", line)
+	}
+}
+
+// The header's branch count and the one `show` prints must agree. They are
+// reached by different routes — transcript.Branches walks the path, the header
+// counts the branch rows collected turn by turn — and they drifted apart once,
+// when only the header left out the lines with nothing readable in them.
+func TestDetailHeaderBranchCountMatchesTranscript(t *testing.T) {
+	ts := func(s int) time.Time { return time.Date(2026, 6, 23, 1, 0, s, 0, time.Local) }
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "ask", Prompt: "ask"}}},
+		{ID: "a1", Parent: "u1", Timestamp: ts(9), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}}},
+		// A rewind worth opening, and the leaf a manual /compact strands beside it.
+		{ID: "alt", Parent: "u1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventUser, Text: "asked differently", Prompt: "asked differently"}}},
+		{ID: "raw", Parent: "u1", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "/compact"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo"}
+	m := Model{width: 120, height: 20, detailSession: &s}
+	updated, _ := m.Update(convMsg{c: &c, reset: true})
+	m = updated.(Model)
+
+	want := transcript.Branches(c, c.ActivePath())
+	if want != 1 {
+		t.Fatalf("transcript.Branches=%d want 1 (the readable rewind only, not the stranded /compact)", want)
+	}
+	if got := stripANSI(m.detailLead(&s)); !strings.Contains(got, fmt.Sprintf("branches:%d", want)) {
+		t.Fatalf("header disagrees with transcript.Branches=%d: %q", want, got)
 	}
 }
