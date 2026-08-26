@@ -1994,7 +1994,7 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool) string {
 	if rowData.LastBranch {
 		conn = "└─"
 	}
-	bt := convlogic.TurnsOfPath(*m.detail, convlogic.DeepestPath(*m.detail, rowData.Root))
+	bt := transcript.Turns(*m.detail, convlogic.DeepestPath(*m.detail, rowData.Root))
 	sz := len(convlogic.Subtree(*m.detail, rowData.Root))
 	nb := convlogic.BranchAltCount(*m.detail, rowData.Root)
 	label := fmt.Sprintf("    %s %s (%dturn/%dmsg/%dbranch) %s", conn, convlogic.BranchKind(*m.detail, rowData.Root), len(bt), sz, nb, convlogic.BranchLead(*m.detail, rowData.Root))

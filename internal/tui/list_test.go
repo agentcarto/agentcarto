@@ -430,6 +430,27 @@ func TestForkBranchLabelUsesForkKind(t *testing.T) {
 	}
 }
 
+func TestForkBranchTurnCountExcludesCompactOnlyBoundaries(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
+		{ID: "a", Parent: "u", Timestamp: time.Date(2026, 6, 23, 4, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "active"}}},
+		{ID: "fork", Parent: "u", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork question", Prompt: "fork question"}}},
+		{ID: "reply1", Parent: "fork", Timestamp: time.Date(2026, 6, 23, 2, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "first answer"}}},
+		{ID: "compact", Parent: "reply1", Timestamp: time.Date(2026, 6, 23, 2, 2, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "summary", RawType: domain.RawCompactSummary}}},
+		{ID: "next", Parent: "compact", Timestamp: time.Date(2026, 6, 23, 3, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "next question", Prompt: "next question"}}},
+		{ID: "reply2", Parent: "next", Timestamp: time.Date(2026, 6, 23, 3, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "second answer"}}},
+	})
+	c.ForkRoots = []string{"fork"}
+	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
+	m := Model{width: 100, height: 20, detailSession: &s}
+	updated, _ := m.Update(convMsg{c: &c, reset: true})
+	m = updated.(Model)
+	out := m.detailView()
+	if !strings.Contains(out, "fork (2turn/5msg/0branch)") {
+		t.Fatalf("compact-only boundary should not inflate the branch turn count:\n%s", out)
+	}
+}
+
 func TestBranchLeadAvoidsNoContentForAssistantOnlyBranch(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
 		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
