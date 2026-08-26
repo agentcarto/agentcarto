@@ -257,10 +257,12 @@ func forkSplit(parent, child domain.Conversation) int {
 	return n
 }
 
-// graftFork grafts child (a fork matched by shared prefix) onto parent. If want is a
-// node ID within child, it returns the corresponding ID within parent after the graft
-// (used to locate the focused branch; returns "" if want is outside the grafted
-// subtree or empty). Every renamed node is recorded in grafted (new ID -> child ID).
+// graftFork grafts child (a fork matched by shared prefix) onto parent. The
+// child's own suffix and any descendant forks already grafted into its tree are
+// copied together; a descendant may branch directly from the shared prefix and
+// therefore sit outside the child's active-suffix subtree. If want is a node ID
+// within the copied nodes, the corresponding ID in parent is returned. Every
+// renamed node is recorded in grafted (new ID -> child ID).
 func graftFork(parent *domain.Conversation, child domain.Conversation, idx int, want string, grafted map[string]string) string {
 	pa, ca := parent.ActivePath(), child.ActivePath()
 	split := forkSplit(*parent, child)
@@ -269,24 +271,68 @@ func graftFork(parent *domain.Conversation, child domain.Conversation, idx int, 
 	}
 	attach := pa[split-1]
 	graftRoot := ca[split]
-	sub := subtreeIDs(child, graftRoot)
+	sharedParents := make(map[string]string, split)
+	for i := 0; i < split; i++ {
+		sharedParents[ca[i]] = pa[i]
+	}
+
+	copySet := map[string]bool{}
+	addSubtree := func(root string) {
+		for _, id := range subtreeIDs(child, root) {
+			copySet[id] = true
+		}
+	}
+	addSubtree(graftRoot)
+	for _, root := range child.ForkRoots {
+		if copySet[root] {
+			continue
+		}
+		if _, shared := sharedParents[root]; shared {
+			continue
+		}
+		if _, exists := parent.Nodes[root]; exists && sameEvents(eventSig(*parent, root), eventSig(child, root)) {
+			continue
+		}
+		addSubtree(root)
+	}
+	sub := make([]string, 0, len(copySet))
+	for id := range copySet {
+		sub = append(sub, id)
+	}
+	sort.Strings(sub)
+
 	prefix := fmt.Sprintf("k%d_", idx)
 	for _, id := range sub {
 		n := child.Nodes[id]
 		nid := prefix + id
 		par := attach
-		if containsID(sub, n.Parent) {
+		if mapped, ok := sharedParents[n.Parent]; ok {
+			par = mapped
+		} else if copySet[n.Parent] {
 			par = prefix + n.Parent
+		} else if _, ok := parent.Nodes[n.Parent]; ok {
+			par = n.Parent
 		}
 		parent.Nodes[nid] = domain.ConvNode{ID: nid, Parent: par, Timestamp: n.Timestamp, Events: append([]domain.Event(nil), n.Events...)}
 		parent.Children[par] = append(parent.Children[par], nid)
 		grafted[nid] = id
 	}
-	parent.ForkRoots = append(parent.ForkRoots, prefix+graftRoot)
-	if want != "" && containsID(sub, want) {
+	appendForkRoot(parent, prefix+graftRoot)
+	for _, root := range child.ForkRoots {
+		if copySet[root] {
+			appendForkRoot(parent, prefix+root)
+		}
+	}
+	if want != "" && copySet[want] {
 		return prefix + want
 	}
 	return ""
+}
+
+func appendForkRoot(c *domain.Conversation, root string) {
+	if !containsID(c.ForkRoots, root) {
+		c.ForkRoots = append(c.ForkRoots, root)
+	}
 }
 
 // graftAnchoredFork grafts child (a fork whose ForkAt records its fork point,

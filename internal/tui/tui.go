@@ -185,8 +185,9 @@ type detailRow struct {
 // breadcrumb label). The base frame is "current"; frames pushed when descending
 // into another lineage are labeled per branch.
 type detailFrame struct {
-	path  []string
-	label string
+	path        []string
+	label       string
+	followFocus bool // true only for the fork frame created by directly opening a fork session
 }
 
 func New(a *app.App, cached []domain.Session, db *cache.DB) Model {
@@ -616,24 +617,32 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if x.c != nil && m.detail != nil {
-		// While viewing the current branch (not descended into a sub-branch, i.e. stack
-		// depth <= 1), update the current branch to the new active path so a reload
-		// follows a conversation that grew. Otherwise new nodes added while running would
-		// be misrendered as a divergent (rewind) branch off the old path. When descended
-		// (stack > 1) we leave it untouched.
-		if x.reset || len(m.detailPathStack) <= 1 {
-			m.detailPathStack = []detailFrame{{path: x.c.ActivePath(), label: "current"}}
-			// If the opened target is a non-root fork, descend into its branch (the one
-			// containing focusLeaf) and place the cursor there, focusing the opened fork
-			// within the tree whose backbone is the parent line.
-			if x.reset && x.focusLeaf != "" {
-				if root := branchRootOf(*x.c, x.focusLeaf); root != "" {
-					m.detailPathStack = append(m.detailPathStack, detailFrame{
-						path:  convlogic.DeepestPath(*x.c, root),
-						label: m.branchFrameLabel(root),
-					})
+		base := detailFrame{path: x.c.ActivePath(), label: "current"}
+		if x.reset || len(m.detailPathStack) == 0 {
+			m.detailPathStack = []detailFrame{base}
+			// If the opened target is a non-root fork, descend into the exact path to
+			// focusLeaf. DeepestPath can enter a newer child fork instead of stopping at
+			// the session the user opened.
+			if x.reset {
+				if frame, ok := m.directFocusFrame(*x.c, x.focusLeaf); ok {
+					m.detailPathStack = append(m.detailPathStack, frame)
 				}
 			}
+		} else {
+			// The base path always follows the conversation. A directly opened fork also
+			// follows its latest focusLeaf, while frames entered manually remain pinned so
+			// reload does not move the user away from a branch being inspected.
+			frames := append([]detailFrame(nil), m.detailPathStack...)
+			frames[0] = base
+			for i := 1; i < len(frames); i++ {
+				if !frames[i].followFocus {
+					continue
+				}
+				if frame, ok := m.directFocusFrame(*x.c, x.focusLeaf); ok {
+					frames[i] = frame
+				}
+			}
+			m.detailPathStack = frames
 		}
 		m.setDetailPath(m.currentDetailPath())
 		if x.reset {
@@ -2135,6 +2144,47 @@ func branchRootOf(c domain.Conversation, leaf string) string {
 		}
 		cur = n.Parent
 	}
+}
+
+// directFocusFrame builds the automatically followed frame used when a fork
+// session is opened directly. Its path ends at focusLeaf even when the branch
+// root also contains a newer child fork.
+func (m Model) directFocusFrame(c domain.Conversation, focusLeaf string) (detailFrame, bool) {
+	root := branchRootOf(c, focusLeaf)
+	if root == "" {
+		return detailFrame{}, false
+	}
+	path := pathFromRootToLeaf(c, root, focusLeaf)
+	if len(path) == 0 {
+		return detailFrame{}, false
+	}
+	return detailFrame{path: path, label: m.branchFrameLabel(root), followFocus: true}, true
+}
+
+// pathFromRootToLeaf returns the unique parent path from root through leaf. A
+// missing node, a parent cycle, or a root that is not an ancestor returns nil.
+func pathFromRootToLeaf(c domain.Conversation, root, leaf string) []string {
+	if root == "" || leaf == "" {
+		return nil
+	}
+	reversed := make([]string, 0, 8)
+	seen := map[string]bool{}
+	for cur := leaf; cur != "" && !seen[cur]; {
+		seen[cur] = true
+		node, ok := c.Nodes[cur]
+		if !ok {
+			return nil
+		}
+		reversed = append(reversed, cur)
+		if cur == root {
+			for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
+				reversed[i], reversed[j] = reversed[j], reversed[i]
+			}
+			return reversed
+		}
+		cur = node.Parent
+	}
+	return nil
 }
 
 // findSession looks up the (plugin, sessionID) session in the list (used to walk a fork lineage).

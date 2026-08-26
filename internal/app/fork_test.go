@@ -192,6 +192,50 @@ func TestConversationFromFocusRootsAtAncestorAndFocusesFork(t *testing.T) {
 	}
 }
 
+// A grandchild can fork from the shared root prefix before its parent fork's
+// first unique turn. When the parent's synthesized tree is grafted into the
+// root, that sibling grandchild branch must come with it so focusLeaf survives
+// both levels of ID remapping.
+func TestConversationFromFocusPreservesGrandchildForkBeforeParentSuffix(t *testing.T) {
+	root := domain.NewConversation([]domain.ConvNode{
+		{ID: "r1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "root prompt", Prompt: "root prompt"}}},
+		{ID: "r2", Parent: "r1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "root answer"}}},
+		{ID: "main", Parent: "r2", Timestamp: time.Unix(10, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "root continuation", Prompt: "root continuation"}}},
+	})
+	child := domain.NewConversation([]domain.ConvNode{
+		{ID: "r1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "root prompt", Prompt: "root prompt"}}},
+		{ID: "r2", Parent: "r1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "root answer"}}},
+		{ID: "c1", Parent: "r2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "child prompt", Prompt: "child prompt"}}},
+		{ID: "c2", Parent: "c1", Timestamp: time.Unix(4, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "child answer"}}},
+	})
+	grandchild := domain.NewConversation([]domain.ConvNode{
+		{ID: "r1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "root prompt", Prompt: "root prompt"}}},
+		{ID: "r2", Parent: "r1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "root answer"}}},
+		{ID: "g1", Parent: "r2", Timestamp: time.Unix(5, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "grandchild prompt", Prompt: "grandchild prompt"}}},
+		{ID: "g2", Parent: "g1", Timestamp: time.Unix(6, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "grandchild answer"}}},
+	})
+	a := testAppWithConvs(map[string]domain.Conversation{"root": root, "child": child, "grandchild": grandchild})
+	sessions := []domain.Session{
+		{PluginID: "p", SessionID: "R", SourceRef: domain.SessionRef{Source: "root"}},
+		{PluginID: "p", SessionID: "C", ParentSessionID: "R", StartedAt: time.Unix(3, 0), SourceRef: domain.SessionRef{Source: "child"}},
+		{PluginID: "p", SessionID: "G", ParentSessionID: "C", StartedAt: time.Unix(5, 0), SourceRef: domain.SessionRef{Source: "grandchild"}},
+	}
+
+	conv, focusLeaf, origins, err := a.ConversationFromFocus(context.Background(), sessions[2], sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if focusLeaf == "" {
+		t.Fatalf("grandchild focus was lost: roots=%v nodes=%#v", conv.ForkRoots, conv.Nodes)
+	}
+	if origin := origins[focusLeaf]; origin.Session.SessionID != "G" || origin.NodeID != "g2" {
+		t.Fatalf("focus origin=%+v, want grandchild G/g2", origin)
+	}
+	if got := convlogic.TurnHeadline(*conv, pathToNode(*conv, focusLeaf)); got != "root prompt" {
+		t.Fatalf("focused path is disconnected: headline=%q leaf=%q", got, focusLeaf)
+	}
+}
+
 // rewinderStub records the ForkTarget it receives (and loads conversations).
 type rewinderStub struct {
 	convLoaderStub

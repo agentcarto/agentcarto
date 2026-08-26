@@ -57,6 +57,76 @@ func TestReloadFollowsGrowingActivePathNoPhantomBranch(t *testing.T) {
 	}
 }
 
+// A fork opened directly starts on an automatically focused frame. Unlike a
+// manually selected historical branch, that frame must follow the opened
+// session's focus leaf when the conversation grows on reload.
+func TestReloadFollowsGrowingDirectlyOpenedFork(t *testing.T) {
+	ts := func(s int64) time.Time { return time.Unix(s, 0) }
+	initial := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "root"}}},
+		{ID: "main", Parent: "u", Timestamp: ts(10), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "parent branch"}}},
+		{ID: "fork", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "fork prompt"}}},
+		{ID: "f1", Parent: "fork", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "first response"}}},
+	})
+	initial.ForkRoots = []string{"fork"}
+	sess := domain.Session{PluginID: "codex", SessionID: "fork-session", ParentSessionID: "parent-session"}
+	m := Model{detailSession: &sess}
+	upd, _ := m.Update(convMsg{c: &initial, focusLeaf: "f1", reset: true})
+	m = upd.(Model)
+	if got := strings.Join(m.currentDetailPath(), ">"); got != "fork>f1" {
+		t.Fatalf("initial focused path = %q, want fork>f1", got)
+	}
+	if len(m.detailPathStack) != 2 || !m.detailPathStack[1].followFocus {
+		t.Fatalf("directly opened fork frame is not marked for reload following: %#v", m.detailPathStack)
+	}
+
+	grown := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "root"}}},
+		{ID: "main", Parent: "u", Timestamp: ts(10), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "parent branch"}}},
+		{ID: "fork", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "fork prompt"}}},
+		{ID: "f1", Parent: "fork", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "first response"}}},
+		{ID: "f2", Parent: "f1", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "new turn"}}},
+	})
+	grown.ForkRoots = []string{"fork"}
+	upd, _ = m.Update(convMsg{c: &grown, focusLeaf: "f2", reset: false})
+	m = upd.(Model)
+	if got := strings.Join(m.currentDetailPath(), ">"); got != "fork>f1>f2" {
+		t.Fatalf("reloaded focused path = %q, want fork>f1>f2", got)
+	}
+	found := false
+	for _, row := range m.detailRows {
+		if row.Kind == "turn" && strings.Contains(m.detailRowText(row), "new turn") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("new turn on the directly opened fork is absent from the reloaded detail rows")
+	}
+}
+
+// Focusing a fork session must stop at that session's own leaf. Choosing the
+// deepest descendant from the branch root can instead enter a newer child fork.
+func TestDirectlyOpenedForkStopsAtFocusLeaf(t *testing.T) {
+	ts := func(s int64) time.Time { return time.Unix(s, 0) }
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "root"}}},
+		{ID: "main", Parent: "u", Timestamp: ts(10), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "parent branch"}}},
+		{ID: "fork", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "opened fork"}}},
+		{ID: "common", Parent: "fork", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "shared work"}}},
+		{ID: "focus", Parent: "common", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "opened session leaf"}}},
+		{ID: "child", Parent: "common", Timestamp: ts(5), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "newer child fork"}}},
+	})
+	c.ForkRoots = []string{"fork", "child"}
+	sess := domain.Session{PluginID: "codex", SessionID: "opened-session", ParentSessionID: "parent-session"}
+	m := Model{detailSession: &sess}
+	upd, _ := m.Update(convMsg{c: &c, focusLeaf: "focus", reset: true})
+	m = upd.(Model)
+	if got := strings.Join(m.currentDetailPath(), ">"); got != "fork>common>focus" {
+		t.Fatalf("focused path = %q, want fork>common>focus", got)
+	}
+}
+
 // Drilling into another line shows a breadcrumb (current > branch) on the second header line.
 func TestDetailHeaderShowsBreadcrumbWhenDrilledIntoBranch(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
@@ -147,15 +217,26 @@ func TestReloadKeepsBranchNavigationWhenDrilledIn(t *testing.T) {
 	ts := func(s int64) time.Time { return time.Unix(s, 0) }
 	a := domain.NewConversation([]domain.ConvNode{
 		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "x", Prompt: "x"}}},
-		{ID: "a1", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventAssistant}}},
+		{ID: "a1", Parent: "u", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant}}},
+		{ID: "branch", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "branch"}}},
 	})
 	sess := domain.Session{PluginID: "claude", SessionID: "s"}
-	drilled := []string{"u", "branchnode"}
+	drilled := []string{"u", "branch"}
 	m := Model{detail: &a, detailSession: &sess, detailPathStack: []detailFrame{{path: a.ActivePath(), label: "current"}, {path: drilled, label: "branch"}}}
-	nm, _ := m.Update(convMsg{c: &a, reset: false})
+	grown := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "x", Prompt: "x"}}},
+		{ID: "a1", Parent: "u", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant}}},
+		{ID: "a2", Parent: "a1", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventAssistant}}},
+		{ID: "branch", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Prompt: "branch"}}},
+	})
+	nm, _ := m.Update(convMsg{c: &grown, reset: false})
 	m2 := nm.(Model)
+	base := m2.detailPathStack[0].path
+	if got := strings.Join(base, ">"); got != "u>a1>a2" {
+		t.Fatalf("base path did not follow conversation growth: %q", got)
+	}
 	top := m2.detailPathStack[len(m2.detailPathStack)-1].path
-	if len(top) != 2 || top[1] != "branchnode" {
+	if len(top) != 2 || top[1] != "branch" {
 		t.Fatalf("drilled-in navigation was lost: top=%v", top)
 	}
 }
