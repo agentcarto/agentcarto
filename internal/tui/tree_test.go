@@ -50,6 +50,67 @@ func TestTreeMultiLevelContinuation(t *testing.T) {
 	}
 }
 
+// Deep fork chains keep their logical hierarchy, but their visual indentation is
+// capped at two levels. Rows beyond the cap identify their immediate parent.
+func TestTreeDeepChainUsesBoundedLineage(t *testing.T) {
+	t0 := time.Date(2026, 6, 23, 10, 0, 0, 0, time.Local)
+	m := Model{view: "time", sessions: []domain.Session{
+		{PluginID: "codex", SessionID: "P", UpdatedAt: t0.Add(5 * time.Hour)},
+		{PluginID: "codex", SessionID: "child-01", UpdatedAt: t0.Add(4 * time.Hour), ParentSessionID: "P"},
+		{PluginID: "codex", SessionID: "child-02", UpdatedAt: t0.Add(3 * time.Hour), ParentSessionID: "child-01"},
+		{PluginID: "codex", SessionID: "child-03", UpdatedAt: t0.Add(2 * time.Hour), ParentSessionID: "child-02"},
+		{PluginID: "codex", SessionID: "child-04", UpdatedAt: t0.Add(time.Hour), ParentSessionID: "child-03"},
+	}}
+	m.filter()
+	if got, want := rowTree(m), "[P][└─ child-01][   └─ child-02][   ↳child-02 child-03][   ↳child-03 child-04]"; got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+// Deep siblings share the bounded display depth while retaining their immediate
+// parent and the continuation line of a shallower, non-last branch.
+func TestTreeDeepBranchesKeepDFSOrderAndLineage(t *testing.T) {
+	t0 := time.Date(2026, 6, 23, 10, 0, 0, 0, time.Local)
+	m := Model{view: "time", sessions: []domain.Session{
+		{PluginID: "codex", SessionID: "P", UpdatedAt: t0.Add(10 * time.Hour)},
+		{PluginID: "codex", SessionID: "A", UpdatedAt: t0.Add(9 * time.Hour), ParentSessionID: "P"},
+		{PluginID: "codex", SessionID: "X", UpdatedAt: t0.Add(time.Hour), ParentSessionID: "P"},
+		{PluginID: "codex", SessionID: "B", UpdatedAt: t0.Add(8 * time.Hour), ParentSessionID: "A"},
+		{PluginID: "codex", SessionID: "C1", UpdatedAt: t0.Add(7 * time.Hour), ParentSessionID: "B"},
+		{PluginID: "codex", SessionID: "C2", UpdatedAt: t0.Add(6 * time.Hour), ParentSessionID: "B"},
+	}}
+	m.filter()
+	if got, want := rowTree(m), "[P][├─ A][│  └─ B][│  ↳B C1][│  ↳B C2][└─ X]"; got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+
+	wantDepths := []int{0, 1, 2, 3, 3, 1}
+	for i, row := range m.rows {
+		if row.Depth != wantDepths[i] {
+			t.Fatalf("row %d depth = %d, want %d", i, row.Depth, wantDepths[i])
+		}
+	}
+}
+
+// A child whose parent is present but filtered out becomes a root and uses the
+// existing lineage marker instead of a tree connector.
+func TestTreeFilteredParentUsesRootLineageMarker(t *testing.T) {
+	t0 := time.Date(2026, 6, 23, 10, 0, 0, 0, time.Local)
+	m := Model{view: "time", activeOnly: true, width: 100, sessions: []domain.Session{
+		{PluginID: "codex", AgentType: "codex", SessionID: "parent", UpdatedAt: t0.Add(time.Hour)},
+		{PluginID: "codex", AgentType: "codex", SessionID: "child", UpdatedAt: t0, ParentSessionID: "parent", Status: domain.StatusRunning},
+	}}
+	m.filter()
+	if got, want := rowTree(m), "[child]"; got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	row := m.rows[0]
+	rendered := m.sessionRow(m.sessions[row.SessIdx], false, 0, row.TreePrefix)
+	if !strings.Contains(rendered, "↳parent ") || strings.Contains(rendered, "├─") || strings.Contains(rendered, "└─") {
+		t.Fatalf("filtered-parent root should show lineage marker, not connector: %q", rendered)
+	}
+}
+
 // folder view: within the same CWD group, fork children nest under their parent.
 func TestTreeFolderNestsWithinGroup(t *testing.T) {
 	t0 := time.Date(2026, 6, 23, 10, 0, 0, 0, time.Local)

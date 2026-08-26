@@ -57,6 +57,11 @@ const blinkInterval = 500 * time.Millisecond
 // is automatically cleared.
 const flashTTL = 4 * time.Second
 
+// maxSessionTreeDepth limits only the visual indentation in the session list.
+// The forest keeps the full logical depth so ordering and session actions are
+// unaffected by long chains of forks.
+const maxSessionTreeDepth = 2
+
 type Model struct {
 	// afterScan runs once each scan finishes, with the sessions it found. It is
 	// how summarizing gets started without the TUI knowing what summarizing is:
@@ -141,7 +146,7 @@ type listRow struct {
 	SessIdx    int // index into m.sessions, for "session" rows
 	Collapsed  bool
 	Depth      int    // fork nesting depth (0 = root)
-	TreePrefix string // leading tree prefix (│  /    continuations + ├─ /└─ connectors). Empty at depth 0.
+	TreePrefix string // leading tree connector or bounded lineage marker. Empty at depth 0.
 }
 
 type turnBlock struct {
@@ -392,7 +397,7 @@ func (m *Model) appendForest(cand []int) {
 			CWD:        m.sessions[ix].CWD,
 			SessIdx:    ix,
 			Depth:      depth,
-			TreePrefix: treePrefix(ancLast, isLast, depth),
+			TreePrefix: sessionTreePrefix(ancLast, isLast, depth, m.sessions[ix].ParentSessionID),
 		})
 		kids := children[m.sessions[ix].SessionID]
 		var childAnc []bool
@@ -435,6 +440,29 @@ func treePrefix(ancLast []bool, isLast bool, depth int) string {
 	} else {
 		b.WriteString("├─ ")
 	}
+	return b.String()
+}
+
+// sessionTreePrefix caps visual indentation while preserving the immediate
+// parent at deeper logical levels. At the cap, the remaining structural column
+// is replaced by a lineage marker so every additional fork consumes the same
+// horizontal space.
+func sessionTreePrefix(ancLast []bool, isLast bool, depth int, parentSessionID string) string {
+	if depth <= maxSessionTreeDepth {
+		return treePrefix(ancLast, isLast, depth)
+	}
+
+	var b strings.Builder
+	for i := 0; i < maxSessionTreeDepth-1; i++ {
+		if i < len(ancLast) && !ancLast[i] {
+			b.WriteString("│  ")
+		} else {
+			b.WriteString("   ")
+		}
+	}
+	b.WriteString("↳")
+	b.WriteString(shortID(parentSessionID))
+	b.WriteString(" ")
 	return b.String()
 }
 
