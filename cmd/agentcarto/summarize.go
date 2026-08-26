@@ -95,13 +95,22 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		want = pendingTurns(turns, db.Summaries(ctx, s, nodes), open)
 	}
 	if len(want) == 0 {
+		// The held-back turn is described differently depending on why it is held.
+		// A turn the log says is unfinished is being written; one the log says
+		// ended is only waiting out settleAfterComplete, and saying it is "still
+		// being written" about a turn the agent reported as complete reads as a
+		// bug rather than as a wait.
+		held := "is still being written"
+		if s.LastKind == domain.EventTurnComplete {
+			held = fmt.Sprintf("ended moments ago and is not summarized until it has sat still for %s — an agent writes end_turn for every block it finishes, so a turn can go on past one", settleAfterComplete)
+		}
 		if open && len(turns) == 1 {
-			fmt.Fprintf(w, "%s: its only turn is still being written — summarize it once the agent is done\n", s.SessionID)
+			fmt.Fprintf(w, "%s: its only turn %s\n", s.SessionID, held)
 			return
 		}
 		done := len(summarizableTurns(turns, open))
 		if open {
-			fmt.Fprintf(w, "%s: all %d finished turns are summarized already; the last one is still being written\n", s.SessionID, done)
+			fmt.Fprintf(w, "%s: all %d finished turns are summarized already; the last one %s\n", s.SessionID, done, held)
 			return
 		}
 		fmt.Fprintf(w, "%s: all %d turns are summarized already (use --force to make them again)\n", s.SessionID, done)
@@ -333,6 +342,22 @@ func printSummaries(w io.Writer, res summary.Result) {
 	}
 }
 
+// settleAfterComplete is how long a turn that looks finished has to sit still
+// before it is summarized.
+//
+// A finished turn is not always a finished turn. Claude writes end_turn for
+// every block it completes, not for the turn: the turn goes on past one when a
+// background task reports back, or a queued prompt arrives, or the agent simply
+// keeps working — and its terminal node moves with it. Summarizing at the first
+// end_turn buys a summary the store withholds a moment later, and the turn that
+// actually ended is paid for again.
+//
+// Observed on this machine while testing: end_turn at 08:54:56, the same turn
+// still going at 08:55:02, and two summaries of it two minutes apart. The window
+// cannot close the case entirely — a background task can report back much later
+// — but it covers the gap that a scan every few seconds walks straight into.
+const settleAfterComplete = time.Minute
+
 // abandonedAfter is how long a turn has to sit untouched before it counts as
 // abandoned rather than in progress.
 //
@@ -356,17 +381,27 @@ const abandonedAfter = 10 * time.Minute
 //     but "not reported": plugin-copilot reads exported VS Code chat files and
 //     leaves it unset, and plugin-grok returns it for a session whose events
 //     file is missing.
-//   - What it ends with is not a finished turn.
-//   - The log moved recently enough that the turn is still being written rather
-//     than abandoned — see abandonedAfter.
+//   - The log has sat still long enough for what it ends with to be trusted:
+//     settleAfterComplete for a turn that ended, abandonedAfter for one that did
+//     not. Both windows exist because the tail of a log is a claim about the
+//     present, and the present moves.
 //   - The turn in question is the one at the end of the branch. transcript.Turns
 //     drops a trailing turn holding nothing but a compact summary, and when it
 //     does, the last turn it returned is a finished one.
 func hasOpenTurn(turns []transcript.Turn, path []string, lastKind domain.EventKind, idleFor time.Duration) bool {
-	if lastKind == "" || lastKind == domain.EventTurnComplete {
+	if lastKind == "" {
 		return false
 	}
-	if idleFor >= abandonedAfter {
+	// How long it has to sit still depends on what the log ends with. A turn that
+	// ended has only to outlast the chance that it did not really end
+	// (settleAfterComplete); one that did not end waits far longer, because
+	// waiting on it is waiting on an agent that may never come back
+	// (abandonedAfter).
+	settle := abandonedAfter
+	if lastKind == domain.EventTurnComplete {
+		settle = settleAfterComplete
+	}
+	if idleFor >= settle {
 		return false
 	}
 	if len(turns) == 0 || len(path) == 0 {

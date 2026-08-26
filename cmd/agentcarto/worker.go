@@ -179,18 +179,31 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	}
 
 	calls := len(r.Prompts)
+	// Turn 0 is where a session records the version it has answered, and
+	// worthOpening reads exactly that: a session recorded as answered is not
+	// opened again until its log moves. Both writes below land on turn 0 — the
+	// session summary carries the fingerprint with it, and the marker is nothing
+	// but the fingerprint.
+	//
+	// So neither happens for a request that held a turn back. That turn still
+	// needs asking about, and the log it is in has just ended — it has no reason
+	// to move again, and nothing would ever look at the session a second time.
+	// The session summary waits for the run that does answer the whole version.
+	if r.Held {
+		fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s (a turn is still settling)\n",
+			stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), calls, gen.Name())
+		_ = q.Done(r)
+		return true
+	}
 	if storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, log) {
 		calls++
 	}
-	// This version of the session has been answered, whatever came of it. Turn 0
-	// carries the version, and worthOpening reads exactly that, so recording it
-	// is what stops the next scan asking the same question.
-	//
-	// It matters most when the answer held nothing. Parse drops a turn the model
-	// declined to describe rather than failing — an answer with @@SESSION and no
-	// @@TURN parses clean with no turns — and then nothing above writes a row.
-	// Without this the turn is still wanted, the request is written again, and a
-	// scan every few seconds pays for that call every few seconds.
+	// Recording the version matters most when the answer held nothing. Parse
+	// drops a turn the model declined to describe rather than failing — an answer
+	// with @@SESSION and no @@TURN parses clean with no turns — and then nothing
+	// above writes a row. Without this the turn is still wanted, the request is
+	// written again, and a scan every few seconds pays for that call every few
+	// seconds.
 	_ = db.MarkExamined(ctx, s)
 
 	fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s\n", stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), calls, gen.Name())

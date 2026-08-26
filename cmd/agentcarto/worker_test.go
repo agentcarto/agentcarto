@@ -93,11 +93,11 @@ func (g *fakeGenerator) Name() string { return "fake m" }
 // A request in the queue can be one somebody asked for by name: `show` hands a
 // session needing several calls to the worker and tells the reader the
 // summaries will appear on a later run. Dropping it because the session was
-// summarized within the hour — before the turns it is being asked about existed
-// — would make that a lie, and leave the reader with nothing for an hour.
+// summarized moments before the turns it is being asked about existed — would
+// make that a lie, and leave the reader with nothing.
 //
-// What holds a session that keeps growing to one summary an hour is
-// EnqueueSummaries, which is the only thing that queues without being asked.
+// Nothing else needs such a window: queueOne writes a request only for a turn
+// that has no summary, so a session with nothing new to describe is never queued.
 func TestARequestQueuedAfterTheLastSummaryIsAnswered(t *testing.T) {
 	_, _ = summaryFixture(t)
 	ctx := context.Background()
@@ -285,6 +285,58 @@ func TestAnAnswerWithNoTurnStillRecordsTheVersion(t *testing.T) {
 	// And the empty answer was not mistaken for a summary.
 	if when, ok := d.SummarizedAt(ctx, s); ok {
 		t.Errorf("a session with no stored summary reports having been summarized at %s", when)
+	}
+}
+
+// A request that held a turn back has not answered its version of the log, and
+// must not record one. Turn 0 carries that record and worthOpening reads it: a
+// session recorded as answered is not opened again until its log moves, and a
+// log whose newest turn just ended has no reason to move. The held turn would
+// never be summarized.
+//
+// Both writes to turn 0 have to be skipped, not just the marker: storing a
+// session summary stamps the fingerprint too.
+func TestAHeldRequestDoesNotRecordTheVersionAsAnswered(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "backlog", Fingerprint: "fpFinal"}
+	// Three turns exist. Turns 1-2 were pending when the newest one ended, so the
+	// request covers them and holds turn 3 back.
+	r := summary.Request{
+		PluginID: "claude", SessionID: "backlog", Queued: time.Now(), Fingerprint: "fpFinal", Held: true,
+		Nodes:   map[int]string{1: "n1", 2: "n2"},
+		Batches: [][]int{{1, 2}}, Prompts: []string{"doc"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeGenerator{out: "@@SESSION\n全体を見たつもりの要約\n\n@@TURN 1\nターン1\n\n@@TURN 2\nターン2\n"}
+	var log bytes.Buffer
+
+	if spent := runRequest(ctx, &log, q, d, g, r, 0); !spent {
+		t.Fatalf("the request was dropped: %s", log.String())
+	}
+	// The turns it did cover are stored.
+	if got := d.Summaries(ctx, s, r.Nodes); got[1].Text == "" || got[2].Text == "" {
+		t.Errorf("the covered turns were not stored: %v", got)
+	}
+	// But the version is not recorded, so the next scan opens the session and
+	// finds turn 3 waiting.
+	if !worthOpening(ctx, d, q, s) {
+		t.Fatal("the held request recorded the version as answered — turn 3 is lost")
+	}
+	// And no session summary was written from a run that did not see turn 3.
+	if got := d.Summaries(ctx, s, r.Nodes); got[0].Text != "" {
+		t.Errorf("a run that held a turn back wrote the session summary: %q", got[0].Text)
 	}
 }
 

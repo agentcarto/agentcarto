@@ -306,10 +306,11 @@ func TestAFinishedTurnIsQueuedWithoutWaiting(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// The same session as the scan sees it now: one turn newer.
+	// The same session as the scan sees it now: one turn newer, and that turn has
+	// sat still long enough to be trusted as finished (settleAfterComplete).
 	s := domain.Session{
 		PluginID: "claude", AgentType: "claude", SessionID: "open", CWD: "/repo/app", Title: "open",
-		UpdatedAt: now, LastKind: domain.EventTurnComplete,
+		UpdatedAt: now.Add(-2 * time.Minute), LastKind: domain.EventTurnComplete,
 		Fingerprint: "fp2", SourceRef: domain.SessionRef{Source: src},
 	}
 	a, cfg := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{src: conv})
@@ -825,10 +826,10 @@ func TestNoticingThereIsNothingToAddKeepsTheSummary(t *testing.T) {
 	if sums, _, _ := storedSummaries(ctx, d, fresh, nil); len(sums) != 0 {
 		t.Errorf("the blank record reads back as a summary: %v", sums)
 	}
-	// And it does not read as one to the hourly guard either. A session being
-	// worked in reaches the marker on every scan — its newest turn is the open
-	// one, which cannot be summarized yet — so a marker that counted as
-	// summarizing would hold that session off for an hour at a time, forever.
+	// And it does not read as one to what paces the session summary. A session
+	// being worked in reaches the marker often, so a marker that counted as
+	// summarizing would push its next session summary away every time anything
+	// looked at it.
 	if when, ok := d.SummarizedAt(ctx, fresh); ok {
 		t.Errorf("noticing there was nothing to add recorded the session as summarized at %s", when)
 	}
@@ -836,8 +837,8 @@ func TestNoticingThereIsNothingToAddKeepsTheSummary(t *testing.T) {
 
 // The turn an agent is writing is not summarizable, so a session whose finished
 // turns are all described has nothing to ask about — every scan, for as long as
-// someone works in it. That must not count as summarizing it: the hourly guard
-// reads the same time, and the finished turns that arrive next would wait it out.
+// someone works in it. That must not count as summarizing it: what paces the
+// session summary reads the same time.
 func TestASessionWaitingOnAnOpenTurnIsNotHeldOffForAnHour(t *testing.T) {
 	_, _ = summaryFixture(t)
 	ctx := context.Background()
@@ -871,13 +872,19 @@ func TestASessionWaitingOnAnOpenTurnIsNotHeldOffForAnHour(t *testing.T) {
 	if _, ok := d.SummarizedAt(ctx, open); ok {
 		t.Error("a session that could not be summarized was recorded as summarized")
 	}
-	if worthOpening(ctx, d, q, open) {
-		t.Error("nothing changed, yet the session would be opened and parsed again")
+	// And it stays a session worth looking at. Recording the version here would
+	// say the log has been answered, and the turn being written would never be
+	// summarized once it ended — see
+	// TestATurnInsideTheSettleWindowIsNotWrittenOff. The price is a parse per
+	// scan while the turn is open.
+	if !worthOpening(ctx, d, q, open) {
+		t.Error("the session was written off while its turn was still being written")
 	}
 	// The turn finishes. Nothing holds the session back now — least of all a
 	// guard armed by the scan that found the turn unfinished.
 	done := open
 	done.Fingerprint, done.LastKind = "fp2", domain.EventTurnComplete
+	done.UpdatedAt = time.Now().Add(-2 * time.Minute) // and it stayed finished
 	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{done})
 	if _, queued := q.Find("claude", "live"); !queued {
 		t.Error("the finished turn was not queued")
@@ -932,6 +939,64 @@ func TestAQueuedRequestLeavesTheOpenTurnOutOfItsNodes(t *testing.T) {
 	}
 	if len(r.Prompts) != 1 || asked != len(r.Nodes) {
 		t.Errorf("prompts=%d asked=%d nodes=%d, want one call covering every summarizable turn", len(r.Prompts), asked, len(r.Nodes))
+	}
+}
+
+// A turn that ended a moment ago is not summarized yet — it may not have ended,
+// since end_turn is written per block — but it must not be written off either.
+//
+// Recording the version says "this log has been answered", and worthOpening then
+// leaves the session alone until the log moves. A log that just ended has no
+// reason to move again: the turn would never be summarized. So while the window
+// is open, the session is left as unanswered.
+func TestATurnInsideTheSettleWindowIsNotWrittenOff(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	src := "/logs/justended.jsonl"
+	conv := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: now, Events: talk("最初の質問", "最初の答え")},
+		{ID: "u2", Parent: "u1", Timestamp: now, Events: talk("次の質問", "たった今終わった答え")},
+	})
+	// Turn 1 is described; turn 2 ended seconds ago and is all that is left.
+	done := domain.Session{PluginID: "claude", SessionID: "justended", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, done, []cache.Summary{
+		{Turn: 0, Text: "セッション要約", Model: "m"},
+		{Turn: 1, NodeID: "u1", Text: "ターン1", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{
+		PluginID: "claude", AgentType: "claude", SessionID: "justended", CWD: "/repo/app", Title: "justended",
+		UpdatedAt: now, LastKind: domain.EventTurnComplete, // inside settleAfterComplete
+		Fingerprint: "fp2", SourceRef: domain.SessionRef{Source: src},
+	}
+	a, cfg := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{src: conv})
+	cfg.Summary.Agent, cfg.Summary.MaxPerRun = "claude", 4
+
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{s})
+
+	if reqs, _ := q.List(); len(reqs) != 0 {
+		t.Fatalf("a turn that ended seconds ago was queued: %v", reqs)
+	}
+	if !worthOpening(ctx, d, q, s) {
+		t.Fatal("the session was written off as answered — nothing will look at it again, and the turn is lost")
+	}
+	// Once the window passes, the same session queues that turn.
+	settled := s
+	settled.UpdatedAt = now.Add(-2 * time.Minute)
+	EnqueueSummaries(ctx, a, cfg, d, []domain.Session{settled})
+	if _, ok := q.Find("claude", "justended"); !ok {
+		t.Error("the turn was not queued once it had settled")
 	}
 }
 

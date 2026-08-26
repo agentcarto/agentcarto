@@ -273,8 +273,8 @@ func TestSessionSummarizedAtIgnoresTheBlankRecord(t *testing.T) {
 
 // MarkExamined says "looked at, nothing to make", which is a different fact from
 // "summarized". It has to record the version it looked at without touching the
-// summary that is there or the time one was last made: the hourly guard reads
-// that time, and a session being worked in is examined on every scan.
+// summary that is there or the time one was last made: what paces the session
+// summary reads that time, and a session being worked in is examined often.
 func TestMarkExaminedRecordsTheVersionWithoutClaimingASummary(t *testing.T) {
 	d := openTemp(t)
 	ctx := context.Background()

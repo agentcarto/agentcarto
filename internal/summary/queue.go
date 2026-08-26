@@ -37,10 +37,18 @@ type Request struct {
 	// of a session, and the readers that ask whether it predates the newest turns
 	// compare against exactly this. Without it every summary the worker wrote
 	// read as older than the session it came from.
-	Fingerprint string         `json:"fingerprint,omitempty"`
-	Nodes       map[int]string `json:"nodes"`
-	Batches     [][]int        `json:"batches"`
-	Prompts     []string       `json:"prompts"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// Held marks a request that left a turn out because it had not settled — the
+	// newest turn, which may not have ended (see settleAfterComplete).
+	//
+	// It is what stops the run answering this request from recording the version
+	// as done. Turn 0 carries that record, and a session recorded as done is not
+	// opened again until its log moves; a log that just ended has no reason to
+	// move, so the held-back turn would never be summarized.
+	Held    bool           `json:"held,omitempty"`
+	Nodes   map[int]string `json:"nodes"`
+	Batches [][]int        `json:"batches"`
+	Prompts []string       `json:"prompts"`
 	// Attempts and LastTried record failures. Nothing else can: the guard
 	// against regenerating asks the store when a session was last summarized,
 	// and a session that has never succeeded has nothing there — so without

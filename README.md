@@ -78,9 +78,11 @@ spot when one call will do (about half a minute); a longer one goes to the backg
 `agentcarto summarize <id>` does one by hand, and `agentcarto doctor` says whether a worker is
 running and how many sessions are waiting.
 
-**A turn is described as soon as it finishes**, including in the session you are working in right
-now. The session's own summary is different: it has to be built from every turn summary, which is a
-call of its own, so it is remade at most once every `summary.session_interval`.
+**A turn is described about a minute after it finishes**, including in the session you are working
+in right now. The minute is a wait for the turn to stay finished: an agent writes its end-of-turn
+marker for every block it completes, and a turn can go on past one. The session's own summary is
+different again: it has to be built from every turn summary, which is a call of its own, so it is
+remade at most once every `summary.session_interval`.
 
 **The oldest sessions go first.** A summary is a kilobyte that outlives what it was made from:
 agents rotate their own logs away, and the cache evicts conversations when it is over its size

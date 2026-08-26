@@ -262,9 +262,19 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 		// Every turn is described already. The log moved — worthOpening let this
 		// through — but not in a way that added anything to say, so record the
 		// version it moved to rather than opening the session again next run.
+		//
+		// Except while a turn is being held back. Recording the version says the
+		// log has been answered, and worthOpening then leaves the session alone
+		// until it moves again — but a log that just ended has no reason to move,
+		// so the held-back turn would never be summarized. Leaving it unanswered
+		// costs a parse per scan until the turn settles; recording it costs the
+		// turn.
+		if open {
+			return false, true
+		}
 		return markNothingToSummarize(ctx, db, s), true
 	}
-	r := summary.Request{PluginID: s.PluginID, SessionID: s.SessionID, Queued: time.Now(), Fingerprint: s.Fingerprint, Nodes: nodes}
+	r := summary.Request{PluginID: s.PluginID, SessionID: s.SessionID, Queued: time.Now(), Fingerprint: s.Fingerprint, Held: open, Nodes: nodes}
 	for _, batch := range summary.Batch(*conv, turns, want, s.CWD) {
 		doc, asked := summary.Prompt(s, *conv, turns, summary.Options{Turns: summary.TurnSet(batch)})
 		if len(asked) == 0 {
@@ -379,15 +389,23 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 			// The turns, and the session summary only if this call saw the whole
 			// session or the interval has passed — the same rule the worker
 			// follows, for the same reason (storeSessionSummary).
-			if err = storeSummaries(ctx, db, s, summary.Result{Turns: res.Turns}, r.Nodes, gen.Name(), false); err == nil {
+			// The version the request was built from, not the session as it stands
+			// now: the request may have been written by an earlier scan, and what
+			// these summaries describe is that version. Recording a newer one
+			// would say turns nobody has looked at are answered.
+			answered := s
+			if r.Fingerprint != "" {
+				answered.Fingerprint = r.Fingerprint
+			}
+			if err = storeSummaries(ctx, db, answered, summary.Result{Turns: res.Turns}, r.Nodes, gen.Name(), false); err == nil && !r.Held {
+				// Held requests write nothing to turn 0 — see the worker, which
+				// does the same for the same reason.
 				var whole string
 				if len(r.Batches[0]) == len(r.Nodes) {
 					whole = res.Session
 				}
-				storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), os.Stderr)
-				// The version is answered either way — see the worker, which does
-				// the same for the same reason.
-				_ = db.MarkExamined(ctx, s)
+				storeSessionSummary(ctx, db, gen, answered, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), os.Stderr)
+				_ = db.MarkExamined(ctx, answered)
 			}
 		}
 	}

@@ -113,8 +113,11 @@ func TestHasOpenTurnAnswersNoWhenTheAgentDoesNotSay(t *testing.T) {
 	if hasOpenTurn(turns, path, "", 0) {
 		t.Error("a session whose plugin reports no last kind was read as mid-turn")
 	}
-	if hasOpenTurn(turns, path, domain.EventTurnComplete, 0) {
-		t.Error("a finished turn was read as open")
+	if !hasOpenTurn(turns, path, domain.EventTurnComplete, 0) {
+		t.Error("a turn that ended a moment ago was trusted to have ended — end_turn is written per block, not per turn")
+	}
+	if hasOpenTurn(turns, path, domain.EventTurnComplete, settleAfterComplete) {
+		t.Error("a finished turn that sat still was read as open")
 	}
 	if !hasOpenTurn(turns, path, domain.EventStream, 0) {
 		t.Error("a turn being written was not recognized")
@@ -135,6 +138,34 @@ func TestHasOpenTurnIgnoresATurnThatIsNotAtTheEndOfTheBranch(t *testing.T) {
 	// Same session, nothing dropped: now the last entry really is the open turn.
 	if !hasOpenTurn(turns, []string{"a"}, domain.EventStream, 0) {
 		t.Error("the turn at the end of the branch was not recognized as open")
+	}
+}
+
+// end_turn is written for every block an agent finishes, not for the turn. A
+// Claude turn goes on past one when a background task reports back or a queued
+// prompt arrives, and its terminal node moves with it — so a summary made at the
+// first end_turn is withheld by the store a moment later, and the turn that
+// actually ended is paid for a second time.
+//
+// Observed while testing this on real sessions: end_turn at 08:54:56, the same
+// turn still going at 08:55:02, two summaries of it two minutes apart. A scan
+// runs every three seconds by default and walks straight into that gap.
+func TestHasOpenTurnDoesNotTrustAnEndTurnThatJustLanded(t *testing.T) {
+	turns := []transcript.Turn{{Index: 0, Nodes: []string{"a"}}}
+	path := []string{"a"}
+	if !hasOpenTurn(turns, path, domain.EventTurnComplete, 6*time.Second) {
+		t.Error("a turn that ended six seconds ago was summarized; that is the gap the real session fell into")
+	}
+	if !hasOpenTurn(turns, path, domain.EventTurnComplete, settleAfterComplete-time.Second) {
+		t.Error("a turn that ended just inside the window was summarized")
+	}
+	if hasOpenTurn(turns, path, domain.EventTurnComplete, settleAfterComplete) {
+		t.Error("a turn that ended and stayed ended was still held back")
+	}
+	// The two windows are different lengths and must not be confused: a turn that
+	// never ended waits for abandonedAfter, which is far longer.
+	if !hasOpenTurn(turns, path, domain.EventStream, settleAfterComplete) {
+		t.Error("an unfinished turn was treated as settled at the finished-turn window")
 	}
 }
 

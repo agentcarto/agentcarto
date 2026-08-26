@@ -167,17 +167,17 @@ func (d *DB) DropSummaries(ctx context.Context, s domain.Session) error {
 // MarkExamined records the fingerprint a session was last looked at, without
 // claiming anything was summarized.
 //
-// It is for the session a scan opened and found nothing to ask about — every
-// finished turn already described, and the one still being written not
-// summarizable yet. Recording the fingerprint is what stops the next scan from
-// opening it again for the same answer.
+// It is for the session a scan opened and found nothing to ask about: every turn
+// it holds is described already, or none of them renders to a document.
+// Recording the fingerprint is what stops the next scan from opening it again
+// for the same answer.
 //
-// Recording it through PutSummaries would also stamp created, and SummarizedAt
-// would come to mean "last looked at" rather than "last summarized". The hourly
-// guard reads that time, so a session being worked in — which reaches this on
-// every scan, since its newest turn is always the open one — would hold itself
-// off for an hour each time it was examined, and its finished turns would never
-// be summarized.
+// Recording it through PutSummaries would also stamp created, and the time a
+// session was last summarized would come to mean "last looked at". What paces
+// the session summary reads such a time (SessionSummarizedAt), so a session
+// examined often enough would push its own next summary further away every time
+// anything looked at it, rather than measuring from the last summary somebody
+// paid for.
 //
 // Turn 0 is the row it writes: worthOpening reads exactly that one, and the
 // per-turn rows keep the fingerprint each summary was actually made from. Where
