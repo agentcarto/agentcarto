@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agentcarto/agentcarto/internal/summary"
+	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 )
 
@@ -70,6 +72,35 @@ func TestSummariesDropsTurnsWhoseNodeMoved(t *testing.T) {
 	// A caller listing no turns at all still gets the session summary.
 	if got := d.Summaries(ctx, s, nil); len(got) != 1 || got[0].Text != "session" {
 		t.Errorf("with no turns listed, read back %+v, want only the session summary", got)
+	}
+}
+
+func TestSummariesRejectsOldNumbersAfterCompactRenumbering(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	s := domain.Session{PluginID: "p", SessionID: "compact", Fingerprint: "f1"}
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: "one", Prompt: "one"}}},
+		{ID: "a1", Parent: "u1", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer one"}}},
+		{ID: "compact", Parent: "a1", Events: []domain.Event{{Kind: domain.EventUser, Text: "summary", RawType: domain.RawCompactSummary}}},
+		{ID: "u2", Parent: "compact", Events: []domain.Event{{Kind: domain.EventUser, Text: "two", Prompt: "two"}}},
+		{ID: "a2", Parent: "u2", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer two"}}},
+		{ID: "u3", Parent: "a2", Events: []domain.Event{{Kind: domain.EventUser, Text: "three", Prompt: "three"}}},
+		{ID: "a3", Parent: "u3", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer three"}}},
+	})
+	// These rows use the old public numbering: the compact-only boundary consumed
+	// turn 2, so the two turns after it were stored as turns 3 and 4.
+	if err := d.PutSummaries(ctx, s, []Summary{
+		{Turn: 1, NodeID: "a1", Text: "old one"},
+		{Turn: 3, NodeID: "a2", Text: "old two"},
+		{Turn: 4, NodeID: "a3", Text: "old three"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	turns := transcript.Turns(c, c.ActivePath())
+	got := d.Summaries(ctx, s, summary.NodesByTurn(turns))
+	if len(got) != 1 || got[1].Text != "old one" {
+		t.Fatalf("old compact numbering leaked onto renumbered turns: %#v", got)
 	}
 }
 

@@ -10,18 +10,16 @@ import (
 	"github.com/agentcarto/core/domain"
 )
 
-// A session that grew since it was summarized costs only its new turns. Turn
-// numbers skip (a compact-summary turn takes a number without being one), so
-// the selection has to work on numbers rather than positions.
+// A session that grew since it was summarized costs only its new turns.
 func TestPendingTurnsAsksOnlyForWhatIsMissing(t *testing.T) {
-	turns := []transcript.Turn{{Index: 0}, {Index: 2}, {Index: 3}}
+	turns := []transcript.Turn{{Index: 0}, {Index: 1}, {Index: 2}}
 	stored := map[int]cache.Summary{
 		1: {Turn: 1, Text: "done"},
-		3: {Turn: 3, Text: "done"},
+		2: {Turn: 2, Text: "done"},
 	}
 	got := pendingTurns(turns, stored, false)
-	if len(got) != 1 || !got[4] {
-		t.Fatalf("pending=%v want only turn 4", got)
+	if len(got) != 1 || !got[3] {
+		t.Fatalf("pending=%v want only turn 3", got)
 	}
 }
 

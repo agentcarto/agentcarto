@@ -45,6 +45,18 @@ func TestHitsCarryTheTurnNumberTheTurnViewShows(t *testing.T) {
 	}
 }
 
+func TestHitsUseContiguousNumbersAfterCompact(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		node("u1", "", prompt("before")),
+		node("c", "u1", domain.Event{Kind: domain.EventUser, Text: "summary", RawType: domain.RawCompactSummary}),
+		node("u2", "c", prompt("needle after compact")),
+	})
+	hits, total := hitsOf(c, "needle", HitOptions{})
+	if total != 1 || len(hits) != 1 || hits[0].Turn != 2 {
+		t.Fatalf("hits=%#v total=%d want one hit in public turn 2", hits, total)
+	}
+}
+
 // The searched events are the ones the index holds — messages, task reports and
 // the one-line form of a tool call. Anything else would produce hits in sessions
 // the index cannot find at all.

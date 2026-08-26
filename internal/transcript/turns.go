@@ -13,10 +13,10 @@ import (
 
 // Turn is one turn of a branch, in the shape the reader sees it.
 type Turn struct {
-	// Index is the turn's chronological position on the branch. It is the number
+	// Index is the turn's position among the turns a reader can open. It is the number
 	// the TUI shows as "turn #N" (Index+1) and the one an exported document
-	// carries, so it stays attached to the turn even where a turn is left out:
-	// the numbers can skip.
+	// carries. Summary-only compact boundaries are left out before this index is
+	// assigned, so public turn numbers are contiguous.
 	Index int
 	Nodes []string
 	// Compact marks a turn whose context was compacted at its boundary (the TUI's
@@ -32,13 +32,13 @@ type Turn struct {
 func Turns(c domain.Conversation, path []string) []Turn {
 	var out []Turn
 	carry := false
-	for i, nodes := range conversation.TurnsOfPath(c, path) {
+	for _, nodes := range conversation.TurnsOfPath(c, path) {
 		compact := conversation.TurnIsCompact(c, nodes)
 		if compact && !conversation.TurnHasRealContent(c, nodes) {
 			carry = true
 			continue
 		}
-		out = append(out, Turn{Index: i, Nodes: nodes, Compact: carry || compact})
+		out = append(out, Turn{Index: len(out), Nodes: nodes, Compact: carry || compact})
 		carry = false
 	}
 	if carry && len(out) > 0 {

@@ -201,12 +201,10 @@ func toolOptions(mode string) (transcript.Options, error) {
 	return transcript.Options{}, fmt.Errorf("--tools %q: use label, full or none", mode)
 }
 
-// selectTurns picks the turns to print. Numbers are the ones the outline lists;
-// they are not contiguous, because a turn holding only a compact summary takes a
-// number without being one of the turns. A range therefore means "every turn
-// whose number falls inside it", while a number named on its own has to exist —
-// asking for turn 4 and silently getting nothing usually means the caller
-// counted positions instead of reading the outline.
+// selectTurns picks the turns to print. Numbers are the contiguous public
+// numbers the outline lists. A named number or range outside that list is an
+// error rather than a shorter document, because it usually means the caller
+// selected a different session or read a stale outline.
 func selectTurns(turns []transcript.Turn, spec string, last int, all bool) ([]transcript.Turn, error) {
 	if all {
 		return turns, nil
@@ -256,8 +254,8 @@ func selectTurns(turns []transcript.Turn, spec string, last int, all bool) ([]tr
 }
 
 // turnSelection is what --turns asked for: numbers named one by one, and ranges.
-// The two are kept apart because a gap inside a range is normal and a named
-// number that is not there is a mistake.
+// The two are kept apart so errors can name an absent number differently from
+// a range that does not overlap the session.
 type turnSelection struct {
 	explicit map[int]bool
 	ranges   [][2]int

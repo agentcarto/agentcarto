@@ -11,10 +11,7 @@ import (
 func showTurns(n int) []transcript.Turn {
 	out := make([]transcript.Turn, 0, n)
 	for i := range n {
-		// Turn numbers skip: a compact-summary turn takes a number without being
-		// one of the turns. The selection has to work on the numbers, not on
-		// positions in the slice.
-		out = append(out, transcript.Turn{Index: i * 2})
+		out = append(out, transcript.Turn{Index: i})
 	}
 	return out
 }
@@ -46,22 +43,20 @@ func TestParseTurnSpec(t *testing.T) {
 }
 
 func TestSelectTurns(t *testing.T) {
-	turns := showTurns(5) // numbers 1, 3, 5, 7, 9
+	turns := showTurns(5)
 
-	got, err := selectTurns(turns, "3,7", 0, false)
-	if err != nil || len(got) != 2 || numbers(got)[0] != 3 || numbers(got)[1] != 7 {
+	got, err := selectTurns(turns, "2,4", 0, false)
+	if err != nil || len(got) != 2 || numbers(got)[0] != 2 || numbers(got)[1] != 4 {
 		t.Fatalf("selection=%v err=%v", numbers(got), err)
 	}
-	// A range keeps every turn whose number falls inside it. The numbers skip, so
-	// 3-7 holds three turns and no gap is an error.
-	if got, err = selectTurns(turns, "3-7", 0, false); err != nil || len(got) != 3 {
+	if got, err = selectTurns(turns, "2-4", 0, false); err != nil || len(got) != 3 {
 		t.Fatalf("range selection=%v err=%v", numbers(got), err)
 	}
 	// A range that covers no turn at all is a mistake worth reporting.
 	if _, err = selectTurns(turns, "20-30", 0, false); err == nil || !strings.Contains(err.Error(), "no turn between 20 and 30") {
 		t.Fatalf("empty range err=%v", err)
 	}
-	if got, err = selectTurns(turns, "", 2, false); err != nil || numbers(got)[0] != 7 {
+	if got, err = selectTurns(turns, "", 2, false); err != nil || numbers(got)[0] != 4 {
 		t.Fatalf("--last 2 = %v err=%v", numbers(got), err)
 	}
 	// Asking for more than there is gives everything rather than an error: the
@@ -72,13 +67,11 @@ func TestSelectTurns(t *testing.T) {
 	if got, err = selectTurns(turns, "", 0, true); err != nil || len(got) != 5 {
 		t.Fatalf("--all = %v err=%v", numbers(got), err)
 	}
-	// A number that is not a turn is an error, not a shorter document: it usually
-	// means the caller counted positions instead of reading the outline.
-	_, err = selectTurns(turns, "2,4", 0, false)
-	if err == nil || !strings.Contains(err.Error(), "no such turn: 2, 4") {
+	_, err = selectTurns(turns, "6", 0, false)
+	if err == nil || !strings.Contains(err.Error(), "no such turn: 6") {
 		t.Fatalf("err=%v", err)
 	}
-	if !strings.Contains(err.Error(), "turns 1 to 9") {
+	if !strings.Contains(err.Error(), "turns 1 to 5") {
 		t.Fatalf("the error should say what is there: %v", err)
 	}
 }
@@ -109,17 +102,15 @@ func TestOutlineListsTheTurnNumbersShowTakes(t *testing.T) {
 	turns := transcript.Turns(c, c.ActivePath())
 	got := transcript.Outline(s, c, turns, transcript.Options{Tools: transcript.ToolsLabel})
 	for _, want := range []string{"- **Session**: 8f3a2b1c", "- **Turns**: 2",
-		"- Turn 1", "最初の依頼", "- Turn 3", "次の依頼", "»", " B]"} {
+		"- Turn 1", "最初の依頼", "- Turn 2", "次の依頼", "»", " B]"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("outline is missing %q:\n%s", want, got)
 		}
 	}
-	// Turn 2 was the compact summary: it has no line of its own, and the numbers
-	// the outline lists are the ones selectTurns accepts.
-	if strings.Contains(got, "- Turn 2") {
-		t.Errorf("the summary-only turn got a line:\n%s", got)
+	if strings.Contains(got, "- Turn 3") {
+		t.Errorf("the outline numbering is not contiguous:\n%s", got)
 	}
-	if _, err := selectTurns(turns, "1,3", 0, false); err != nil {
+	if _, err := selectTurns(turns, "1,2", 0, false); err != nil {
 		t.Errorf("the outline's numbers were rejected: %v", err)
 	}
 }

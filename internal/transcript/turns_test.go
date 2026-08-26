@@ -49,9 +49,9 @@ func TestTurnsNumbersEveryTurnOnThePath(t *testing.T) {
 func TestTurnsCarriesTheCompactMarkForward(t *testing.T) {
 	c := conv(userNode("a", "", "first"), compactNode("b", "a"), userNode("c", "b", "second"))
 	ts := Turns(c, c.ActivePath())
-	// The summary-only turn is not one of the turns, but its number is consumed:
-	// the turn after it keeps the chronological index the TUI shows.
-	if got := indexes(ts); len(got) != 2 || got[0] != 0 || got[1] != 2 {
+	// The summary-only turn is not one of the turns, so the public indexes stay
+	// contiguous. The compact boundary is carried separately by the badge.
+	if got := indexes(ts); len(got) != 2 || got[0] != 0 || got[1] != 1 {
 		t.Fatalf("indexes=%v", got)
 	}
 	if ts[0].Compact {

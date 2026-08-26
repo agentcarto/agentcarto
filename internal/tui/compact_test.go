@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -33,12 +34,17 @@ func TestCompactSummaryOnlyTurnSkippedAndBadgeCarried(t *testing.T) {
 	if len(turns) != 2 {
 		t.Fatalf("displayed turn count=%d want 2 (summary-only compact is skipped)", len(turns))
 	}
-	// Newest on top: turns[0]=u2 (chron2, carried badge), turns[1]=u1 (chron0).
-	if turns[0].TurnIndex != 2 || !turns[0].Badge {
+	// Newest on top: turns[0]=u2 (public index 1, carried badge), turns[1]=u1 (index 0).
+	if turns[0].TurnIndex != 1 || !turns[0].Badge {
 		t.Fatalf("» badge not carried over to the newest turn: idx=%d badge=%v", turns[0].TurnIndex, turns[0].Badge)
 	}
 	if turns[1].TurnIndex != 0 || turns[1].Badge {
 		t.Fatalf("first turn has wrong state: idx=%d badge=%v", turns[1].TurnIndex, turns[1].Badge)
+	}
+	m.turnOpen = true
+	m.detailCursor = 0
+	if got := m.detailView(); !strings.Contains(got, "turn #2/2") {
+		t.Fatalf("open turn header should use the contiguous public number:\n%s", got)
 	}
 }
 
