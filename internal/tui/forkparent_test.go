@@ -105,6 +105,26 @@ func TestForkParentRowGoesAwayWhenDescendingByHand(t *testing.T) {
 			t.Fatal("a hand-entered frame should not carry the fork-parent row")
 		}
 	}
+	if got := stripANSI(m.detailView()); strings.Contains(got, "(p)") {
+		t.Fatalf("the heading offers (p) where the row is gone:\n%s", got)
+	}
+}
+
+// The heading's (p) and the row are the same offer, so they appear together.
+// They did not once: opening a fork focuses a frame of its own, which the
+// heading read as descent and left the key unannounced.
+func TestForkParentRowAndHeadingAgree(t *testing.T) {
+	m := forkDetail(true)
+	row := false
+	for _, r := range m.detailRows {
+		if r.Kind == "forkparent" {
+			row = true
+		}
+	}
+	heading := strings.Contains(stripANSI(m.detailView()), "(p)")
+	if !row || !heading {
+		t.Fatalf("a directly opened fork should offer both: row=%v heading(p)=%v", row, heading)
+	}
 }
 
 // Selecting the row goes to the parent, the same move the p key makes.

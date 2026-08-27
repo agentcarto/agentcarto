@@ -1978,10 +1978,13 @@ func (m Model) detailSubLine(s *domain.Session) string {
 		sub = " ⌫ log deleted (read from the cache) ·" + sub
 	}
 	// Use the same "forked from: <lineage>" wording whether a fork was opened directly or descended into.
-	route, showP := m.detailForkRoute()
+	route := m.detailForkRoute()
 	if len(route) > 0 {
 		sub += "   forked from: " + strings.Join(route, " › ")
-		if showP {
+		// The same condition that puts the row under turn #1 there, so the
+		// heading, the row and the key all agree on whether the parent is
+		// one move away.
+		if m.forkParentRowVisible() {
 			sub += " (p)"
 		}
 	}
@@ -2283,24 +2286,27 @@ func (m Model) forkLineage(s domain.Session) []string {
 // current detail view is fork content. When a fork session is opened directly, this is
 // that session's ancestors; when descended into a fork branch, the fork's parent is the
 // current session, so it returns the current session's lineage plus the current session
-// ID. showP is true only for the direct-open case, where (p) can jump to the parent
-// session. For non-forks (rewind descent, ordinary sessions) it returns nil.
-func (m Model) detailForkRoute() (route []string, showP bool) {
+// ID. For non-forks (rewind descent, ordinary sessions) it returns nil.
+//
+// Whether the parent is one move away is a separate question, answered by
+// forkParentRowVisible: a directly opened fork focuses a frame of its own, which
+// this function reads as descent but the reader does not.
+func (m Model) detailForkRoute() []string {
 	s := m.detailSession
 	if s == nil {
-		return nil, false
+		return nil
 	}
 	if len(m.detailPathStack) > 1 {
 		last := m.detailPathStack[len(m.detailPathStack)-1]
 		if m.detail != nil && len(last.path) > 0 && convlogic.BranchKind(*m.detail, last.path[0]) == "fork" {
-			return append(m.forkLineage(*s), shortID(s.SessionID)), false
+			return append(m.forkLineage(*s), shortID(s.SessionID))
 		}
-		return nil, false // descent into a rewind uses the normal breadcrumb
+		return nil // descent into a rewind uses the normal breadcrumb
 	}
 	if s.ParentSessionID != "" {
-		return m.forkLineage(*s), true // a fork was opened directly
+		return m.forkLineage(*s) // a fork was opened directly
 	}
-	return nil, false
+	return nil
 }
 
 // branchFrameLabel is the breadcrumb label for a frame descended into another lineage.
