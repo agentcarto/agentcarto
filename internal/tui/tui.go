@@ -802,12 +802,17 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		return m.exportSession()
 	case "enter", "right", "l":
-		if row, ok := m.selectedDetailRow(); ok && row.Kind == "branch" {
-			m.detailPathStack = append(m.detailPathStack, detailFrame{path: convlogic.DeepestPath(*m.detail, row.Root), label: m.branchFrameLabel(row.Root)})
-			m.setDetailPath(m.currentDetailPath())
-			m.detailCursor = 0
-			m.detailOffset = 0
-			return m, nil
+		if row, ok := m.selectedDetailRow(); ok {
+			switch row.Kind {
+			case "forkparent":
+				return m.jumpToParent()
+			case "branch":
+				m.detailPathStack = append(m.detailPathStack, detailFrame{path: convlogic.DeepestPath(*m.detail, row.Root), label: m.branchFrameLabel(row.Root)})
+				m.setDetailPath(m.currentDetailPath())
+				m.detailCursor = 0
+				m.detailOffset = 0
+				return m, nil
+			}
 		}
 		m.openCurrentTurn(true)
 		return m, nil
@@ -1852,9 +1857,12 @@ func (m Model) detailView() string {
 	for i := offset; i < end; i++ {
 		rowData := m.detailRows[i]
 		selected := i == m.detailCursor
-		if rowData.Kind == "branch" {
+		switch rowData.Kind {
+		case "forkparent":
+			bodyLines = append(bodyLines, m.detailForkParentLine(selected))
+		case "branch":
 			bodyLines = append(bodyLines, m.detailBranchLine(rowData, selected))
-		} else {
+		default:
 			bodyLines = append(bodyLines, m.detailTurnLine(s, rowData, selected, colW, modelW, hit[i]))
 		}
 	}
@@ -1999,6 +2007,58 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool) string {
 	nb := convlogic.BranchAltCount(*m.detail, rowData.Root)
 	label := fmt.Sprintf("    %s %s (%dturn/%dmsg/%dbranch) %s", conn, convlogic.BranchKind(*m.detail, rowData.Root), len(bt), sz, nb, convlogic.BranchLead(*m.detail, rowData.Root))
 	line := styled(clip(label, max(20, m.width-1)), lipgloss.Color("5"), selected, false)
+	if selected && lipgloss.Width(line) < m.width-1 {
+		line += styled(strings.Repeat(" ", m.width-1-lipgloss.Width(line)), "", true, false)
+	}
+	return line
+}
+
+// forkParentRowVisible reports whether the turn list should offer the row that
+// leads to the session this fork was made from.
+//
+// Opening a fork directly focuses a frame on its own line automatically, and
+// that frame is still the session the reader opened — the row belongs there.
+// Frames entered by hand are a different matter: the list is then showing some
+// other line of conversation, and a row about this session's origin would be
+// answering a question nobody asked.
+func (m Model) forkParentRowVisible() bool {
+	if m.detailSession == nil || m.detailSession.ParentSessionID == "" {
+		return false
+	}
+	for i := 1; i < len(m.detailPathStack); i++ { // 0 is the base frame, never entered by hand
+		if !m.detailPathStack[i].followFocus {
+			return false
+		}
+	}
+	return true
+}
+
+// forkParentLabel is the undecorated text of the fork-parent row, shared by the
+// row itself and by what a turn search matches against.
+func (m Model) forkParentLabel() string {
+	if m.detailSession == nil {
+		return ""
+	}
+	pid := m.detailSession.ParentSessionID
+	label := "↳" + shortID(pid) + " forked from"
+	p := m.findSession(m.detailSession.PluginID, pid)
+	if p == nil {
+		return label + " (not loaded)"
+	}
+	if t := strings.Join(strings.Fields(p.Title), " "); t != "" {
+		label += " " + t
+	}
+	return label
+}
+
+// detailForkParentLine renders the row under turn #1 that leads to the session
+// this fork was made from. It names the parent by the same ↳<id> the session
+// list uses, and adds its title so the row says which conversation it opens. A
+// parent that is not in the list is still named — knowing a fork came from
+// somewhere is worth more than hiding the row — and selecting it explains
+// itself through jumpToParent's message.
+func (m Model) detailForkParentLine(selected bool) string {
+	line := styled(clip("    "+m.forkParentLabel(), max(20, m.width-1)), lipgloss.Color("5"), selected, false)
 	if selected && lipgloss.Width(line) < m.width-1 {
 		line += styled(strings.Repeat(" ", m.width-1-lipgloss.Width(line)), "", true, false)
 	}
@@ -2311,6 +2371,12 @@ func (m *Model) rebuildDetailRows(path []string) {
 			m.detailRows = append(m.detailRows, detailRow{Kind: "branch", Root: root, LastBranch: j == len(subs)-1})
 		}
 	}
+	// A fork carries a copy of what was said before it, so its oldest turn is
+	// where the parent session continues. Rows run newest first, so the row that
+	// leads there belongs at the very bottom, under turn #1.
+	if m.forkParentRowVisible() {
+		m.detailRows = append(m.detailRows, detailRow{Kind: "forkparent"})
+	}
 }
 
 func dropLastRune(s string) string {
@@ -2321,10 +2387,14 @@ func dropLastRune(s string) string {
 	return string(r[:len(r)-1])
 }
 
-// detailRowText returns the lowercased text used for search matching (turn = headline + body, branch = lead).
+// detailRowText returns the lowercased text used for search matching (turn =
+// headline + body, branch = lead, fork parent = the parent's id and title).
 func (m Model) detailRowText(r detailRow) string {
 	if m.detail == nil {
 		return ""
+	}
+	if r.Kind == "forkparent" {
+		return strings.ToLower(m.forkParentLabel())
 	}
 	if r.Kind == "branch" {
 		return strings.ToLower(convlogic.BranchLead(*m.detail, r.Root))
