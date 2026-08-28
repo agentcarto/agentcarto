@@ -88,6 +88,45 @@ func TestFirstScanIsFullThenDifferential(t *testing.T) {
 	}
 }
 
+func TestSessionParentTopologyIgnoresConversationGrowth(t *testing.T) {
+	before := []domain.Session{
+		{PluginID: "codex", SessionID: "root", Title: "old"},
+		{PluginID: "codex", SessionID: "child", ParentSessionID: "root", Fingerprint: "old"},
+	}
+	after := append([]domain.Session(nil), before...)
+	after[0].Title = "new"
+	after[1].Fingerprint = "new"
+	after[1].UpdatedAt = time.Now()
+	if !sameSessionParentTopology(before, after) {
+		t.Fatal("conversation growth should not invalidate logical parents")
+	}
+}
+
+func TestSessionParentTopologyDetectsRelationshipChanges(t *testing.T) {
+	base := []domain.Session{
+		{PluginID: "codex", SessionID: "root"},
+		{PluginID: "codex", SessionID: "child", ParentSessionID: "root"},
+	}
+	tests := map[string][]domain.Session{
+		"new session": append(append([]domain.Session(nil), base...), domain.Session{PluginID: "codex", SessionID: "grandchild", ParentSessionID: "child"}),
+		"new parent": {
+			{PluginID: "codex", SessionID: "root"},
+			{PluginID: "codex", SessionID: "child", ParentSessionID: "other"},
+		},
+		"empty fork started": {
+			{PluginID: "codex", SessionID: "root"},
+			{PluginID: "codex", SessionID: "child", ParentSessionID: "root", EmptyFork: true},
+		},
+	}
+	for name, changed := range tests {
+		t.Run(name, func(t *testing.T) {
+			if sameSessionParentTopology(base, changed) {
+				t.Fatal("relationship change should invalidate logical parents")
+			}
+		})
+	}
+}
+
 // The list is what the scan found plus what the cache remembers and the scan
 // could not: a session whose log was deleted is still there to read. What the
 // cache is told it has seen stays the scan's own answer, so a deleted session

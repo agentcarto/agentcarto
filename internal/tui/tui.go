@@ -31,6 +31,7 @@ type scanMsg struct {
 	// deleted session as seen just now would make it look alive to everything
 	// that asks when a session was last there.
 	sessions []domain.Session
+	parents  map[domain.SessionKey]string
 	index    *searchpkg.Index
 	indexFP  map[string]string
 }
@@ -76,6 +77,7 @@ type Model struct {
 	summaryModel      string
 	app               *app.App
 	sessions          []domain.Session
+	sessionParents    map[domain.SessionKey]string // canonical conversation parent; absent entries fall back to ParentSessionID
 	dead              map[string]string
 	indexFP           map[string]string
 	filtered          []int
@@ -239,10 +241,39 @@ func (m Model) scan() tea.Cmd {
 				sessions = app.MergeDeletedLogs(sessions, warm, scanSucceeded(m.app, snap))
 			}
 		}
+		parents := m.sessionParents
+		if parents == nil || !sameSessionParentTopology(m.sessions, sessions) {
+			parents = m.app.LogicalSessionParents(ctx, sessions)
+		}
 		idx, fp := m.app.BuildIndex(ctx, sessions, store, m.index, m.indexFP)
-		return scanMsg{snap, sessions, idx, fp}
+		return scanMsg{snap: snap, sessions: sessions, parents: parents, index: idx, indexFP: fp}
 	}
 }
+
+// sameSessionParentTopology reports whether the inputs that can change a
+// canonical display parent are unchanged. Titles, timestamps and fingerprints
+// deliberately do not participate: an established fork attachment does not
+// move as its conversation grows, so periodic scans can reuse the resolved map.
+func sameSessionParentTopology(a, b []domain.Session) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	type relation struct {
+		parent string
+		empty  bool
+	}
+	relations := make(map[domain.SessionKey]relation, len(a))
+	for _, s := range a {
+		relations[s.Key()] = relation{parent: s.ParentSessionID, empty: s.EmptyFork}
+	}
+	for _, s := range b {
+		if got, ok := relations[s.Key()]; !ok || got != (relation{parent: s.ParentSessionID, empty: s.EmptyFork}) {
+			return false
+		}
+	}
+	return true
+}
+
 func tick(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
@@ -348,8 +379,9 @@ func (m *Model) appendForest(cand []int) {
 	var roots []int
 	for _, ix := range cand {
 		s := m.sessions[ix]
-		if s.ParentSessionID != "" && inScope[s.ParentSessionID] {
-			children[s.ParentSessionID] = append(children[s.ParentSessionID], ix)
+		parentID := m.sessionParentID(s)
+		if parentID != "" && inScope[parentID] {
+			children[parentID] = append(children[parentID], ix)
 		} else {
 			roots = append(roots, ix)
 		}
@@ -398,7 +430,7 @@ func (m *Model) appendForest(cand []int) {
 			CWD:        m.sessions[ix].CWD,
 			SessIdx:    ix,
 			Depth:      depth,
-			TreePrefix: sessionTreePrefix(ancLast, isLast, depth, m.sessions[ix].ParentSessionID),
+			TreePrefix: sessionTreePrefix(ancLast, isLast, depth, m.sessionParentID(m.sessions[ix])),
 		})
 		kids := children[m.sessions[ix].SessionID]
 		var childAnc []bool
@@ -550,6 +582,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 	m.scanned = true
 	m.sessions = x.sessions
+	m.sessionParents = x.parents
 	m.dead = x.snap.Dead
 	m.index = x.index
 	m.indexFP = x.indexFP
@@ -1001,7 +1034,7 @@ func (m Model) forkFromDetail() (tea.Model, tea.Cmd) {
 // jumpToParent navigates from a fork to its parent session, remembering the child so
 // "back" can return to it.
 func (m Model) jumpToParent() (tea.Model, tea.Cmd) {
-	pid := m.detailSession.ParentSessionID
+	pid := m.sessionParentID(*m.detailSession)
 	if pid == "" {
 		m.flash = "This session has no parent"
 		return m, nil
@@ -1569,8 +1602,8 @@ func (m Model) sessionRow(s domain.Session, selected bool, maxN int, prefix stri
 	// A fork child whose parent is not shown in the tree (a root row) indicates its
 	// parent with an ↳ lineage marker. Already-nested rows (prefix != "") show their
 	// parent via the tree, so we omit the redundant marker.
-	if s.ParentSessionID != "" && prefix == "" {
-		b.WriteString(styled("↳"+shortID(s.ParentSessionID)+" ", lipgloss.Color("5"), selected, false))
+	if parentID := m.sessionParentID(s); parentID != "" && prefix == "" {
+		b.WriteString(styled("↳"+shortID(parentID)+" ", lipgloss.Color("5"), selected, false))
 	}
 	// Nested fork rows put the tree prefix at the start of the Title column. The fixed
 	// columns (status/date/id, etc.) stay aligned across all rows regardless of depth,
@@ -2088,7 +2121,7 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool, colW [9]int, m
 // other line of conversation, and a row about this session's origin would be
 // answering a question nobody asked.
 func (m Model) forkParentRowVisible() bool {
-	if m.detailSession == nil || m.detailSession.ParentSessionID == "" {
+	if m.detailSession == nil || m.sessionParentID(*m.detailSession) == "" {
 		return false
 	}
 	for i := 1; i < len(m.detailPathStack); i++ { // 0 is the base frame, never entered by hand
@@ -2105,7 +2138,7 @@ func (m Model) forkParentLabel() string {
 	if m.detailSession == nil {
 		return ""
 	}
-	pid := m.detailSession.ParentSessionID
+	pid := m.sessionParentID(*m.detailSession)
 	label := "↳" + shortID(pid) + " forked from"
 	p := m.findSession(m.detailSession.PluginID, pid)
 	if p == nil {
@@ -2234,7 +2267,7 @@ func (m Model) detailFooter(s *domain.Session) string {
 		return m.searchFooter(" Search > "+m.turnQuery, len(m.turnListHits()), m.turnSearchPos)
 	}
 	foot := " ↑↓/jk move  Enter open  y copy  x export  o resume  c cd  / search  f fork"
-	if s.ParentSessionID != "" {
+	if m.sessionParentID(*s) != "" {
 		foot += "  p parent"
 	}
 	foot += "  q/← back "
@@ -2347,13 +2380,24 @@ func (m Model) findSession(pluginID, sessionID string) *domain.Session {
 	return nil
 }
 
+// sessionParentID is the single source of truth for user-facing hierarchy and
+// parent navigation. ParentSessionID remains the recorded creation provenance;
+// once a scan has resolved the canonical conversation parent, every UI surface
+// uses that logical relationship instead.
+func (m Model) sessionParentID(s domain.Session) string {
+	if pid, ok := m.sessionParents[s.Key()]; ok {
+		return pid
+	}
+	return s.ParentSessionID
+}
+
 // forkLineage returns the short IDs of fork session s's ancestors (following
-// ParentSessionID: root → … → immediate parent). It stops once a parent is no longer in
-// the list (still emitting that ID). It renders a multi-level fork lineage from the root.
+// the canonical conversation parent: root → … → immediate parent). It stops once
+// a parent is no longer in the list (still emitting that ID).
 func (m Model) forkLineage(s domain.Session) []string {
 	var anc []string // collected as immediate parent → … → root
 	seen := map[string]bool{s.SessionID: true}
-	pid := s.ParentSessionID
+	pid := m.sessionParentID(s)
 	for pid != "" && !seen[pid] {
 		seen[pid] = true
 		anc = append(anc, shortID(pid))
@@ -2361,7 +2405,7 @@ func (m Model) forkLineage(s domain.Session) []string {
 		if p == nil {
 			break
 		}
-		pid = p.ParentSessionID
+		pid = m.sessionParentID(*p)
 	}
 	for i, j := 0, len(anc)-1; i < j; i, j = i+1, j-1 { // reverse to root → immediate parent order
 		anc[i], anc[j] = anc[j], anc[i]
@@ -2390,7 +2434,7 @@ func (m Model) detailForkRoute() []string {
 		}
 		return nil // descent into a rewind uses the normal breadcrumb
 	}
-	if s.ParentSessionID != "" {
+	if m.sessionParentID(*s) != "" {
 		return m.forkLineage(*s) // a fork was opened directly
 	}
 	return nil

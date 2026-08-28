@@ -196,6 +196,62 @@ func TestForkBranchOpensOwningSessionWithParentNavigation(t *testing.T) {
 	}
 }
 
+func TestForkNavigationUsesCanonicalConversationParent(t *testing.T) {
+	c := forkConversation()
+	root := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "root", CWD: "/repo", Title: "shared history"}
+	creationParent := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "middle", CWD: "/repo", Title: "first edit", ParentSessionID: "root"}
+	reedited := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "child", CWD: "/repo", Title: "second edit", ParentSessionID: "middle"}
+	origins := map[string]app.NodeOrigin{
+		"u1": {Session: root, NodeID: "u1"},
+		"a1": {Session: root, NodeID: "a1"},
+		"p2": {Session: root, NodeID: "p2", ActiveLeaf: true},
+		"f1": {Session: reedited, NodeID: "f1"},
+		"f2": {Session: reedited, NodeID: "f2", ActiveLeaf: true},
+	}
+	m := Model{
+		width:         140,
+		height:        20,
+		detailSession: &root,
+		sessions:      []domain.Session{root, creationParent, reedited},
+		sessionParents: map[domain.SessionKey]string{
+			creationParent.Key(): "root",
+			reedited.Key():       "root",
+		},
+	}
+	u, _ := m.Update(convMsg{c: &c, origins: origins, reset: true})
+	m = u.(Model)
+	for i, row := range m.detailRows {
+		if row.Kind == "branch" && row.Root == "f1" {
+			m.detailCursor = i
+			break
+		}
+	}
+
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = u.(Model)
+	if cmd != nil || m.detailSession == nil || m.detailSession.SessionID != "child" {
+		t.Fatalf("fork Enter did not synchronously open reedited session: session=%v cmd=%v", m.detailSession, cmd)
+	}
+	view := stripANSI(m.detailView())
+	if !strings.Contains(view, "forked from: root") || strings.Contains(view, "forked from: root › middle") {
+		t.Fatalf("breadcrumb followed creation ancestry instead of conversation ancestry:\n%s", view)
+	}
+	if !strings.Contains(view, "↳root forked from shared history") {
+		t.Fatalf("parent row did not name the conversation parent:\n%s", view)
+	}
+
+	u, cmd = m.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = u.(Model)
+	if cmd != nil || m.detailSession == nil || m.detailSession.SessionID != "root" {
+		t.Fatalf("p opened creation parent instead of conversation parent: session=%v cmd=%v", m.detailSession, cmd)
+	}
+	u, cmd = m.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = u.(Model)
+	if cmd != nil || m.detailSession == nil || m.detailSession.SessionID != "child" {
+		t.Fatalf("q did not synchronously return to reedited session: session=%v cmd=%v", m.detailSession, cmd)
+	}
+}
+
 // The row is a way to another session, not a branch of this one, so it must not
 // be counted among the branches the header reports.
 func TestForkParentRowIsNotCountedAsABranch(t *testing.T) {

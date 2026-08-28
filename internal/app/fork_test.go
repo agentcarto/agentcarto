@@ -234,6 +234,65 @@ func TestConversationFromFocusPreservesGrandchildForkBeforeParentSuffix(t *testi
 	if got := convlogic.TurnHeadline(*conv, pathToNode(*conv, focusLeaf)); got != "root prompt" {
 		t.Fatalf("focused path is disconnected: headline=%q leaf=%q", got, focusLeaf)
 	}
+	parents := a.LogicalSessionParents(context.Background(), sessions)
+	if got := parents[sessions[1].Key()]; got != "R" {
+		t.Fatalf("child logical parent=%q want R", got)
+	}
+	if got := parents[sessions[2].Key()]; got != "R" {
+		t.Fatalf("grandchild that returns to shared history has logical parent=%q want R", got)
+	}
+}
+
+func TestLogicalSessionParentsKeepsGrandchildAfterParentSuffixNested(t *testing.T) {
+	root := domain.NewConversation([]domain.ConvNode{
+		{ID: "r1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "root prompt", Prompt: "root prompt"}}},
+		{ID: "r2", Parent: "r1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "root answer"}}},
+	})
+	child := domain.NewConversation([]domain.ConvNode{
+		{ID: "r1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "root prompt", Prompt: "root prompt"}}},
+		{ID: "r2", Parent: "r1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "root answer"}}},
+		{ID: "c1", Parent: "r2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "child prompt", Prompt: "child prompt"}}},
+		{ID: "c2", Parent: "c1", Timestamp: time.Unix(4, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "child answer"}}},
+	})
+	grandchild := domain.NewConversation([]domain.ConvNode{
+		{ID: "r1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "root prompt", Prompt: "root prompt"}}},
+		{ID: "r2", Parent: "r1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "root answer"}}},
+		{ID: "c1", Parent: "r2", Timestamp: time.Unix(3, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "child prompt", Prompt: "child prompt"}}},
+		{ID: "c2", Parent: "c1", Timestamp: time.Unix(4, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "child answer"}}},
+		{ID: "g1", Parent: "c2", Timestamp: time.Unix(5, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "grandchild prompt", Prompt: "grandchild prompt"}}},
+		{ID: "g2", Parent: "g1", Timestamp: time.Unix(6, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "grandchild answer"}}},
+	})
+	a := testAppWithConvs(map[string]domain.Conversation{"root": root, "child": child, "grandchild": grandchild})
+	sessions := []domain.Session{
+		{PluginID: "p", SessionID: "R", SourceRef: domain.SessionRef{Source: "root"}},
+		{PluginID: "p", SessionID: "C", ParentSessionID: "R", StartedAt: time.Unix(3, 0), SourceRef: domain.SessionRef{Source: "child"}},
+		{PluginID: "p", SessionID: "G", ParentSessionID: "C", StartedAt: time.Unix(5, 0), SourceRef: domain.SessionRef{Source: "grandchild"}},
+	}
+
+	parents := a.LogicalSessionParents(context.Background(), sessions)
+	if got := parents[sessions[2].Key()]; got != "C" {
+		t.Fatalf("grandchild after parent suffix has logical parent=%q want C", got)
+	}
+}
+
+func TestLogicalSessionParentsFallsBackToRecordedParent(t *testing.T) {
+	root := domain.NewConversation([]domain.ConvNode{
+		{ID: "r1", Events: []domain.Event{{Kind: domain.EventUser, Text: "root", Prompt: "root"}}},
+	})
+	child := domain.NewConversation([]domain.ConvNode{
+		{ID: "c1", Events: []domain.Event{{Kind: domain.EventUser, Text: "child", Prompt: "child"}}},
+	})
+	a := testAppWithConvs(map[string]domain.Conversation{"root": root, "child": child})
+	sessions := []domain.Session{
+		{PluginID: "p", SessionID: "R", SourceRef: domain.SessionRef{Source: "root"}},
+		{PluginID: "p", SessionID: "C", ParentSessionID: "R", SourceRef: domain.SessionRef{Source: "child"}},
+		{PluginID: "p", SessionID: "G", ParentSessionID: "C", SourceRef: domain.SessionRef{Source: "missing"}},
+	}
+
+	parents := a.LogicalSessionParents(context.Background(), sessions)
+	if got := parents[sessions[2].Key()]; got != "C" {
+		t.Fatalf("unresolved grandchild parent=%q want recorded parent C", got)
+	}
 }
 
 // rewinderStub records the ForkTarget it receives (and loads conversations).

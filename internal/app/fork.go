@@ -41,6 +41,86 @@ func (a *App) ConversationFromFocus(ctx context.Context, focus domain.Session, s
 	return a.conversationWithForks(ctx, root, forks, seen, focus.Key())
 }
 
+// LogicalSessionParents returns the parent each session has in the canonical
+// conversation tree. ParentSessionID records which session created a fork, but
+// a prompt edit can fork from that session's inherited prefix before any of its
+// own turns; the two resulting sessions are then conversation siblings. The
+// returned map starts with the recorded parent and replaces it only when the
+// synthesized node origins prove a different attachment point.
+func (a *App) LogicalSessionParents(ctx context.Context, sessions []domain.Session) map[domain.SessionKey]string {
+	parents := make(map[domain.SessionKey]string, len(sessions))
+	byKey := make(map[domain.SessionKey]domain.Session, len(sessions))
+	for _, s := range sessions {
+		byKey[s.Key()] = s
+		if s.ParentSessionID != "" {
+			parents[s.Key()] = s.ParentSessionID
+		}
+	}
+
+	// A first-level fork cannot skip any session: its recorded parent is already
+	// the root. Only raw chains with a grandparent can differ logically, so avoid
+	// loading conversations for the common one-level case.
+	roots := map[domain.SessionKey]domain.Session{}
+	for _, s := range sessions {
+		p, ok := byKey[domain.SessionKey{PluginID: s.PluginID, SessionID: s.ParentSessionID}]
+		if !ok || p.ParentSessionID == "" {
+			continue
+		}
+		root := rootAncestor(s, sessions)
+		roots[root.Key()] = root
+	}
+
+	for _, root := range roots {
+		family := sessionFamily(root, sessions)
+		conv, _, origins, err := a.ConversationFromFocus(ctx, root, family)
+		if err != nil || conv == nil {
+			continue
+		}
+		for _, s := range family {
+			if s.ParentSessionID == "" {
+				continue
+			}
+			if pid, ok := logicalParentFromOrigins(*conv, origins, s); ok {
+				parents[s.Key()] = pid
+			}
+		}
+	}
+	return parents
+}
+
+func sessionFamily(root domain.Session, sessions []domain.Session) []domain.Session {
+	family := make([]domain.Session, 0)
+	for _, s := range sessions {
+		if s.PluginID == root.PluginID && rootAncestor(s, sessions).Key() == root.Key() {
+			family = append(family, s)
+		}
+	}
+	return family
+}
+
+func logicalParentFromOrigins(c domain.Conversation, origins map[string]NodeOrigin, s domain.Session) (string, bool) {
+	leaf := ""
+	for id, origin := range origins {
+		if origin.ActiveLeaf && origin.Session.Key() == s.Key() {
+			leaf = id
+			break
+		}
+	}
+	for _, id := range pathToNode(c, leaf) {
+		origin, ok := origins[id]
+		if !ok || origin.Session.Key() != s.Key() {
+			continue
+		}
+		parentID := c.Nodes[id].Parent
+		parent, ok := origins[parentID]
+		if ok && parent.Session.Key() != s.Key() {
+			return parent.Session.SessionID, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
 // ForkAt plans a fork at a node identified by its origin (owning session +
 // real node ID). KeepTurns is recomputed on the owner's own conversation with
 // the same turn rules the display uses (TurnsOfPath), because turn numbers on

@@ -35,6 +35,25 @@ func TestTreeTimeViewNestsForksNewestFirst(t *testing.T) {
 	}
 }
 
+func TestTreeUsesCanonicalConversationParent(t *testing.T) {
+	t0 := time.Date(2026, 6, 23, 10, 0, 0, 0, time.Local)
+	root := domain.Session{PluginID: "codex", SessionID: "P", UpdatedAt: t0.Add(3 * time.Hour)}
+	first := domain.Session{PluginID: "codex", SessionID: "A", UpdatedAt: t0.Add(2 * time.Hour), ParentSessionID: "P"}
+	reedited := domain.Session{PluginID: "codex", SessionID: "B", UpdatedAt: t0.Add(time.Hour), ParentSessionID: "A"}
+	m := Model{
+		view:     "time",
+		sessions: []domain.Session{root, first, reedited},
+		sessionParents: map[domain.SessionKey]string{
+			first.Key():    "P",
+			reedited.Key(): "P",
+		},
+	}
+	m.filter()
+	if got, want := rowTree(m), "[P][├─ A][└─ B]"; got != want {
+		t.Fatalf("logical siblings rendered as a creation chain: got %q want %q", got, want)
+	}
+}
+
 // Multi-level forks: descendants of a non-last child get the ancestor continuation "│  ". Pre-order: P -> C1 -> G -> C2.
 func TestTreeMultiLevelContinuation(t *testing.T) {
 	t0 := time.Date(2026, 6, 23, 10, 0, 0, 0, time.Local)
