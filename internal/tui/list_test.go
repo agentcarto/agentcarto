@@ -183,9 +183,12 @@ func TestDetailViewPrototypeColorsAndMetadata(t *testing.T) {
 			t.Fatalf("missing %q in %q", want, out)
 		}
 	}
-	if !strings.Contains(out, "\x1b[7m") && !strings.Contains(out, "\x1b[48;") {
+	// The selected row's background, whatever foreground it is merged with.
+	if !strings.Contains(out, "48;5;238") {
 		t.Fatal("selection style missing")
 	}
+	(&m).ensureDetailRowsBuilt()
+	m.detailCursor = m.firstTurnRow()
 	m.openCurrentTurn(true)
 	out = m.detailView()
 	for _, want := range []string{"turn #1/1", "USER", "ASSISTANT", "◆ Bash"} {
@@ -220,7 +223,8 @@ func TestDetailPerTurnModelInRowsNotHeader(t *testing.T) {
 		}
 	}
 	// The single-turn detail view (turnFullView) header does show the turn's model.
-	m.detailCursor = 0
+	(&m).ensureDetailRowsBuilt()
+	m.detailCursor = m.firstTurnRow()
 	m.openCurrentTurn(true)
 	fullHeader := strings.SplitN(stripANSI(m.detailView()), "\n", 2)[0]
 	if !strings.Contains(fullHeader, "model-") {
@@ -395,12 +399,13 @@ func TestBranchRowsSelectableAndEnterDives(t *testing.T) {
 	if !strings.Contains(out, "branch question") {
 		t.Fatalf("branch lead missing:\n%s", out)
 	}
-	if len(m.detailRows) != 2 || m.detailRows[1].Kind != "branch" {
+	// Rows: the head row (title or summary), the turn, then its branch.
+	if len(m.detailRows) != 3 || m.detailRows[2].Kind != "branch" {
 		t.Fatalf("detailRows=%#v", m.detailRows)
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = updated.(Model)
-	if m.detailCursor != 1 {
+	if m.detailCursor != 2 {
 		t.Fatalf("branch row should be selectable, cursor=%d", m.detailCursor)
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -515,16 +520,18 @@ func TestDetailCursorScrollsAndMovesWithinViewport(t *testing.T) {
 	}
 	c := domain.NewConversation(nodes)
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
-	// height=7 -> 3 header lines (lead, cwd, title) + 3 body rows + footer.
+	// height=7 -> 2 header lines (lead, cwd) + 4 body rows + footer. The first
+	// body row is the head row, so a turn is one move further down than the
+	// rows themselves.
 	m := Model{width: 100, height: 7, detailSession: &s}
 	updated, _ := m.Update(convMsg{c: &c})
 	m = updated.(Model)
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
 		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 		m = updated.(Model)
 	}
-	if m.detailCursor != 4 || m.detailOffset != 2 {
-		t.Fatalf("after down cursor=%d offset=%d, want cursor=4 offset=2", m.detailCursor, m.detailOffset)
+	if m.detailCursor != 5 || m.detailOffset != 2 {
+		t.Fatalf("after down cursor=%d offset=%d, want cursor=5 offset=2", m.detailCursor, m.detailOffset)
 	}
 	out := m.detailView()
 	if !strings.Contains(out, "#2") || strings.Contains(out, "#6") {
@@ -532,8 +539,8 @@ func TestDetailCursorScrollsAndMovesWithinViewport(t *testing.T) {
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 	m = updated.(Model)
-	if m.detailCursor != 3 || m.detailOffset != 2 {
-		t.Fatalf("after up cursor=%d offset=%d, want cursor=3 offset=2", m.detailCursor, m.detailOffset)
+	if m.detailCursor != 4 || m.detailOffset != 2 {
+		t.Fatalf("after up cursor=%d offset=%d, want cursor=4 offset=2", m.detailCursor, m.detailOffset)
 	}
 	out = m.detailView()
 	if !strings.Contains(out, "#3") || !strings.Contains(out, "#4") || strings.Index(out, "#3") < strings.Index(out, "#4") {
@@ -551,7 +558,7 @@ func TestConversationRefreshPreservesDetailPosition(t *testing.T) {
 	}
 	c := domain.NewConversation(nodes)
 	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
-	// height=7 -> 3 header lines (lead, cwd, title) + 3 body rows + footer.
+	// height=7 -> 2 header lines (lead, cwd) + 4 body rows + footer.
 	m := Model{width: 100, height: 7, detail: &c, detailSession: &s, detailCursor: 4, detailOffset: 2}
 	updated, _ := m.Update(convMsg{c: &c})
 	m = updated.(Model)
@@ -560,7 +567,8 @@ func TestConversationRefreshPreservesDetailPosition(t *testing.T) {
 	}
 	updated, _ = m.Update(convMsg{c: &c, reset: true})
 	m = updated.(Model)
-	if m.detailCursor != 0 || m.detailOffset != 0 {
+	// Reset lands on the newest turn, which is the row under the head row.
+	if m.detailCursor != 1 || m.detailOffset != 0 {
 		t.Fatalf("explicit open should reset position, cursor=%d offset=%d", m.detailCursor, m.detailOffset)
 	}
 }

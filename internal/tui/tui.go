@@ -69,12 +69,25 @@ type Model struct {
 	// generating costs money and talks to another program, neither of which
 	// belongs in a view. Nil when the host has nothing to do there.
 	afterScan func([]domain.Session)
-	// summaries are the generated per-turn descriptions of the session on
-	// screen, keyed by the turn number the detail view shows. Read once with the
-	// conversation rather than per turn, since opening a turn should not wait on
-	// a query.
-	summaries         map[int]string
-	summaryModel      string
+	// summaries are the generated descriptions of the session on screen, keyed by
+	// the turn number the detail view shows; key 0 is the session's own summary,
+	// the paragraph the detail header carries. Read once with the conversation
+	// rather than per turn, since opening a turn should not wait on a query.
+	summaries    map[int]string
+	summaryModel string
+	// summaryAt is when the session's own summary was written. Zero when there is
+	// none or the store does not say.
+	summaryAt time.Time
+	// summaryStale says the session grew after its own summary was written, which
+	// only the session summary can be: a turn's is withheld unless it belongs to
+	// the turn shown. Computed with the summaries, since the fingerprint it is
+	// compared against is not kept past that read.
+	summaryStale bool
+	// summaryOpen expands the detail header's head line into the title in full
+	// and the whole summary under it. The zero value is the one-line form, which
+	// is what the header has always been. Kept across sessions within one run, so
+	// opening it once keeps it open.
+	summaryOpen       bool
 	app               *app.App
 	sessions          []domain.Session
 	sessionParents    map[domain.SessionKey]string // canonical conversation parent; absent entries fall back to ParentSessionID
@@ -181,6 +194,7 @@ type detailRow struct {
 	TurnIndex  int // chronological index of the turn row (0-based; +1 for the # label). May be non-contiguous because compact turns are skipped.
 	LastBranch bool
 	Badge      bool // /compact boundary badge (leading »)
+	Line       int  // which of detailHeadLines this row draws ("head" is 0, "headtext" the rest)
 }
 
 // detailFrame is one navigation level of the current branch (its path plus a
@@ -534,6 +548,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch x := msg.(type) {
 	case tea.WindowSizeMsg:
+		// How many lines the open summary wraps to depends on the width, so the
+		// count from before the resize is what the cursor has to be moved against.
+		headBefore := 0
+		if m.detail != nil {
+			headBefore = len(m.detailHeadLines(m.detailSession, -1))
+		}
 		m.width, m.height = x.Width, x.Height
 		// Make the search input scroll horizontally rather than wrap. Without a width a
 		// long query would wrap to a second line, push the body down by a row, and make
@@ -541,6 +561,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.query.Width = max(10, m.width-4)
 		m.relocInput.Width = max(10, m.width-4)
 		m.ensureListOffset()
+		if m.detail != nil {
+			(&m).reflowDetailRows(headBefore)
+		}
 		m.ensureDetailOffset()
 		return m, nil
 	case scanMsg:
@@ -634,7 +657,7 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 	if m.detailSession != nil {
 		m.detail = x.c
 		m.detailOrigins = x.origins
-		m.summaries, m.summaryModel = nil, ""
+		m.summaries, m.summaryModel, m.summaryStale, m.summaryAt = nil, "", false, time.Time{}
 		if m.cache != nil && x.c != nil {
 			turns := transcript.Turns(*x.c, x.c.ActivePath())
 			stored := m.cache.Summaries(context.Background(), *m.detailSession, summary.NodesByTurn(turns))
@@ -645,6 +668,17 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 					if sum.Model != "" {
 						m.summaryModel = sum.Model
 					}
+					// Turn 0 alone can describe a session that has since gone on. A blank
+					// row is not a summary but the store's note that this session was
+					// looked at, and its fingerprint says nothing about staleness.
+					if n == 0 && strings.TrimSpace(sum.Text) != "" && sum.Fingerprint != m.detailSession.Fingerprint {
+						m.summaryStale = true
+					}
+				}
+				// When it was written is stored beside the summary but is not part of
+				// it, so it comes back on its own.
+				if at, ok := m.cache.SessionSummarizedAt(context.Background(), *m.detailSession); ok {
+					m.summaryAt = at
 				}
 			}
 		}
@@ -679,7 +713,7 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 		}
 		m.setDetailPath(m.currentDetailPath())
 		if x.reset {
-			m.detailCursor = 0
+			m.detailCursor = m.firstTurnRow()
 			m.detailOffset = 0
 			m.turnOpen = false
 			m.turnBlocks = nil
@@ -830,6 +864,8 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "s":
+		return m.toggleSummary()
 	case "y":
 		return m.copyTurnExchange()
 	case "x":
@@ -837,6 +873,10 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "right", "l":
 		if row, ok := m.selectedDetailRow(); ok {
 			switch row.Kind {
+			case "head", "headtext":
+				// Enter on any line of the head opens or closes it, so a row that
+				// grew out of the summary folds back the way it came.
+				return m.toggleSummary()
 			case "forkparent":
 				return m.jumpToParent()
 			case "branch":
@@ -846,7 +886,7 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.detailPathStack = append(m.detailPathStack, detailFrame{path: convlogic.DeepestPath(*m.detail, row.Root), label: m.branchFrameLabel(row.Root)})
 				m.setDetailPath(m.currentDetailPath())
-				m.detailCursor = 0
+				m.detailCursor = m.firstTurnRow()
 				m.detailOffset = 0
 				return m, nil
 			}
@@ -864,6 +904,52 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.detailBack(x)
 	}
 	return m, nil
+}
+
+// firstTurnRow is where the cursor lands when a session or a branch is opened:
+// the newest turn, not the head row above it. What the session was last doing is
+// what the reader came for, and the head is one `k` away.
+func (m Model) firstTurnRow() int {
+	for i, r := range m.detailRows {
+		if r.Kind == "turn" {
+			return i
+		}
+	}
+	return 0
+}
+
+// toggleSummary opens or closes the head rows: closed they are one line holding
+// the session's own summary, open they are the title in full and the whole
+// summary under it. With no summary there is nothing to open.
+//
+// The rows below shift by however many lines that adds or removes, so the cursor
+// moves with them and stays on what it was on.
+func (m Model) toggleSummary() (tea.Model, tea.Cmd) {
+	if !m.hasSessionSummary() {
+		return m, nil
+	}
+	before := len(m.detailHeadLines(m.detailSession, -1))
+	m.summaryOpen = !m.summaryOpen
+	(&m).reflowDetailRows(before)
+	return m, nil
+}
+
+// reflowDetailRows rebuilds the rows after something changed how many lines the
+// head takes — opening it, or a resize that rewraps it — and moves the cursor by
+// as much, so it stays on the row it was on rather than on whatever slid into
+// that position.
+func (m *Model) reflowDetailRows(before int) {
+	after := len(m.detailHeadLines(m.detailSession, -1))
+	m.rebuildDetailRows(m.currentDetailPath())
+	if m.detailCursor >= before {
+		m.detailCursor += after - before
+	} else {
+		// The cursor was inside the head itself, and the head just got shorter than
+		// where it was standing.
+		m.detailCursor = min(m.detailCursor, max(0, after-1))
+	}
+	m.detailCursor = max(0, min(m.detailCursor, len(m.detailRows)-1))
+	m.ensureDetailOffset()
 }
 
 // updateTurnFull handles keys in the full (single-turn) view, including its own inline
@@ -1069,7 +1155,7 @@ func (m Model) detailBack(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if len(m.detailPathStack) > 1 {
 		m.detailPathStack = m.detailPathStack[:len(m.detailPathStack)-1]
 		m.setDetailPath(m.currentDetailPath())
-		m.detailCursor = 0
+		m.detailCursor = m.firstTurnRow()
 		m.detailOffset = 0
 		return m, nil
 	}
@@ -1285,6 +1371,8 @@ func (m *Model) openSessionDetail(s domain.Session, query string) tea.Cmd {
 	m.detailOffset = 0
 	m.summaries = nil
 	m.summaryModel = ""
+	m.summaryStale = false
+	m.summaryAt = time.Time{}
 	m.turnOpen = false
 	m.turnBlocks = nil
 	m.turnExpanded = nil
@@ -1940,7 +2028,6 @@ func (m Model) detailView() string {
 	modelW := m.detailModelWidth(s, offset, end)
 	b.WriteString(clip(m.detailLead(s), max(20, m.width-1)) + "\n")
 	b.WriteString(m.detailCWDLine(s) + "\n")
-	b.WriteString(m.detailSubLine(s) + "\n")
 	// turnHits is ascending over all rows; only the visible ones are rendered.
 	hit := map[int]bool{}
 	for _, i := range m.turnHits {
@@ -1953,6 +2040,19 @@ func (m Model) detailView() string {
 		rowData := m.detailRows[i]
 		selected := i == m.detailCursor
 		switch rowData.Kind {
+		case "head", "headtext":
+			// The rows are rebuilt whenever the width changes, so the count here
+			// agrees with the lines. Should one ever not, an empty line beats
+			// drawing some other row's.
+			cursor := -1
+			if selected {
+				cursor = rowData.Line
+			}
+			if lines := m.detailHeadLines(s, cursor); rowData.Line < len(lines) {
+				bodyLines = append(bodyLines, lines[rowData.Line])
+			} else {
+				bodyLines = append(bodyLines, "")
+			}
 		case "forkparent":
 			bodyLines = append(bodyLines, m.detailForkParentLine(selected))
 		case "branch":
@@ -2062,11 +2162,16 @@ func (m Model) detailCWDLine(s *domain.Session) string {
 	return styled(clip(" "+shortCWD(s.CWD, w), w+1), lipgloss.Color("3"), false, false)
 }
 
-// detailSubLine builds the third header line: the title, an optional "forked from"
-// lineage, and (when descended without a fork route) a breadcrumb of the current level.
-// The working directory is on its own line above (detailCWDLine).
-func (m Model) detailSubLine(s *domain.Session) string {
-	sub := " " + s.Title
+// detailSubLine builds the third header line: head — the title, or the session's
+// own summary in its place (see detailHeadLines) — an optional "forked from"
+// lineage, and (when descended without a fork route) a breadcrumb of the current
+// level. The working directory is on its own line above (detailCWDLine).
+//
+// generated colors the line as generated text rather than as something the
+// session recorded, which is the difference between the two things head can be.
+// selected marks it as the cursor's row: it is a row of the list, not a header.
+func (m Model) detailSubLine(s *domain.Session, head string, generated, selected bool) string {
+	sub := " " + head
 	if s.LogDeleted {
 		// Said here as well as in the list: this is the screen someone reads before
 		// trying to resume, and the log it would resume from is not there.
@@ -2083,7 +2188,17 @@ func (m Model) detailSubLine(s *domain.Session) string {
 			sub += " (p)"
 		}
 	}
-	subLine := styled(clip(sub, max(20, m.width-1)), lipgloss.Color("3"), false, false)
+	color := lipgloss.Color("3")
+	if generated {
+		color = roleColor("meta")
+	}
+	w := max(20, m.width-1)
+	if selected {
+		// Selected rows are padded to the width so the highlight covers the line,
+		// as the turn rows are.
+		sub = padCol(clip(sub, w), w)
+	}
+	subLine := styled(clip(sub, w), color, selected, false)
 	// When descended without a fork route shown (e.g. rewind), use a breadcrumb to indicate which level we are on.
 	if len(m.detailPathStack) > 1 && len(route) == 0 {
 		if avail := max(0, m.width-1-lipgloss.Width(subLine)); avail > 0 {
@@ -2091,6 +2206,117 @@ func (m Model) detailSubLine(s *domain.Session) string {
 		}
 	}
 	return subLine
+}
+
+// summaryMark prefixes every line an agent wrote rather than the session. One
+// character rather than a heading of its own: the head is one row when it is
+// closed, and the mark is the part of it that has to be there.
+const summaryMark = "§"
+
+// detailHeadLines renders the header lines under the working directory, which
+// hold either the session's own generated summary (stored as turn 0) or the
+// title.
+//
+// Closed, that is one line: the summary when there is one, the title when there
+// is not. The title is the session's first prompt, which turn #1 carries as its
+// own headline — with a summary to show, spending the line on the title says
+// what the screen says anyway. Open (`s`), the title comes back in full and the
+// whole summary follows it, so nothing the line replaced is out of reach.
+//
+// These lines are rows of the list rather than part of the fixed header, so an
+// opened summary scrolls with everything else and is never cut to fit: what the
+// header cannot hold, the cursor reaches. rebuildDetailRows counts them and
+// detailView draws them, both through here.
+//
+// cursor is which of the returned lines the cursor is on, or -1 for none: every
+// one of them is a row the cursor can reach, so every one of them has to be able
+// to show that it is the row.
+func (m Model) detailHeadLines(s *domain.Session, cursor int) []string {
+	if s == nil {
+		return nil
+	}
+	// A blank turn-0 row is the store's note that the session was looked at, not
+	// a summary of it (cache.MarkExamined), and reads here as having none.
+	sum := strings.TrimSpace(m.summaries[0])
+	if sum == "" {
+		return []string{m.detailSubLine(s, s.Title, false, cursor == 0)}
+	}
+	if m.summaryStale {
+		// Said before the summary rather than after it, because after it is what a
+		// narrow line drops. The turns below are current; only this is not.
+		sum = "(stale) " + sum
+	}
+	w := max(20, m.width-1)
+	if !m.summaryOpen {
+		// Flattened rather than cut at the first line break: the line is clipped to
+		// the width anyway, and a summary that opens with a short line would
+		// otherwise show a short line where the whole width was available.
+		return []string{m.detailSubLine(s, summaryMark+" "+strings.Join(strings.Fields(sum), " "), true, cursor == 0)}
+	}
+	out := []string{}
+	for i, ln := range wrapWidth(strings.TrimSpace(s.Title), w-1) {
+		if i == 0 {
+			// The fork lineage and breadcrumb belong to the first line whether the
+			// title fits on it or not, so the first line is still the sub line.
+			out = append(out, m.detailSubLine(s, ln, false, cursor == 0))
+			continue
+		}
+		out = append(out, headLine(" "+ln, lipgloss.Color("3"), w, cursor == len(out)))
+	}
+	body := []string{}
+	for _, para := range strings.Split(sum, "\n") {
+		for _, ln := range wrapWidth(strings.TrimSpace(para), w-3) {
+			body = append(body, "  "+ln)
+		}
+	}
+	if len(body) > 0 {
+		body[0] = " " + summaryMark + strings.TrimPrefix(body[0], " ")
+	}
+	// Who wrote it and when, so a reader can weigh it: a summary from a smaller
+	// model reads differently, and one written days ago describes the session as
+	// it was then. It trails the paragraph when the last line has room for it.
+	if credit := m.summaryCredit(); credit != "" {
+		if last := len(body) - 1; last >= 0 && runewidth.StringWidth(body[last])+runewidth.StringWidth(credit)+2 <= w {
+			body[last] += "  " + credit
+		} else {
+			body = append(body, "  "+credit)
+		}
+	}
+	for _, ln := range body {
+		out = append(out, headLine(ln, roleColor("meta"), w, cursor == len(out)))
+	}
+	return out
+}
+
+// headLine renders one line of the head, padded to the width when it is the
+// cursor's row so the highlight covers the whole line, as the turn rows are.
+func headLine(text string, color lipgloss.Color, w int, selected bool) string {
+	if selected {
+		text = padCol(clip(text, w), w)
+	}
+	return styled(clip(text, w), color, selected, false)
+}
+
+// hasSessionSummary reports whether the head row holds a generated summary,
+// which is what makes it worth opening (with no summary it is the title, and
+// there is nothing under it).
+func (m Model) hasSessionSummary() bool { return strings.TrimSpace(m.summaries[0]) != "" }
+
+// summaryCredit names what wrote the session summary and when it was written,
+// or "" when neither is known. The time comes from the store rather than the
+// summary text, which is the agent's answer and carries no time of its own.
+func (m Model) summaryCredit() string {
+	parts := []string{}
+	if m.summaryModel != "" {
+		parts = append(parts, m.summaryModel)
+	}
+	if !m.summaryAt.IsZero() {
+		parts = append(parts, m.summaryAt.Local().Format("2006-01-02 15:04"))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "— " + strings.Join(parts, " · ")
 }
 
 // detailBranchLine renders a branch row: an alternative sub-tree (fork or rewind) the
@@ -2267,6 +2493,11 @@ func (m Model) detailFooter(s *domain.Session) string {
 		return m.searchFooter(" Search > "+m.turnQuery, len(m.turnListHits()), m.turnSearchPos)
 	}
 	foot := " ↑↓/jk move  Enter open  y copy  x export  o resume  c cd  / search  f fork"
+	// Offered only when it would do something, so the key is never a promise the
+	// screen cannot keep.
+	if m.hasSessionSummary() {
+		foot += "  s summary"
+	}
 	if m.sessionParentID(*s) != "" {
 		foot += "  p parent"
 	}
@@ -2512,6 +2743,17 @@ func (m *Model) rebuildDetailRows(path []string) {
 	// being read. In a focused fork frame that is path, not the synthesized
 	// conversation's parent-session ActivePath.
 	m.detailActive = active
+	// The head rows first: the session's summary (or its title) is what the
+	// session amounted to, and the turns below it are how it got there. Rows
+	// rather than a header line, so an opened summary scrolls instead of being
+	// cut to whatever the header could spare.
+	for i := range m.detailHeadLines(m.detailSession, -1) {
+		kind := "headtext"
+		if i == 0 {
+			kind = "head"
+		}
+		m.detailRows = append(m.detailRows, detailRow{Kind: kind, Line: i})
+	}
 	turns := transcript.Turns(*m.detail, path)
 	for i := len(turns) - 1; i >= 0; i-- { // newest first
 		e := turns[i]
@@ -2546,6 +2788,13 @@ func dropLastRune(s string) string {
 func (m Model) detailRowText(r detailRow) string {
 	if m.detail == nil {
 		return ""
+	}
+	if r.Kind == "head" || r.Kind == "headtext" {
+		// The generated summary is searchable here because it is searchable at the
+		// list level (cache.SummaryTexts): a session found by its summary and then
+		// opened has to find it inside as well. The title is not matched here — it
+		// is turn #1's headline, and matching both would report one hit twice.
+		return strings.ToLower(m.summaries[0])
 	}
 	if r.Kind == "forkparent" {
 		return strings.ToLower(m.forkParentLabel())
@@ -3190,8 +3439,9 @@ func (m Model) detailBodyRows() int {
 	if m.height <= 0 {
 		return max(1, len(m.detailRows)*8)
 	}
-	// Rows 0-2 = header (lead, cwd, title), last row = footer.
-	return max(1, m.height-4)
+	// Row 0 = lead, row 1 = cwd, last row = footer. The head lines (the title or
+	// the summary) are rows of the body, not of the header.
+	return max(1, m.height-3)
 }
 func (m Model) turnEvents(ids []string) []domain.Event {
 	return transcript.EventsOf(*m.detail, ids)

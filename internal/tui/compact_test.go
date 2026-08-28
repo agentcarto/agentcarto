@@ -42,7 +42,7 @@ func TestCompactSummaryOnlyTurnSkippedAndBadgeCarried(t *testing.T) {
 		t.Fatalf("first turn has wrong state: idx=%d badge=%v", turns[1].TurnIndex, turns[1].Badge)
 	}
 	m.turnOpen = true
-	m.detailCursor = 0
+	m.detailCursor = m.firstTurnRow()
 	if got := m.detailView(); !strings.Contains(got, "turn #2/2") {
 		t.Fatalf("open turn header should use the contiguous public number:\n%s", got)
 	}
