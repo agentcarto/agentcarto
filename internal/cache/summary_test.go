@@ -406,3 +406,55 @@ func TestSummaryTexts(t *testing.T) {
 		t.Errorf("codex/s2 = %q", got[two.Key()])
 	}
 }
+
+// The session summary goes stale two ways, and the second is the one the
+// fingerprint cannot see: a worker run that summarized new turns, left the
+// session summary alone because summary.session_interval had not elapsed, and
+// then called MarkExamined — which brings turn 0's fingerprint up to date while
+// its text stays behind.
+func TestSessionSummaryStale(t *testing.T) {
+	written := time.Now().Add(-time.Hour)
+	cur := Summary{Turn: 0, Text: "セッション全体の要約", Fingerprint: "fp", Created: written}
+	sess := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp", UpdatedAt: written.Add(-time.Minute)}
+	if cur.Stale(sess) {
+		t.Error("a summary written after the session's last write is current")
+	}
+
+	grown := sess
+	grown.Fingerprint = "fp2"
+	if !cur.Stale(grown) {
+		t.Error("a log that changed under the summary should read as stale")
+	}
+
+	examined := sess // MarkExamined kept the fingerprint current
+	examined.UpdatedAt = written.Add(time.Minute)
+	if !cur.Stale(examined) {
+		t.Error("a session written to after the summary should read as stale even with a matching fingerprint")
+	}
+
+	blank := Summary{Turn: 0, Text: "  ", Fingerprint: "old", Created: written}
+	if blank.Stale(grown) {
+		t.Error("MarkExamined's blank row is not a summary and cannot be stale")
+	}
+	turn := Summary{Turn: 3, Text: "ターンの要約", Fingerprint: "old", Created: written}
+	if turn.Stale(grown) {
+		t.Error("a turn summary is withheld when its node moves, so it is never stale")
+	}
+}
+
+// Summaries reads back when a row was written, which is what tells a stale
+// session summary from a current one.
+func TestSummariesCarryTheirWriteTime(t *testing.T) {
+	d := openTemp(t)
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	if e := d.PutSummaries(context.Background(), s, []Summary{{Turn: 0, Text: "要約"}}); e != nil {
+		t.Fatalf("put: %v", e)
+	}
+	got := d.Summaries(context.Background(), s, nil)[0]
+	if got.Created.IsZero() {
+		t.Fatal("a summary read back without its write time cannot be judged stale")
+	}
+	if time.Since(got.Created) > time.Minute {
+		t.Fatalf("write time is not the time it was written: %v", got.Created)
+	}
+}

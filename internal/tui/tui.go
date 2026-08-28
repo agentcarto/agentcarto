@@ -71,17 +71,17 @@ type Model struct {
 	afterScan func([]domain.Session)
 	// summaries are the generated descriptions of the session on screen, keyed by
 	// the turn number the detail view shows; key 0 is the session's own summary,
-	// the paragraph the head row carries. Read once with the conversation rather
-	// than per turn, since opening a turn should not wait on a query.
-	summaries    map[int]string
-	summaryModel string
+	// the paragraph the head row carries. Stored whole rather than as text alone,
+	// because which model wrote one is per summary: the session's and a turn's can
+	// come from different runs. Read once with the conversation rather than per
+	// turn, since opening a turn should not wait on a query.
+	summaries map[int]cache.Summary
 	// summaryAt is when the session's own summary was written. Zero when there is
-	// none or the store does not say.
+	// none or the row predates the field being stored.
 	summaryAt time.Time
-	// summaryStale says the session grew after its own summary was written, which
-	// only the session summary can be: a turn's is withheld unless it belongs to
-	// the turn shown. Computed with the summaries, since the fingerprint it is
-	// compared against is not kept past that read.
+	// summaryStale says the session went on after its own summary was written,
+	// which only the session summary can be: a turn's is withheld unless it
+	// belongs to the turn shown.
 	summaryStale bool
 	// summaryOpen expands the detail header's head line into the title in full
 	// and the whole summary under it. The zero value is the one-line form, which
@@ -661,30 +661,14 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 	if m.detailSession != nil {
 		m.detail = x.c
 		m.detailOrigins = x.origins
-		m.summaries, m.summaryModel, m.summaryStale, m.summaryAt = nil, "", false, time.Time{}
+		m.summaries, m.summaryStale, m.summaryAt = nil, false, time.Time{}
 		if m.cache != nil && x.c != nil {
 			turns := transcript.Turns(*x.c, x.c.ActivePath())
-			stored := m.cache.Summaries(context.Background(), *m.detailSession, summary.NodesByTurn(turns))
-			if len(stored) > 0 {
-				m.summaries = make(map[int]string, len(stored))
-				for n, sum := range stored {
-					m.summaries[n] = sum.Text
-					if sum.Model != "" {
-						m.summaryModel = sum.Model
-					}
-					// Turn 0 alone can describe a session that has since gone on. A blank
-					// row is not a summary but the store's note that this session was
-					// looked at, and its fingerprint says nothing about staleness.
-					if n == 0 && strings.TrimSpace(sum.Text) != "" && sum.Fingerprint != m.detailSession.Fingerprint {
-						m.summaryStale = true
-					}
-				}
-				// When it was written is stored beside the summary but is not part of
-				// it, so it comes back on its own.
-				if at, ok := m.cache.SessionSummarizedAt(context.Background(), *m.detailSession); ok {
-					m.summaryAt = at
-				}
-			}
+			m.summaries = m.cache.Summaries(context.Background(), *m.detailSession, summary.NodesByTurn(turns))
+			// Turn 0 alone can describe a session that has since gone on; what makes
+			// it so is the store's business, not the view's (cache.Summary.Stale).
+			m.summaryAt = m.summaries[0].Created
+			m.summaryStale = m.summaries[0].Stale(*m.detailSession)
 		}
 	}
 	if x.c != nil && m.detail != nil {
@@ -1381,7 +1365,6 @@ func (m *Model) openSessionDetail(s domain.Session, query string) tea.Cmd {
 	m.detailCursor = 0
 	m.detailOffset = 0
 	m.summaries = nil
-	m.summaryModel = ""
 	m.summaryStale = false
 	m.summaryAt = time.Time{}
 	m.turnOpen = false
@@ -2258,7 +2241,7 @@ func (m Model) detailHeadLines(s *domain.Session, cursor int) []string {
 	}
 	// A blank turn-0 row is the store's note that the session was looked at, not
 	// a summary of it (cache.MarkExamined), and reads here as having none.
-	sum := strings.TrimSpace(m.summaries[0])
+	sum := strings.TrimSpace(m.summaries[0].Text)
 	if sum == "" {
 		return []string{m.detailSubLine(s, s.Title, false, cursor == 0)}
 	}
@@ -2321,15 +2304,18 @@ func headLine(text string, color lipgloss.Color, w int, selected bool) string {
 // hasSessionSummary reports whether the head row holds a generated summary,
 // which is what makes it worth opening (with no summary it is the title, and
 // there is nothing under it).
-func (m Model) hasSessionSummary() bool { return strings.TrimSpace(m.summaries[0]) != "" }
+func (m Model) hasSessionSummary() bool { return strings.TrimSpace(m.summaries[0].Text) != "" }
 
 // summaryCredit names what wrote the session summary and when it was written,
 // or "" when neither is known. The time comes from the store rather than the
 // summary text, which is the agent's answer and carries no time of its own.
 func (m Model) summaryCredit() string {
 	parts := []string{}
-	if m.summaryModel != "" {
-		parts = append(parts, m.summaryModel)
+	// The session summary's own model: a turn's can come from a different run, and
+	// naming that one here would credit the paragraph to something that did not
+	// write it.
+	if model := m.summaries[0].Model; model != "" {
+		parts = append(parts, model)
 	}
 	if !m.summaryAt.IsZero() {
 		parts = append(parts, m.summaryAt.Local().Format("2006-01-02 15:04"))
@@ -2820,7 +2806,7 @@ func (m Model) detailRowText(r detailRow) string {
 		// list level (cache.SummaryTexts): a session found by its summary and then
 		// opened has to find it inside as well. The title is not matched here — it
 		// is turn #1's headline, and matching both would report one hit twice.
-		return strings.ToLower(m.summaries[0])
+		return strings.ToLower(m.summaries[0].Text)
 	}
 	if r.Kind == "forkparent" {
 		return strings.ToLower(m.forkParentLabel())
@@ -3063,10 +3049,11 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 	// turn amounted to, and someone who opened a turn is deciding how much of it
 	// to read. It says it is generated because everything else in this view is
 	// the session verbatim, and the two must not be read as the same thing.
-	if sum := strings.TrimSpace(m.summaries[m.turnNumberOf(ids)]); sum != "" {
+	if stored := m.summaries[m.turnNumberOf(ids)]; strings.TrimSpace(stored.Text) != "" {
+		sum := strings.TrimSpace(stored.Text)
 		label := "SUMMARY"
-		if m.summaryModel != "" {
-			label += " (generated by " + m.summaryModel + ")"
+		if stored.Model != "" {
+			label += " (generated by " + stored.Model + ")"
 		}
 		out = append(out, turnBlock{Sym: "§", Style: "meta", Label: label, Body: strings.Split(sum, "\n"), Open: true, NoGutter: true})
 	}

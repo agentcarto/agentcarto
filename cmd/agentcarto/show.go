@@ -147,8 +147,10 @@ func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns 
 		}
 		// Turn 0 is the one that can describe a session that has since gone on:
 		// the per-turn summaries are held against the node they were made from and
-		// withheld when it moves, so a stale one is never returned at all.
-		if n == 0 && sum.Fingerprint != s.Fingerprint {
+		// withheld when it moves, so a stale one is never returned at all. What
+		// counts as gone on is the store's call, so the TUI header and this
+		// document cannot disagree about it.
+		if sum.Stale(s) {
 			stale = true
 		}
 	}

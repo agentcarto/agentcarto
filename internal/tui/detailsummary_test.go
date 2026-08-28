@@ -29,21 +29,20 @@ func twoTurns() domain.Conversation {
 }
 
 // detailWithSummary loads the conversation into a detail view whose cache holds
-// the given session summary, written from fingerprint writtenFP while the
-// session is at sessionFP (equal fingerprints mean the summary is current).
-func detailWithSummary(t *testing.T, text, writtenFP, sessionFP string, width, height int) Model {
+// the given session summary, written now. updatedAt is when the session was last
+// written to: later than now is a session that went on after it was summarized
+// (the summary is stale), and the zero value is one that did not.
+func detailWithSummary(t *testing.T, text string, updatedAt time.Time, width, height int) Model {
 	t.Helper()
 	db, e := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
 	if e != nil {
 		t.Fatalf("open cache: %v", e)
 	}
 	t.Cleanup(func() { db.Close() })
-	written := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo", Title: summaryTestTitle, Fingerprint: writtenFP}
-	if e := db.PutSummaries(context.Background(), written, []cache.Summary{{Turn: 0, Text: text, Model: "claude claude-sonnet-5"}}); e != nil {
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo", Title: summaryTestTitle, UpdatedAt: updatedAt}
+	if e := db.PutSummaries(context.Background(), s, []cache.Summary{{Turn: 0, Text: text, Model: "claude claude-sonnet-5"}}); e != nil {
 		t.Fatalf("put summaries: %v", e)
 	}
-	s := written
-	s.Fingerprint = sessionFP
 	m := Model{width: width, height: height, detailSession: &s, cache: db}
 	c := twoTurns()
 	updated, _ := m.Update(convMsg{c: &c, reset: true})
@@ -75,7 +74,7 @@ func headRows(m Model) int {
 // held: the title is the session's first prompt, which turn #1 carries anyway,
 // and the § marks the line as generated rather than as something that was said.
 func TestDetailHeadRowShowsSummaryInPlaceOfTitle(t *testing.T) {
-	m := detailWithSummary(t, "pull-all.shを作成し6リポジトリのpullを確認", "fp", "fp", 120, 20)
+	m := detailWithSummary(t, "pull-all.shを作成し6リポジトリのpullを確認", time.Time{}, 120, 20)
 
 	if got := m.detailRows[0].Kind; got != "head" {
 		t.Fatalf("the head row should lead the list, got kind %q", got)
@@ -97,6 +96,9 @@ func TestDetailHeadRowShowsSummaryInPlaceOfTitle(t *testing.T) {
 	if strings.Contains(lines[2], "このディレクトリ配下") {
 		t.Fatalf("the title should give up the line to the summary, got %q", lines[2])
 	}
+	if strings.Contains(lines[2], "(stale)") {
+		t.Fatalf("a summary newer than the session's last write is not stale: %q", lines[2])
+	}
 	if !strings.Contains(lines[len(lines)-1], "s summary") {
 		t.Fatalf("footer should offer the toggle, got %q", lines[len(lines)-1])
 	}
@@ -106,7 +108,7 @@ func TestDetailHeadRowShowsSummaryInPlaceOfTitle(t *testing.T) {
 // the list — so a summary longer than the screen scrolls instead of being cut.
 func TestDetailHeadRowOpensToFullTitleAndSummary(t *testing.T) {
 	long := strings.Repeat("長い要約の文章。", 60)
-	m := detailWithSummary(t, long, "fp", "fp", 60, 12)
+	m := detailWithSummary(t, long, time.Time{}, 60, 12)
 
 	m = pressKey(m, "s")
 	if headRows(m) < 8 {
@@ -130,7 +132,7 @@ func TestDetailHeadRowOpensToFullTitleAndSummary(t *testing.T) {
 // The title is what the head row gives up when there is a summary, so opening
 // has to bring it back in full — that is where it can still be read.
 func TestDetailHeadRowOpenShowsWholeTitle(t *testing.T) {
-	m := detailWithSummary(t, "要約", "fp", "fp", 40, 24)
+	m := detailWithSummary(t, "要約", time.Time{}, 40, 24)
 	m = pressKey(m, "s")
 
 	// Joined without the leading indent of each line, so a title split across
@@ -149,7 +151,7 @@ func TestDetailHeadRowOpenShowsWholeTitle(t *testing.T) {
 // Enter on the head does what `s` does, including on the rows the summary added:
 // a row that grew out of the head folds back the way it came.
 func TestDetailHeadRowEnterToggles(t *testing.T) {
-	m := detailWithSummary(t, "セッション全体の要約", "fp", "fp", 80, 20)
+	m := detailWithSummary(t, "セッション全体の要約", time.Time{}, 80, 20)
 	closed := len(m.detailRows)
 
 	m.detailCursor = 0 // the head row; opening a session lands on a turn instead
@@ -173,7 +175,7 @@ func TestDetailHeadRowEnterToggles(t *testing.T) {
 // Opening and closing moves the rows below, so the cursor moves with them and
 // stays on the turn it was on.
 func TestDetailHeadRowKeepsCursorOnItsTurn(t *testing.T) {
-	m := detailWithSummary(t, strings.Repeat("要約の文。", 30), "fp", "fp", 80, 24)
+	m := detailWithSummary(t, strings.Repeat("要約の文。", 30), time.Time{}, 80, 24)
 	m.detailCursor = len(m.detailRows) - 1 // turn #1, the last row
 	turn := m.detailRows[m.detailCursor].Turn
 
@@ -188,14 +190,14 @@ func TestDetailHeadRowKeepsCursorOnItsTurn(t *testing.T) {
 }
 
 // A summary written before the session went on describes something the turns no
-// longer are — the same call `show` makes. It is said in front of the summary,
-// which is the part of the line a narrow terminal keeps.
+// longer are. It is said in front of the summary, which is the part of the line
+// a narrow terminal keeps.
 func TestDetailSummaryMarksStale(t *testing.T) {
-	m := detailWithSummary(t, "古い要約", "old-fp", "new-fp", 120, 20)
+	m := detailWithSummary(t, "古い要約", time.Now().Add(time.Hour), 120, 20)
 
 	line := strings.Split(stripANSI(m.detailView()), "\n")[2]
 	if !strings.Contains(line, "(stale)") {
-		t.Fatalf("a summary written from an older fingerprint should be marked stale, got %q", line)
+		t.Fatalf("a summary written before the session's last write should be marked stale, got %q", line)
 	}
 	if i, j := strings.Index(line, "(stale)"), strings.Index(line, "古い要約"); i > j {
 		t.Fatalf("the stale mark should come before the summary text, got %q", line)
@@ -206,7 +208,7 @@ func TestDetailSummaryMarksStale(t *testing.T) {
 // about. That is a record of having looked, not a summary: the title keeps the
 // row, and neither `s` nor the footer pretends there is anything to open.
 func TestDetailSummaryIgnoresBlankRow(t *testing.T) {
-	m := detailWithSummary(t, "  ", "fp", "fp", 120, 20)
+	m := detailWithSummary(t, "  ", time.Time{}, 120, 20)
 
 	out := stripANSI(m.detailView())
 	lines := strings.Split(out, "\n")
@@ -229,7 +231,7 @@ func TestDetailSummaryIgnoresBlankRow(t *testing.T) {
 // sessions by their summaries (cache.SummaryTexts), and one opened that way has
 // to find it here as well.
 func TestDetailSearchMatchesSummary(t *testing.T) {
-	m := detailWithSummary(t, "pull-all.shを作成", "fp", "fp", 120, 20)
+	m := detailWithSummary(t, "pull-all.shを作成", time.Time{}, 120, 20)
 	m.turnQuery = "pull-all"
 	m.turnHitsStale = true
 	(&m).syncTurnHits()
@@ -244,7 +246,7 @@ func TestDetailSearchMatchesSummary(t *testing.T) {
 // highlighted like any other — summary or title, whichever it is holding.
 func TestDetailHeadRowHighlightedWhenSelected(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
-	m := detailWithSummary(t, "セッション全体の要約", "fp", "fp", 80, 20)
+	m := detailWithSummary(t, "セッション全体の要約", time.Time{}, 80, 20)
 	m.detailCursor = 0
 
 	line := strings.Split(m.detailView(), "\n")[2]
@@ -257,7 +259,7 @@ func TestDetailHeadRowHighlightedWhenSelected(t *testing.T) {
 // when the cursor reaches it — not just the first.
 func TestDetailHeadTextRowsHighlightWhenSelected(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
-	m := detailWithSummary(t, strings.Repeat("要約の文。", 20), "fp", "fp", 80, 24)
+	m := detailWithSummary(t, strings.Repeat("要約の文。", 20), time.Time{}, 80, 24)
 	m = pressKey(m, "s")
 	if headRows(m) < 3 {
 		t.Fatalf("expected the summary to span several rows, got %d", headRows(m))
@@ -275,7 +277,7 @@ func TestDetailHeadTextRowsHighlightWhenSelected(t *testing.T) {
 // moves with them, so the turn it was on is still the turn it is on — including
 // while a turn is open, where the cursor is what that view reads.
 func TestDetailHeadRowsReflowOnResize(t *testing.T) {
-	m := detailWithSummary(t, strings.Repeat("要約の文。", 20), "fp", "fp", 100, 24)
+	m := detailWithSummary(t, strings.Repeat("要約の文。", 20), time.Time{}, 100, 24)
 	m = pressKey(m, "s")
 	wide := headRows(m)
 	m.detailCursor = len(m.detailRows) - 1
@@ -320,7 +322,7 @@ func TestDetailHeadRowKeepsBreadcrumbWhenSelected(t *testing.T) {
 // The fork lineage belongs to the head row's first line whether that line is
 // holding the title or the summary in its place.
 func TestDetailHeadRowKeepsForkLineageWithSummary(t *testing.T) {
-	m := detailWithSummary(t, "セッション全体の要約", "fp", "fp", 140, 20)
+	m := detailWithSummary(t, "セッション全体の要約", time.Time{}, 140, 20)
 	s := *m.detailSession
 	s.ParentSessionID = "parent01"
 	m.detailSession = &s
@@ -337,7 +339,7 @@ func TestDetailHeadRowKeepsForkLineageWithSummary(t *testing.T) {
 // One summary is one hit, however many lines it is wrapped into: the footer's
 // count and n/N would otherwise report the wrapping as matches of its own.
 func TestDetailSearchCountsOpenSummaryOnce(t *testing.T) {
-	m := detailWithSummary(t, "pull-all.shを作成。git pull --ff-onlyのみを使う方針で実装し、6リポジトリ全てを確認。", "fp", "fp", 60, 24)
+	m := detailWithSummary(t, "pull-all.shを作成。git pull --ff-onlyのみを使う方針で実装し、6リポジトリ全てを確認。", time.Time{}, 60, 24)
 	m = pressKey(m, "s")
 	if headRows(m) < 3 {
 		t.Fatalf("expected the summary to wrap into several rows, got %d", headRows(m))
@@ -354,7 +356,7 @@ func TestDetailSearchCountsOpenSummaryOnce(t *testing.T) {
 // The worker rewrites summaries in the background, so a reload can change how
 // many rows the head takes under an open view. The cursor moves with the rows.
 func TestDetailHeadRowsFollowASummaryRewrittenWhileOpen(t *testing.T) {
-	m := detailWithSummary(t, "短い要約", "fp", "fp", 60, 24)
+	m := detailWithSummary(t, "短い要約", time.Time{}, 60, 24)
 	m = pressKey(m, "s")
 	m.detailCursor = len(m.detailRows) - 1 // turn #1
 	turn := m.detailRows[m.detailCursor].Turn
@@ -369,5 +371,26 @@ func TestDetailHeadRowsFollowASummaryRewrittenWhileOpen(t *testing.T) {
 
 	if got := m.detailRows[m.detailCursor].Turn; len(got) == 0 || got[0] != turn[0] {
 		t.Fatalf("a summary rewritten under the open view moved the cursor off its turn (row %d of %d)", m.detailCursor, len(m.detailRows))
+	}
+}
+
+// The paragraph is credited to the model that wrote it, not to whichever turn
+// summary the map happened to yield last.
+func TestDetailSummaryCreditNamesTheSessionSummarysModel(t *testing.T) {
+	m := detailWithSummary(t, "セッション全体の要約", time.Time{}, 100, 24)
+	sums := map[int]cache.Summary{
+		0: {Turn: 0, Text: "セッション全体の要約", Model: "claude claude-sonnet-5"},
+		1: {Turn: 1, Text: "ターンの要約", Model: "claude claude-haiku-4-5"},
+		2: {Turn: 2, Text: "ターンの要約", Model: "claude claude-haiku-4-5"},
+	}
+	m.summaries = sums
+	m = pressKey(m, "s")
+
+	out := stripANSI(m.detailView())
+	if !strings.Contains(out, "claude claude-sonnet-5") {
+		t.Fatalf("the credit should name the session summary's model:\n%s", out)
+	}
+	if strings.Contains(out, "haiku") {
+		t.Fatalf("the credit named a turn summary's model instead:\n%s", out)
 	}
 }

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/agentcarto/core/domain"
@@ -30,11 +31,35 @@ type Summary struct {
 	// claude-sonnet-5"), shown to the reader and used to decide whether a
 	// summary made by a weaker model is worth regenerating.
 	Model string
-	// Fingerprint is the session fingerprint the summary was made from. The
-	// session may have grown since — this table is deliberately not gated on it
-	// — so a reader that wants to say "this summary predates the last few turns"
-	// compares it against the session's own fingerprint.
+	// Fingerprint is the session fingerprint the row was last written against.
+	// For a turn summary that is the version it was made from. For the session
+	// summary it is weaker than it looks: MarkExamined upserts the current
+	// fingerprint onto turn 0 without rewriting its text, so a fingerprint that
+	// matches does not mean the text is current. Stale is what to ask.
 	Fingerprint string
+	// Created is when the row was written. Zero for a row stored before this
+	// field was read back.
+	Created time.Time
+}
+
+// Stale reports whether this session summary describes a session that has since
+// gone on. It is only meaningful for turn 0: a turn summary is withheld
+// altogether when the node it was made from moves (see Summaries).
+//
+// Two things can say so, and either is enough. The fingerprint catches a log
+// that changed under a summary the worker has not looked at since. The time
+// catches what the fingerprint cannot: a worker run that summarized the new
+// turns but left the session summary alone (summary.session_interval had not
+// elapsed) and then called MarkExamined, which brings the fingerprint up to date
+// while the text stays behind.
+func (s Summary) Stale(sess domain.Session) bool {
+	if s.Turn != 0 || strings.TrimSpace(s.Text) == "" {
+		return false
+	}
+	if s.Fingerprint != sess.Fingerprint {
+		return true
+	}
+	return !s.Created.IsZero() && !sess.UpdatedAt.IsZero() && s.Created.Before(sess.UpdatedAt)
 }
 
 // PutSummaries stores summaries for one session, replacing any row that already
@@ -97,7 +122,7 @@ func (d *DB) putSummaries(ctx context.Context, s domain.Session, sums []Summary,
 // Turns absent from the result are the ones that still need generating — there
 // is no separate query for that.
 func (d *DB) Summaries(ctx context.Context, s domain.Session, nodeByTurn map[int]string) map[int]Summary {
-	rows, e := d.db.QueryContext(ctx, "SELECT turn_index,node_id,summary,model,fingerprint FROM summaries WHERE plugin_id=? AND session_id=?", s.PluginID, s.SessionID)
+	rows, e := d.db.QueryContext(ctx, "SELECT turn_index,node_id,summary,model,fingerprint,created FROM summaries WHERE plugin_id=? AND session_id=?", s.PluginID, s.SessionID)
 	if e != nil {
 		return nil
 	}
@@ -105,8 +130,12 @@ func (d *DB) Summaries(ctx context.Context, s domain.Session, nodeByTurn map[int
 	out := map[int]Summary{}
 	for rows.Next() {
 		var sum Summary
-		if e := rows.Scan(&sum.Turn, &sum.NodeID, &sum.Text, &sum.Model, &sum.Fingerprint); e != nil {
+		var created int64
+		if e := rows.Scan(&sum.Turn, &sum.NodeID, &sum.Text, &sum.Model, &sum.Fingerprint, &created); e != nil {
 			return nil
+		}
+		if created > 0 {
+			sum.Created = time.Unix(created, 0)
 		}
 		if sum.Turn != 0 {
 			if node, ok := nodeByTurn[sum.Turn]; !ok || node != sum.NodeID {
