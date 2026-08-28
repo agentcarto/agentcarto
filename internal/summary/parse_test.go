@@ -155,3 +155,73 @@ func TestParseErrorCarriesTheAnswer(t *testing.T) {
 		t.Errorf("the error does not show what came back: %v", e)
 	}
 }
+
+// The headline is its own section: it stands in for the summary where there is
+// room for a line and not a paragraph.
+func TestParseReadsTheHeadline(t *testing.T) {
+	r, e := Parse("@@HEADLINE\npull-all.shの作成\n\n@@SESSION\n全体の要約\n\n@@TURN 1\none\n", []int{1})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if r.Headline != "pull-all.shの作成" {
+		t.Errorf("Headline=%q", r.Headline)
+	}
+	if r.Session != "全体の要約" || r.Turns[1] != "one" {
+		t.Errorf("the headline section swallowed the rest: %+v", r)
+	}
+}
+
+// A model that writes the headline across lines still gets one line stored:
+// what shows it has room for a line, and a wrapped headline would take the room
+// of the summary it stands in for.
+func TestParseFlattensAMultiLineHeadline(t *testing.T) {
+	r, e := Parse("@@HEADLINE\npull-all.shの作成と\n6リポジトリの確認\n\n@@SESSION\n全体\n", nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if r.Headline != "pull-all.shの作成と 6リポジトリの確認" {
+		t.Errorf("Headline=%q", r.Headline)
+	}
+}
+
+// An answer from before the headline was asked for parses as it always did.
+func TestParseAcceptsAnAnswerWithNoHeadline(t *testing.T) {
+	r, e := Parse("@@SESSION\n全体\n\n@@TURN 1\none\n", []int{1})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if r.Headline != "" {
+		t.Errorf("Headline=%q want empty", r.Headline)
+	}
+	if r.Session != "全体" || r.Turns[1] != "one" {
+		t.Errorf("parsed %+v", r)
+	}
+}
+
+// A headline and nothing else is not an answer: what was asked for is the
+// summary, and storing a blank one would read as "this session has nothing to
+// say" and never be retried.
+func TestParseRejectsAHeadlineAlone(t *testing.T) {
+	if _, e := Parse("@@HEADLINE\n見出しだけ\n", []int{1}); e == nil {
+		t.Error("an answer holding only a headline should be an error")
+	}
+}
+
+// Turn numbers are positive. A model that writes a negative one must not land
+// in a section this package reserves for itself — "@@TURN -2" once matched the
+// headline and stored a turn's prose as the session's one-liner.
+func TestParseRejectsTurnNumbersAtOrBelowZero(t *testing.T) {
+	r, e := Parse("@@HEADLINE\n本物の見出し\n\n@@SESSION\n全体\n\n@@TURN -2\nターンのつもりの本文\n\n@@TURN 1\none\n", []int{1})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if r.Headline != "本物の見出し" {
+		t.Errorf("Headline=%q — a negative turn number reached the headline", r.Headline)
+	}
+	if r.Turns[-2] != "" || r.Turns[0] != "" {
+		t.Errorf("a turn number at or below zero was stored: %+v", r.Turns)
+	}
+	if r.Session != "全体" || r.Turns[1] != "one" {
+		t.Errorf("the bad marker took more than its own body down: %+v", r)
+	}
+}

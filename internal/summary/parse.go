@@ -6,11 +6,15 @@ import (
 	"strings"
 )
 
-// Result is what a model came back with: one summary per turn, plus the
-// session's own.
+// Result is what a model came back with: one summary per turn, the session's
+// own, and the one-line headline that stands in for it where there is room for
+// a line and not a paragraph.
 type Result struct {
 	Session string
-	Turns   map[int]string
+	// Headline is the session in one line. Empty when the model did not write
+	// one, which is not an error: what shows it falls back to the summary.
+	Headline string
+	Turns    map[int]string
 }
 
 // Marker prefixes. The reply is not JSON, and that is deliberate: a model
@@ -22,8 +26,16 @@ type Result struct {
 // Line-anchored markers have no escaping to get wrong, and a malformed one
 // costs a single turn instead of the answer.
 const (
-	sessionMarker = "@@SESSION"
-	turnMarker    = "@@TURN "
+	sessionMarker  = "@@SESSION"
+	headlineMarker = "@@HEADLINE"
+	turnMarker     = "@@TURN "
+)
+
+// Sections that are not turn numbers. Turn numbers are positive, so the
+// negatives are free for the sections that are one of a kind.
+const (
+	sectionPreamble = -1 // before any marker, or after one that could not be read
+	sectionHeadline = -2
 )
 
 // Parse reads a model's answer. asked is the turn numbers the prompt carried;
@@ -43,9 +55,9 @@ func Parse(out string, asked []int) (Result, error) {
 	res := Result{Turns: map[int]string{}}
 
 	// section is the marker the following lines belong to: 0 for the session
-	// summary, a turn number, or -1 while no marker has been seen yet (the
+	// summary, a turn number, or one of the negatives above (a headline, or the
 	// preamble a model sometimes writes despite being told not to).
-	section := -1
+	section := sectionPreamble
 	var body []string
 	flush := func() {
 		text := strings.TrimSpace(strings.Join(body, "\n"))
@@ -56,23 +68,36 @@ func Parse(out string, asked []int) (Result, error) {
 		switch {
 		case section == 0:
 			res.Session = text
+		case section == sectionHeadline:
+			// One line, whatever the model wrote across: a headline stands where
+			// there is room for a line, and a wrapped one would take the room of the
+			// summary it stands in for.
+			res.Headline = strings.Join(strings.Fields(text), " ")
 		case section > 0 && want[section]:
 			res.Turns[section] = text
 		}
 	}
 	for _, line := range strings.Split(unfence(strings.TrimSpace(out)), "\n") {
 		switch {
+		case strings.HasPrefix(line, headlineMarker):
+			flush()
+			section = sectionHeadline
 		case strings.HasPrefix(line, sessionMarker):
 			flush()
 			section = 0
 		case strings.HasPrefix(line, turnMarker):
 			n, e := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, turnMarker)))
-			if e != nil {
+			if e != nil || n <= 0 {
 				// A marker whose number is unreadable takes its own body down
 				// with it, and nothing else: the next marker starts a fresh
 				// section. This is the whole point of not using JSON.
+				//
+				// Numbers at or below zero are not turn numbers: zero is the
+				// session summary, which has a marker of its own, and the
+				// negatives are the section values above. A model that writes
+				// "@@TURN -2" must not land in the headline.
 				flush()
-				section = -1
+				section = sectionPreamble
 				continue
 			}
 			flush()

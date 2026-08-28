@@ -104,3 +104,18 @@ func TestPromptOfNoTurns(t *testing.T) {
 		t.Fatalf("asking about no turns produced doc=%.40q asked=%v", doc, asked)
 	}
 }
+
+// The session summary is written by two different calls — one that saw the whole
+// session (System) and one built from the turn summaries (SessionSystem) — and
+// both have to ask for a headline. If one stops asking, the sessions that take
+// that path silently lose theirs.
+func TestBothSessionPromptsAskForAHeadline(t *testing.T) {
+	for name, prompt := range map[string]string{"System": System, "SessionSystem": SessionSystem} {
+		if !strings.Contains(prompt, headlineMarker) {
+			t.Errorf("%s does not ask for %s", name, headlineMarker)
+		}
+		if !strings.Contains(prompt, sessionMarker) {
+			t.Errorf("%s does not ask for %s", name, sessionMarker)
+		}
+	}
+}
