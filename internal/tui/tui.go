@@ -1991,7 +1991,8 @@ func (m Model) View() string {
 	if m.flash != "" {
 		b.WriteString(flashBar(padCol(clip(m.flash, max(1, m.width-1)), max(1, m.width-1))))
 	} else {
-		foot := " ↑↓/jk move  Enter open/toggle  o resume  c cd  m move  v view  a active  / search  r reload  q quit "
+		foot := " ↑↓/jk move  Enter open/toggle  o resume  c cd  m move  v view  a active"
+		foot += "  / search  r reload  q quit "
 		b.WriteString(footer(padCol(clip(foot, max(1, m.width-1)), max(1, m.width-1))))
 	}
 	return b.String()
@@ -2227,11 +2228,11 @@ const summaryMark = "§"
 // hold either the session's own generated summary (stored as turn 0) or the
 // title.
 //
-// Closed, that is one line: the summary when there is one, the title when there
-// is not. The title is the session's first prompt, which turn #1 carries as its
-// own headline — with a summary to show, spending the line on the title says
-// what the screen says anyway. Open (`s`), the title comes back in full and the
-// whole summary follows it, so nothing the line replaced is out of reach.
+// Closed, that is one line: the session's headline when there is one, the title
+// when there is not. The title is the session's first prompt, which turn #1
+// carries as its own headline — with a summary to show, spending the line on the
+// title says what the screen says anyway, and the prompt itself is one row away.
+// Open (`s`), that line stays and the whole summary follows it.
 //
 // These lines are rows of the list rather than part of the fixed header, so an
 // opened summary scrolls with everything else and is never cut to fit: what the
@@ -2251,36 +2252,43 @@ func (m Model) detailHeadLines(s *domain.Session, cursor int) []string {
 	if sum == "" {
 		return []string{m.detailSubLine(s, s.Title, false, cursor == 0)}
 	}
-	if m.summaryStale {
-		// Said before the summary rather than after it, because after it is what a
-		// narrow line drops. The turns below are current; only this is not.
-		sum = "(stale) " + sum
-	}
-	w := max(20, m.width-1)
-	if !m.summaryOpen {
+	// Closed, the head is one line. That is what the model wrote it for — the
+	// headline says what the session was in a line, where the summary's first
+	// line is only its first line. A summary written before headlines existed has
+	// none, and then the paragraph is flattened into the line as before.
+	one := strings.TrimSpace(m.summaries[0].Headline)
+	if one == "" {
 		// Flattened rather than cut at the first line break: the line is clipped to
 		// the width anyway, and a summary that opens with a short line would
 		// otherwise show a short line where the whole width was available.
-		return []string{m.detailSubLine(s, summaryMark+" "+strings.Join(strings.Fields(sum), " "), true, cursor == 0)}
+		one = strings.Join(strings.Fields(sum), " ")
 	}
-	out := []string{}
-	for i, ln := range wrapWidth(strings.TrimSpace(s.Title), w-1) {
-		if i == 0 {
-			// The fork lineage and breadcrumb belong to the first line whether the
-			// title fits on it or not, so the first line is still the sub line.
-			out = append(out, m.detailSubLine(s, ln, false, cursor == 0))
-			continue
-		}
-		out = append(out, headLine(" "+ln, lipgloss.Color("3"), w, cursor == len(out)))
+	if m.summaryStale {
+		// Said before the summary rather than after it, because after it is what a
+		// narrow line drops. The turns below are current; only this is not.
+		sum, one = "(stale) "+sum, "(stale) "+one
 	}
+	w := max(20, m.width-1)
+	if !m.summaryOpen {
+		return []string{m.detailSubLine(s, summaryMark+" "+one, true, cursor == 0)}
+	}
+	// Open, the summary unfolds under a first line rather than replacing it. What
+	// that line gave up — the session's first prompt — is turn #1's headline, one
+	// row down the list, so it does not come back here.
 	body := []string{}
 	for _, para := range strings.Split(sum, "\n") {
-		for _, ln := range wrapWidth(strings.TrimSpace(para), w-3) {
-			body = append(body, "  "+ln)
-		}
+		body = append(body, wrapWidth(strings.TrimSpace(para), w-3)...)
 	}
-	if len(body) > 0 {
-		body[0] = " " + summaryMark + strings.TrimPrefix(body[0], " ")
+	lead := one
+	if strings.TrimSpace(m.summaries[0].Headline) == "" && len(body) > 0 {
+		// Without a headline the closed line is the paragraph flattened, so
+		// repeating it above the paragraph would say the same thing twice. The
+		// paragraph's own first line leads instead.
+		lead, body = body[0], body[1:]
+	}
+	out := []string{m.detailSubLine(s, summaryMark+" "+lead, true, cursor == 0)}
+	for i, ln := range body {
+		body[i] = "  " + ln
 	}
 	// Who wrote it and when, so a reader can weigh it: a summary from a smaller
 	// model reads differently, and one written days ago describes the session as
@@ -2810,9 +2818,11 @@ func (m Model) detailRowText(r detailRow) string {
 	if r.Kind == "head" {
 		// The generated summary is searchable here because it is searchable at the
 		// list level (cache.SummaryTexts): a session found by its summary and then
-		// opened has to find it inside as well. The title is not matched here — it
-		// is turn #1's headline, and matching both would report one hit twice.
-		return strings.ToLower(m.summaries[0].Text)
+		// opened has to find it inside as well. The headline is matched too — it is
+		// what the row shows while it is closed, and a word on screen that finds
+		// nothing reads as a broken search. The title is not matched: it is turn
+		// #1's headline, and matching both would report one hit twice.
+		return strings.ToLower(m.summaries[0].Headline + " " + m.summaries[0].Text)
 	}
 	if r.Kind == "forkparent" {
 		return strings.ToLower(m.forkParentLabel())

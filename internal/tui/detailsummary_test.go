@@ -33,6 +33,12 @@ func twoTurns() domain.Conversation {
 // written to: later than now is a session that went on after it was summarized
 // (the summary is stale), and the zero value is one that did not.
 func detailWithSummary(t *testing.T, text string, updatedAt time.Time, width, height int) Model {
+	return detailWithHeadline(t, text, "", updatedAt, width, height)
+}
+
+// detailWithHeadline is detailWithSummary with the one-line headline the model
+// writes beside the summary.
+func detailWithHeadline(t *testing.T, text, headline string, updatedAt time.Time, width, height int) Model {
 	t.Helper()
 	db, e := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
 	if e != nil {
@@ -40,7 +46,7 @@ func detailWithSummary(t *testing.T, text string, updatedAt time.Time, width, he
 	}
 	t.Cleanup(func() { db.Close() })
 	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo", Title: summaryTestTitle, UpdatedAt: updatedAt}
-	if e := db.PutSummaries(context.Background(), s, []cache.Summary{{Turn: 0, Text: text, Model: "claude claude-sonnet-5"}}); e != nil {
+	if e := db.PutSummaries(context.Background(), s, []cache.Summary{{Turn: 0, Text: text, Headline: headline, Model: "claude claude-sonnet-5"}}); e != nil {
 		t.Fatalf("put summaries: %v", e)
 	}
 	m := Model{width: width, height: height, detailSession: &s, cache: db}
@@ -129,22 +135,25 @@ func TestDetailHeadRowOpensToFullTitleAndSummary(t *testing.T) {
 	}
 }
 
-// The title is what the head row gives up when there is a summary, so opening
-// has to bring it back in full — that is where it can still be read.
-func TestDetailHeadRowOpenShowsWholeTitle(t *testing.T) {
-	m := detailWithSummary(t, "要約", time.Time{}, 40, 24)
+// Opening does not bring the title back: the head unfolds under the line it was
+// closed to. The session's first prompt is turn #1's own headline, one row down.
+func TestDetailHeadRowOpenKeepsTheHeadlineOnTop(t *testing.T) {
+	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成し、6リポジトリ全てを確認した。", "一括pullスクリプトの作成", time.Time{}, 60, 24)
 	m = pressKey(m, "s")
 
-	// Joined without the leading indent of each line, so a title split across
-	// lines reads as the one string it is.
+	lines := strings.Split(stripANSI(m.detailView()), "\n")
+	if !strings.Contains(lines[2], "一括pullスクリプトの作成") {
+		t.Fatalf("the first head line should stay the headline, got %q", lines[2])
+	}
 	head := ""
-	for _, ln := range strings.Split(stripANSI(m.detailView()), "\n")[2 : 2+headRows(m)] {
+	for _, ln := range lines[2 : 2+headRows(m)] {
 		head += strings.TrimSpace(ln)
 	}
-	for _, part := range []string{"このディレクトリ配下", "実行権限も付けておいて"} {
-		if !strings.Contains(head, part) {
-			t.Fatalf("the wrapped title should be shown in full, %q missing from:\n%s", part, head)
-		}
+	if !strings.Contains(head, "6リポジトリ全てを確認した") {
+		t.Fatalf("the whole summary should follow it:\n%s", head)
+	}
+	if strings.Contains(head, "このディレクトリ配下") {
+		t.Fatalf("the title should not come back on open:\n%s", head)
 	}
 }
 
@@ -415,5 +424,77 @@ func TestDetailOpenBringsTheViewportToTheCursor(t *testing.T) {
 	}
 	if out := stripANSI(m.detailView()); !strings.Contains(out, "#2") {
 		t.Fatalf("the first frame after opening shows no turn row:\n%s", out)
+	}
+}
+
+// Closed, the head row is the headline: one line written to be a line. The
+// summary's own first line is only its first line, which is what the reader
+// could not make sense of before headlines existed.
+func TestDetailHeadRowPrefersTheHeadline(t *testing.T) {
+	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成。git pull --ff-onlyのみを使う方針で実装した。", "複数gitリポジトリ一括pullスクリプトの作成", time.Time{}, 120, 20)
+
+	line := strings.Split(stripANSI(m.detailView()), "\n")[2]
+	if !strings.Contains(line, "複数gitリポジトリ一括pullスクリプトの作成") {
+		t.Fatalf("the head row should carry the headline, got %q", line)
+	}
+	if strings.Contains(line, "agentcarto配下の") {
+		t.Fatalf("the summary was used where the headline was available: %q", line)
+	}
+	// Opening still shows the summary in full — the headline is not a substitute
+	// for it, only for the line it has to fit on.
+	m = pressKey(m, "s")
+	if out := stripANSI(m.detailView()); !strings.Contains(out, "--ff-onlyのみを使う方針") {
+		t.Fatalf("the open head should still hold the whole summary:\n%s", out)
+	}
+}
+
+// A summary written before headlines existed keeps working: its paragraph is
+// flattened onto the line as it was.
+func TestDetailHeadRowFallsBackToTheSummary(t *testing.T) {
+	m := detailWithHeadline(t, "見出しのない古い要約", "", time.Time{}, 120, 20)
+
+	line := strings.Split(stripANSI(m.detailView()), "\n")[2]
+	if !strings.Contains(line, "見出しのない古い要約") {
+		t.Fatalf("with no headline the summary keeps the line, got %q", line)
+	}
+}
+
+// The stale mark belongs in front of whichever of the two is on the line.
+func TestDetailHeadlineCarriesTheStaleMark(t *testing.T) {
+	m := detailWithHeadline(t, "古い要約", "古い見出し", time.Now().Add(time.Hour), 120, 20)
+
+	line := strings.Split(stripANSI(m.detailView()), "\n")[2]
+	if !strings.Contains(line, "(stale)") || !strings.Contains(line, "古い見出し") {
+		t.Fatalf("a stale headline should say so, got %q", line)
+	}
+}
+
+// Without a headline the closed line is the paragraph flattened, so opening
+// must not repeat it above the paragraph.
+func TestDetailHeadRowOpenWithoutAHeadlineDoesNotRepeatItself(t *testing.T) {
+	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成。6リポジトリ全てを確認した。", "", time.Time{}, 100, 24)
+	m = pressKey(m, "s")
+
+	lines := strings.Split(stripANSI(m.detailView()), "\n")[2 : 2+headRows(m)]
+	if len(lines) < 2 {
+		t.Fatalf("expected the summary to wrap, got %d line(s)", len(lines))
+	}
+	first, second := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[0]), summaryMark)), strings.TrimSpace(lines[1])
+	if strings.HasPrefix(first, second) || strings.HasPrefix(second, first) {
+		t.Fatalf("the first two head lines say the same thing:\n  %q\n  %q", first, second)
+	}
+}
+
+// The closed head row shows the headline, so a word that appears only there has
+// to be findable: a search that reports nothing while the word is on screen
+// reads as broken.
+func TestDetailSearchMatchesTheHeadline(t *testing.T) {
+	m := detailWithHeadline(t, "agentcarto配下のリポジトリをまとめて更新する仕組みを用意した。", "pull-all.shの導入", time.Time{}, 120, 20)
+	m.turnQuery = "pull-all"
+	m.turnHitsStale = true
+	(&m).syncTurnHits()
+
+	if hits := m.turnListHits(); len(hits) != 1 || hits[0] != 0 {
+		t.Fatalf("a word only the headline carries should match the head row, got %v", hits)
 	}
 }
