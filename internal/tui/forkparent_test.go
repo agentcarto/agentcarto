@@ -77,6 +77,19 @@ func TestForkParentRowSitsUnderTheOldestTurn(t *testing.T) {
 	}
 }
 
+// The focused fork path is the continuation being read, so its own assistant
+// reply is not an abandoned one-node rewind merely because the synthesized
+// conversation's root path belongs to the parent session.
+func TestForkTurnMarkDoesNotTreatItsReplyAsRewind(t *testing.T) {
+	m := forkDetail(true)
+	if len(m.detailTurns) != 1 {
+		t.Fatalf("fork turns=%d want 1", len(m.detailTurns))
+	}
+	if got := m.turnMarkParts(m.detailTurns[0], time.Time{})[5]; got != "" {
+		t.Fatalf("fork's own reply got a rewind mark %q:\n%s", got, stripANSI(m.detailView()))
+	}
+}
+
 // An ordinary session has no parent, and nothing extra is appended to its turns.
 func TestOrdinarySessionHasNoForkParentRow(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{

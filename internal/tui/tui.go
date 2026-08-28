@@ -92,7 +92,7 @@ type Model struct {
 	detailTurns       [][]string
 	detailRows        []detailRow
 	detailPathStack   []detailFrame
-	detailActive      map[string]bool // nodes on the active path (see activePathSet), rebuilt with detailRows
+	detailActive      map[string]bool // nodes on the displayed detail path, rebuilt with detailRows
 	detailNewestChron int             // chronological index of the newest displayed turn (for the in-progress ●). -1 if none.
 	blinkOn           bool            // blink phase for the elapsed time of the selected in-progress turn (true=background lit, false=no background).
 	detailCursor      int
@@ -2356,14 +2356,14 @@ func (m *Model) rebuildDetailRows(path []string) {
 	if m.detail == nil {
 		return
 	}
-	// The active-path set only changes with the conversation, and a new
-	// conversation always rebuilds the rows, so this is the one place it has to be
-	// computed. It is O(nodes), which is why no render may build it.
-	m.detailActive = m.activePathSet()
 	active := map[string]bool{}
 	for _, id := range path {
 		active[id] = true
 	}
+	// Branch rows and per-turn rewind marks must agree on which continuation is
+	// being read. In a focused fork frame that is path, not the synthesized
+	// conversation's parent-session ActivePath.
+	m.detailActive = active
 	turns := transcript.Turns(*m.detail, path)
 	for i := len(turns) - 1; i >= 0; i-- { // newest first
 		e := turns[i]
@@ -3059,24 +3059,8 @@ func (m Model) turnRunningNow(s *domain.Session, chronIndex int) time.Time {
 	return time.Time{}
 }
 
-// activePathSet is the set of nodes on the conversation's active path, used to
-// tell a turn's abandoned sub-branches from its continuation. It is O(nodes), so
-// it is built once with the rows (see rebuildDetailRows) and kept on the Model.
-func (m Model) activePathSet() map[string]bool {
-	if m.detail == nil {
-		return nil
-	}
-	path := m.detail.ActivePath()
-	active := make(map[string]bool, len(path))
-	for _, id := range path {
-		active[id] = true
-	}
-	return active
-}
-
-// turnMarkParts reads the active-path set from the Model rather than building
-// its own: see activePathSet. Building it here would be O(nodes of the whole
-// conversation) on every row of every frame.
+// turnMarkParts reads the displayed-path set from the Model rather than
+// rebuilding it on every row of every frame.
 func (m Model) turnMarkParts(ids []string, now time.Time) [9]string {
 	events := m.turnEvents(ids)
 	tools, replies, queued := 0, 0, 0

@@ -268,7 +268,7 @@ func TestTurnMarkPartsPrototypeTaskRetryAndEditStats(t *testing.T) {
 		{ID: "side", Parent: "u", Timestamp: time.Date(2026, 6, 23, 1, 1, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "retry"}}},
 	})
 	m := Model{detail: &c}
-	m.detailActive = m.activePathSet() // normally built with the rows
+	m.setDetailPath(c.ActivePath()) // normally built when the detail path is selected
 	parts := m.turnMarkParts([]string{"u", "a"}, time.Time{})
 	if parts[1] != "▶1" || parts[4] != "⤷1" || parts[5] != "↺1" || parts[6] != "*1" || parts[7] != "+1" || parts[8] != "-1" {
 		t.Fatalf("parts=%#v", parts)
