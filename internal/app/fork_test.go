@@ -169,10 +169,10 @@ func TestConversationFromFocusRootsAtAncestorAndFocusesFork(t *testing.T) {
 	// Grafted nodes resolve back to the child session with their real IDs; the
 	// parent's own nodes resolve to the parent. Fork planning depends on this
 	// mapping because the grafted IDs (k0_…) do not exist in any session file.
-	if o := origins["k0_f2"]; o.Session.SessionID != "C" || o.NodeID != "f2" {
+	if o := origins["k0_f2"]; o.Session.SessionID != "C" || o.NodeID != "f2" || !o.ActiveLeaf {
 		t.Fatalf("origin of k0_f2 = %+v, want session C node f2", o)
 	}
-	if o := origins["p2"]; o.Session.SessionID != "P" || o.NodeID != "p2" {
+	if o := origins["p2"]; o.Session.SessionID != "P" || o.NodeID != "p2" || !o.ActiveLeaf {
 		t.Fatalf("origin of p2 = %+v, want session P node p2", o)
 	}
 	// the parent mainline is the active path (primary).

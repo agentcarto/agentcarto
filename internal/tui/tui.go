@@ -174,7 +174,7 @@ type labelSpan struct {
 
 type detailRow struct {
 	Kind       string
-	Turn       []string
+	Turn       []string // displayed turn, or the owning turn whose headline column a branch row aligns with
 	Root       string
 	TurnIndex  int // chronological index of the turn row (0-based; +1 for the # label). May be non-contiguous because compact turns are skipped.
 	LastBranch bool
@@ -807,6 +807,10 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case "forkparent":
 				return m.jumpToParent()
 			case "branch":
+				if child, ok := m.forkBranchSession(row.Root); ok {
+					m.forkBack = nil
+					return m, m.openSessionDetail(child, m.turnQuery)
+				}
 				m.detailPathStack = append(m.detailPathStack, detailFrame{path: convlogic.DeepestPath(*m.detail, row.Root), label: m.branchFrameLabel(row.Root)})
 				m.setDetailPath(m.currentDetailPath())
 				m.detailCursor = 0
@@ -1015,13 +1019,8 @@ func (m Model) jumpToParent() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.forkBack = append(m.forkBack, *m.detailSession)
-	ps := *parent
-	m.detailSession = &ps
-	m.detailPathStack = nil
-	m.turnQuery = "" // jumping to the parent does not inherit the search query
-	m.turnSearchPos = -1
 	m.flash = fmt.Sprintf("Jumped to parent: %s (q to go back)", shortID(pid))
-	return m, m.loadConversation(ps, true, true)
+	return m, m.openSessionDetail(*parent, "")
 }
 
 // detailBack handles the "go back" keys (q / ← / Esc / h) in the detail view, peeling
@@ -1045,12 +1044,8 @@ func (m Model) detailBack(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if len(m.forkBack) > 0 {
 		child := m.forkBack[len(m.forkBack)-1]
 		m.forkBack = m.forkBack[:len(m.forkBack)-1]
-		m.detailSession = &child
-		m.detailPathStack = nil
-		m.turnQuery = "" // returning from a fork does not inherit the search query either
-		m.turnSearchPos = -1
 		m.flash = "" // the "Jumped to parent" notice is no longer valid once we return to the child
-		return m, m.loadConversation(child, true, true)
+		return m, m.openSessionDetail(child, "")
 	}
 	m.detail = nil
 	m.detailSession = nil
@@ -1149,12 +1144,9 @@ func (m Model) updateList(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if s, ok := m.selected(); ok {
-			m.detailSession = &s
+			m.forkBack = nil
 			// Carry the list's search query over to the turn list.
-			m.turnQuery = strings.TrimSpace(m.query.Value())
-			m.turnSearching = false
-			m.turnSearchPos = -1
-			return m, m.loadConversation(s, true, true)
+			return m, m.openSessionDetail(s, m.query.Value())
 		}
 	case "o":
 		if s, ok := m.selected(); ok {
@@ -1240,6 +1232,75 @@ func (m Model) selectedCWD() (string, bool) {
 	}
 	return m.rows[m.cursor].CWD, true
 }
+
+// openSessionDetail switches the detail view to s and starts the same canonical
+// conversation load regardless of whether s was selected from the session list,
+// a fork row, or parent/back navigation.
+func (m *Model) openSessionDetail(s domain.Session, query string) tea.Cmd {
+	if m.focusLoadedSessionDetail(s, query) {
+		return nil
+	}
+	m.detailSession = &s
+	m.detail = nil
+	m.detailOrigins = nil
+	m.detailTurns = nil
+	m.detailRows = nil
+	m.detailPathStack = nil
+	m.detailActive = nil
+	m.detailNewestChron = -1
+	m.detailCursor = 0
+	m.detailOffset = 0
+	m.summaries = nil
+	m.summaryModel = ""
+	m.turnOpen = false
+	m.turnBlocks = nil
+	m.turnExpanded = nil
+	m.turnCursor = 0
+	m.turnOffset = 0
+	m.resetDetailSearch(query)
+	return m.loadConversation(s, true, true)
+}
+
+// focusLoadedSessionDetail switches session context using the canonical tree
+// already in memory. Fork rows, parent navigation and back therefore do not
+// parse the same session files again.
+func (m *Model) focusLoadedSessionDetail(s domain.Session, query string) bool {
+	if m.detail == nil {
+		return false
+	}
+	focusLeaf := m.loadedSessionFocusLeaf(s)
+	if focusLeaf == "" {
+		return false
+	}
+
+	c, origins := m.detail, m.detailOrigins
+	m.detailSession = &s
+	m.resetDetailSearch(query)
+	updated, _ := m.handleConvMsg(convMsg{c: c, focusLeaf: focusLeaf, origins: origins, key: s.Key(), reset: true})
+	*m = updated.(Model)
+	return true
+}
+
+func (m Model) loadedSessionFocusLeaf(s domain.Session) string {
+	for id, origin := range m.detailOrigins {
+		if origin.ActiveLeaf && origin.Session.Key() == s.Key() {
+			return id
+		}
+	}
+	return ""
+}
+
+func (m *Model) resetDetailSearch(query string) {
+	m.turnQuery = strings.TrimSpace(query)
+	m.turnSearching = false
+	m.turnSearchPos = -1
+	m.turnHits = nil
+	m.turnHitsQuery = ""
+	m.turnHitsStale = true
+	m.turnFullSearching = false
+	m.turnFullQuery = ""
+}
+
 func (m Model) loadConversation(s domain.Session, useCache, reset bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -1814,6 +1875,7 @@ func (m Model) View() string {
 	}
 	return b.String()
 }
+
 func (m Model) detailView() string {
 	// openCurrentTurn keeps turnOpen and the cursor in step, so the row is a turn
 	// whenever the turn view is open. Check it here anyway: a render that finds
@@ -1861,7 +1923,7 @@ func (m Model) detailView() string {
 		case "forkparent":
 			bodyLines = append(bodyLines, m.detailForkParentLine(selected))
 		case "branch":
-			bodyLines = append(bodyLines, m.detailBranchLine(rowData, selected))
+			bodyLines = append(bodyLines, m.detailBranchLine(rowData, selected, colW, modelW))
 		default:
 			bodyLines = append(bodyLines, m.detailTurnLine(s, rowData, selected, colW, modelW, hit[i]))
 		}
@@ -2000,7 +2062,7 @@ func (m Model) detailSubLine(s *domain.Session) string {
 
 // detailBranchLine renders a branch row: an alternative sub-tree (fork or rewind) the
 // cursor can descend into, with its turn/message/branch counts and lead text.
-func (m Model) detailBranchLine(rowData detailRow, selected bool) string {
+func (m Model) detailBranchLine(rowData detailRow, selected bool, colW [9]int, modelW int) string {
 	conn := "├─"
 	if rowData.LastBranch {
 		conn = "└─"
@@ -2008,7 +2070,8 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool) string {
 	bt := transcript.Turns(*m.detail, convlogic.DeepestPath(*m.detail, rowData.Root))
 	sz := len(convlogic.Subtree(*m.detail, rowData.Root))
 	nb := convlogic.BranchAltCount(*m.detail, rowData.Root)
-	label := fmt.Sprintf("    %s %s (%dturn/%dmsg/%dbranch) %s", conn, convlogic.BranchKind(*m.detail, rowData.Root), len(bt), sz, nb, convlogic.BranchLead(*m.detail, rowData.Root))
+	indent := strings.Repeat(" ", m.detailTurnHeadlineColumn(rowData, colW, modelW))
+	label := fmt.Sprintf("%s%s %s (%dturn/%dmsg/%dbranch) %s", indent, conn, convlogic.BranchKind(*m.detail, rowData.Root), len(bt), sz, nb, convlogic.BranchLead(*m.detail, rowData.Root))
 	line := styled(clip(label, max(20, m.width-1)), lipgloss.Color("5"), selected, false)
 	if selected && lipgloss.Width(line) < m.width-1 {
 		line += styled(strings.Repeat(" ", m.width-1-lipgloss.Width(line)), "", true, false)
@@ -2138,6 +2201,30 @@ func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected boo
 		line += styled(strings.Repeat(" ", m.width-1-lipgloss.Width(line)), "", true, false)
 	}
 	return line
+}
+
+// detailTurnHeadlineColumn returns the visual column where this turn's headline
+// starts. Branch rows use the same column, mirroring how session-tree connectors
+// start at the title column instead of shifting the fixed metadata columns.
+func (m Model) detailTurnHeadlineColumn(rowData detailRow, colW [9]int, modelW int) int {
+	events := m.turnEvents(rowData.Turn)
+	stamp := "-----"
+	for _, e := range events {
+		if !e.Timestamp.IsZero() {
+			stamp = e.Timestamp.Local().Format("01-02 15:04")
+			break
+		}
+	}
+	w := 2 + runewidth.StringWidth(fmt.Sprintf("#%-4d ", rowData.TurnIndex+1)) + runewidth.StringWidth(stamp+"  ")
+	for _, width := range colW {
+		if width > 0 {
+			w += width + 1
+		}
+	}
+	if modelW > 0 {
+		w += modelW + 2
+	}
+	return w
 }
 
 // detailFooter returns the detail-view footer: the search footer while searching,
@@ -2319,6 +2406,23 @@ func (m Model) branchFrameLabel(root string) string {
 	return convlogic.BranchKind(*m.detail, root) + " " + shortID(root)
 }
 
+// forkBranchSession resolves a grafted fork row to the child session that owns
+// its root. Rewinds and same-session branches intentionally keep the existing
+// in-place path drilldown behavior.
+func (m Model) forkBranchSession(root string) (domain.Session, bool) {
+	if m.detail == nil || m.detailSession == nil || convlogic.BranchKind(*m.detail, root) != "fork" {
+		return domain.Session{}, false
+	}
+	origin, ok := m.detailOrigins[root]
+	if !ok || origin.Session.Key() == m.detailSession.Key() {
+		return domain.Session{}, false
+	}
+	if current := m.findSession(origin.Session.PluginID, origin.Session.SessionID); current != nil {
+		return *current, true
+	}
+	return origin.Session, true
+}
+
 // detailCrumb is the breadcrumb of the current branch ("current › fork 1a2b3c4d › …"), used to tell descended frames and forks apart.
 func (m Model) detailCrumb() string {
 	parts := make([]string, len(m.detailPathStack))
@@ -2374,7 +2478,7 @@ func (m *Model) rebuildDetailRows(path []string) {
 		m.detailRows = append(m.detailRows, detailRow{Kind: "turn", Turn: e.Nodes, TurnIndex: e.Index, Badge: e.Compact})
 		_, subs := convlogic.TurnBranches(*m.detail, e.Nodes, active)
 		for j, root := range subs {
-			m.detailRows = append(m.detailRows, detailRow{Kind: "branch", Root: root, LastBranch: j == len(subs)-1})
+			m.detailRows = append(m.detailRows, detailRow{Kind: "branch", Turn: e.Nodes, TurnIndex: e.Index, Root: root, LastBranch: j == len(subs)-1})
 		}
 	}
 	// A fork carries a copy of what was said before it, so its oldest turn is

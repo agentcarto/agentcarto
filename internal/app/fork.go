@@ -14,8 +14,9 @@ import (
 // any operation that reaches back into a session's file (fork) must translate
 // through this mapping first.
 type NodeOrigin struct {
-	Session domain.Session
-	NodeID  string
+	Session    domain.Session
+	NodeID     string
+	ActiveLeaf bool // this node was the owning session's active leaf before grafting
 }
 
 func (a *App) ConversationWithForks(ctx context.Context, s domain.Session, sessions []domain.Session) (*domain.Conversation, error) {
@@ -163,7 +164,7 @@ func identityOrigins(c *domain.Conversation, s domain.Session) map[string]NodeOr
 	}
 	out := make(map[string]NodeOrigin, len(c.Nodes))
 	for id := range c.Nodes {
-		out[id] = NodeOrigin{Session: s, NodeID: id}
+		out[id] = NodeOrigin{Session: s, NodeID: id, ActiveLeaf: id == c.ActiveLeaf}
 	}
 	return out
 }

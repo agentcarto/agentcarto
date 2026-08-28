@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/agentcarto/agentcarto/internal/app"
 	"github.com/agentcarto/core/domain"
 )
 
@@ -151,6 +152,47 @@ func TestForkParentRowOpensTheParent(t *testing.T) {
 	}
 	if len(m.forkBack) != 1 || m.forkBack[0].SessionID != "child" {
 		t.Fatalf("the fork was not remembered for going back: %v", m.forkBack)
+	}
+}
+
+func TestForkBranchOpensOwningSessionWithParentNavigation(t *testing.T) {
+	c := forkConversation()
+	parent := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "parent", CWD: "/repo", Title: "where it came from"}
+	child := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "child", CWD: "/repo", Title: "asked in the fork", ParentSessionID: "parent", ForkAt: "a1"}
+	origins := map[string]app.NodeOrigin{
+		"u1": {Session: parent, NodeID: "u1"},
+		"a1": {Session: parent, NodeID: "a1"},
+		"p2": {Session: parent, NodeID: "p2", ActiveLeaf: true},
+		"f1": {Session: child, NodeID: "f1"},
+		"f2": {Session: child, NodeID: "f2", ActiveLeaf: true},
+	}
+	m := Model{width: 140, height: 20, detailSession: &parent, sessions: []domain.Session{parent, child}}
+	u, _ := m.Update(convMsg{c: &c, origins: origins, reset: true})
+	m = u.(Model)
+	for i, row := range m.detailRows {
+		if row.Kind == "branch" && row.Root == "f1" {
+			m.detailCursor = i
+			break
+		}
+	}
+
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = u.(Model)
+	if cmd != nil || m.detailSession == nil || m.detailSession.SessionID != "child" {
+		t.Fatalf("fork Enter reloaded instead of immediately opening the loaded child: session=%v cmd=%v", m.detailSession, cmd)
+	}
+	view := stripANSI(m.detailView())
+	if !strings.Contains(view, "forked from: parent") || !strings.Contains(view, "(p)") {
+		t.Fatalf("child opened from the turn list lacks lineage or parent navigation:\n%s", view)
+	}
+	if got := m.loadedSessionFocusLeaf(parent); got != "p2" {
+		t.Fatalf("loaded parent focus leaf=%q want p2; origins=%+v", got, m.detailOrigins)
+	}
+
+	u, cmd = m.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = u.(Model)
+	if cmd != nil || m.detailSession == nil || m.detailSession.SessionID != "parent" {
+		t.Fatalf("p reloaded instead of immediately returning to the loaded parent: session=%v cmd=%v", m.detailSession, cmd)
 	}
 }
 

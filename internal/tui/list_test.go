@@ -430,6 +430,39 @@ func TestForkBranchLabelUsesForkKind(t *testing.T) {
 	}
 }
 
+func TestForkBranchStartsAtTurnHeadlineColumn(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
+		{ID: "a", Parent: "u", Timestamp: time.Date(2026, 6, 23, 3, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "active"}}},
+		{ID: "fork", Parent: "u", Timestamp: time.Date(2026, 6, 23, 2, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "fork question", Prompt: "fork question"}}},
+	})
+	c.ForkRoots = []string{"fork"}
+	s := domain.Session{PluginID: "codex", AgentType: "codex", SessionID: "s", CWD: "/repo", Title: "title"}
+	m := Model{width: 140, height: 20, detailSession: &s}
+	updated, _ := m.Update(convMsg{c: &c, reset: true})
+	m = updated.(Model)
+
+	var turnLine, forkLine string
+	for _, line := range strings.Split(stripANSI(m.detailView()), "\n") {
+		if strings.Contains(line, "#1") {
+			turnLine = line
+		}
+		if strings.Contains(line, "fork (") {
+			forkLine = line
+		}
+	}
+	headlineAt := strings.Index(turnLine, "question")
+	forkAt := strings.Index(forkLine, "└─")
+	if headlineAt < 0 || forkAt < 0 {
+		t.Fatalf("missing turn or fork row:\n%s", stripANSI(m.detailView()))
+	}
+	headlineCol := lipgloss.Width(turnLine[:headlineAt])
+	forkCol := lipgloss.Width(forkLine[:forkAt])
+	if forkCol != headlineCol {
+		t.Fatalf("fork connector column=%d want turn headline column=%d:\n%s\n%s", forkCol, headlineCol, turnLine, forkLine)
+	}
+}
+
 func TestForkBranchTurnCountExcludesCompactOnlyBoundaries(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
 		{ID: "u", Timestamp: time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
