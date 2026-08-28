@@ -703,6 +703,10 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 		if x.reset {
 			m.detailCursor = m.firstTurnRow()
 			m.detailOffset = 0
+			// The cursor no longer starts at the top — the head rows are above it —
+			// so the window has to be brought to it. Without this the first frame
+			// after opening is the head and none of the turns.
+			(&m).ensureDetailOffset()
 			m.turnOpen = false
 			m.turnBlocks = nil
 			m.turnExpanded = nil
@@ -876,6 +880,7 @@ func (m Model) updateDetail(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.setDetailPath(m.currentDetailPath())
 				m.detailCursor = m.firstTurnRow()
 				m.detailOffset = 0
+				(&m).ensureDetailOffset()
 				return m, nil
 			}
 		}
@@ -1152,6 +1157,7 @@ func (m Model) detailBack(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setDetailPath(m.currentDetailPath())
 		m.detailCursor = m.firstTurnRow()
 		m.detailOffset = 0
+		(&m).ensureDetailOffset()
 		return m, nil
 	}
 	// If we had jumped to the fork's parent, "back" returns to the fork child.

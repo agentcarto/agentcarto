@@ -394,3 +394,26 @@ func TestDetailSummaryCreditNamesTheSessionSummarysModel(t *testing.T) {
 		t.Fatalf("the credit named a turn summary's model instead:\n%s", out)
 	}
 }
+
+// Opening a session lands the cursor on the newest turn, which is below the head
+// rows. The window has to follow it: with the summary open the head can be
+// taller than the screen, and a frame showing only the summary is not the
+// session someone just opened.
+func TestDetailOpenBringsTheViewportToTheCursor(t *testing.T) {
+	m := detailWithSummary(t, strings.Repeat("長い要約の文章。", 40), time.Time{}, 60, 12)
+	m = pressKey(m, "s")
+	if headRows(m) <= m.detailBodyRows() {
+		t.Fatalf("this test needs a head taller than the body (%d rows vs %d)", headRows(m), m.detailBodyRows())
+	}
+
+	c := twoTurns()
+	updated, _ := m.Update(convMsg{c: &c, reset: true}) // the load an explicit open sends
+	m = updated.(Model)
+
+	if m.detailCursor < m.detailOffset || m.detailCursor >= m.detailOffset+m.detailBodyRows() {
+		t.Fatalf("the cursor (row %d) is outside the window (%d..%d)", m.detailCursor, m.detailOffset, m.detailOffset+m.detailBodyRows())
+	}
+	if out := stripANSI(m.detailView()); !strings.Contains(out, "#2") {
+		t.Fatalf("the first frame after opening shows no turn row:\n%s", out)
+	}
+}
