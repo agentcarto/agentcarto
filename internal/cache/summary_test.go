@@ -595,3 +595,32 @@ func TestASummaryWrittenWithinTheSecondIsNotStale(t *testing.T) {
 		t.Error("a session written to after the summary's second should be stale")
 	}
 }
+
+// The session list draws one line per session, so it reads every headline at
+// once rather than one per row.
+func TestHeadlinesReadsThemAllAtOnce(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	with := domain.Session{PluginID: "claude", SessionID: "with", Fingerprint: "fp"}
+	without := domain.Session{PluginID: "claude", SessionID: "without", Fingerprint: "fp"}
+	if e := d.PutSummaries(ctx, with, []Summary{
+		{Turn: 0, Text: "要約", Headline: "見出し"},
+		{Turn: 1, NodeID: "n1", Text: "ターンの要約"},
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if e := d.PutSummaries(ctx, without, []Summary{{Turn: 0, Text: "見出しのない要約"}, {Turn: 1, NodeID: "n1", Text: "ターン"}}); e != nil {
+		t.Fatal(e)
+	}
+
+	got := d.Headlines(ctx)
+	if got[with.Key()].Headline != "見出し" {
+		t.Errorf("headline for %q = %q", with.SessionID, got[with.Key()].Headline)
+	}
+	if _, ok := got[without.Key()]; ok {
+		t.Errorf("a session with no headline should be absent, got %+v", got[without.Key()])
+	}
+	if len(got) != 1 {
+		t.Errorf("Headlines returned %d entries, want 1: %v", len(got), got)
+	}
+}

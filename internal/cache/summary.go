@@ -58,7 +58,10 @@ type Summary struct {
 // elapsed) and then called MarkExamined, which brings the fingerprint up to date
 // while the text stays behind.
 func (s Summary) Stale(sess domain.Session) bool {
-	if s.Turn != 0 || strings.TrimSpace(s.Text) == "" {
+	// A row with neither text nor headline is MarkExamined's note that the
+	// session was looked at, not a summary. One that carries only a headline is
+	// what Headlines reads back, and it goes stale like any other.
+	if s.Turn != 0 || (strings.TrimSpace(s.Text) == "" && strings.TrimSpace(s.Headline) == "") {
 		return false
 	}
 	if s.Fingerprint != sess.Fingerprint {
@@ -188,6 +191,43 @@ func (d *DB) SummaryTexts(ctx context.Context) map[domain.SessionKey]string {
 		} else {
 			out[k] = text
 		}
+	}
+	if rows.Err() != nil {
+		return nil
+	}
+	return out
+}
+
+// Headlines returns every session's one-line headline, for the list that shows
+// one line per session.
+//
+// One query rather than one per session: the list draws every session there is,
+// and a lookup per row would be a query per row on every keystroke. Sessions
+// without a headline are absent, and the caller falls back to what it showed
+// before (the title).
+//
+// Whole rows rather than the text alone, so a caller can ask Stale. The list is
+// where a reader chooses what to open, and a headline that describes a session
+// as it was this morning has to say so there too — not only once the session is
+// open.
+func (d *DB) Headlines(ctx context.Context) map[domain.SessionKey]Summary {
+	rows, e := d.db.QueryContext(ctx, "SELECT plugin_id,session_id,headline,fingerprint,created FROM summaries WHERE turn_index=0 AND headline <> ''")
+	if e != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[domain.SessionKey]Summary{}
+	for rows.Next() {
+		var k domain.SessionKey
+		sum := Summary{Turn: 0}
+		var created int64
+		if rows.Scan(&k.PluginID, &k.SessionID, &sum.Headline, &sum.Fingerprint, &created) != nil {
+			return nil
+		}
+		if created > 0 {
+			sum.Created = time.Unix(created, 0)
+		}
+		out[k] = sum
 	}
 	if rows.Err() != nil {
 		return nil

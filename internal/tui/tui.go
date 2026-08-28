@@ -83,6 +83,17 @@ type Model struct {
 	// which only the session summary can be: a turn's is withheld unless it
 	// belongs to the turn shown.
 	summaryStale bool
+	// headlines are the one-line summaries of every session that has one, keyed by
+	// session. The list draws one line per session, so they are read in one query
+	// and refreshed with each scan (the worker writes new ones as it goes). Whole
+	// rows, because the list has to say when one describes a session that has
+	// since gone on.
+	headlines map[domain.SessionKey]cache.Summary
+	// listTitles puts the session list's last column back to the title — the
+	// session's first prompt. The zero value is the headline: what a session was
+	// about is what the list is read for, and the prompt that started it is one
+	// Enter away. Sessions with no headline yet show their title either way.
+	listTitles bool
 	// summaryOpen expands the detail header's head line into the title in full
 	// and the whole summary under it. The zero value is the one-line form, which
 	// is what the header has always been. Kept across sessions within one run, so
@@ -217,6 +228,9 @@ func New(a *app.App, cached []domain.Session, db *cache.DB) Model {
 		a.Store = db
 	}
 	m := Model{app: a, sessions: cached, query: q, relocInput: ri, scanning: true, view: a.Config.UI.DefaultView, cache: db}
+	if db != nil {
+		m.headlines = db.Headlines(context.Background())
+	}
 	m.filter()
 	return m
 }
@@ -610,6 +624,9 @@ func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 	m.index = x.index
 	m.indexFP = x.indexFP
 	if m.cache != nil {
+		// The summary worker writes headlines while the TUI runs, so they are read
+		// again with each scan rather than only at startup.
+		m.headlines = m.cache.Headlines(context.Background())
 		_ = m.cache.Save(context.Background(), x.snap.Sessions)
 		successful := scanSucceeded(m.app, x.snap)
 		_ = m.cache.Prune(context.Background(), x.snap.Sessions, successful, time.Duration(m.app.Config.Cache.MaxAge))
@@ -1212,6 +1229,13 @@ func (m Model) updateList(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		m.cursor = max(0, len(m.rows)-1)
 		m.ensureListOffset()
+	case "s":
+		// Only when there is one to swap: with no summaries yet both columns are
+		// the title and the key would read as broken.
+		if len(m.headlines) > 0 {
+			m.listTitles = !m.listTitles
+		}
+		return m, nil
 	case "a":
 		// Toggle the active filter (orthogonal to the view). Row layout changes, so reset the position.
 		m.activeOnly = !m.activeOnly
@@ -1708,7 +1732,26 @@ func (m Model) sessionRow(s domain.Session, selected bool, maxN int, prefix stri
 		b.WriteString(styled("⌫ ", lipgloss.Color("8"), selected, false))
 	}
 	remain := max(1, m.width-1-lipgloss.Width(b.String()))
-	b.WriteString(styled(clip(s.Title, remain), "", selected, false))
+	// The title is the session's first prompt; the headline is what an agent made
+	// of the whole session. `s` swaps between them, and a session with no headline
+	// yet keeps its title rather than an empty column.
+	//
+	// The column is not colored to say which it is: the header names the mode, and
+	// the color that would mark generated text here (meta) is the one the session
+	// id already uses two columns over.
+	lead := s.Title
+	if !m.listTitles {
+		if h := m.headlines[s.Key()]; strings.TrimSpace(h.Headline) != "" {
+			lead = strings.TrimSpace(h.Headline)
+			if h.Stale(s) {
+				// The same mark the detail header uses, for the same reason: this is
+				// the screen where a session is chosen, and one described as it was
+				// this morning must not read as current.
+				lead = "(stale) " + lead
+			}
+		}
+	}
+	b.WriteString(styled(clip(lead, remain), "", selected, false))
 	line := b.String()
 	plainW := lipgloss.Width(line)
 	if selected && plainW < m.width-1 {
@@ -1943,6 +1986,11 @@ func (m Model) View() string {
 	if m.activeOnly {
 		head += " [active]"
 	}
+	// Said when the column is not what it usually is. Sessions without a headline
+	// keep their title either way, so a mixed list does not say for itself.
+	if m.listTitles {
+		head += " [title]"
+	}
 	var b strings.Builder
 	b.WriteString(clip(head, max(20, m.width-1)) + "\n")
 	// Row 1 (the search/status line) is always reserved as one full-width line. While
@@ -1992,6 +2040,16 @@ func (m Model) View() string {
 		b.WriteString(flashBar(padCol(clip(m.flash, max(1, m.width-1)), max(1, m.width-1))))
 	} else {
 		foot := " ↑↓/jk move  Enter open/toggle  o resume  c cd  m move  v view  a active"
+		// Names what the key switches to, not what is on screen, and offered only
+		// when there is something to switch to — on a machine that has generated
+		// no summaries yet both columns would be the title.
+		if len(m.headlines) > 0 {
+			if m.listTitles {
+				foot += "  s summary"
+			} else {
+				foot += "  s title"
+			}
+		}
 		foot += "  / search  r reload  q quit "
 		b.WriteString(footer(padCol(clip(foot, max(1, m.width-1)), max(1, m.width-1))))
 	}

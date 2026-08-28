@@ -1,13 +1,17 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"github.com/agentcarto/agentcarto/internal/app"
+	"github.com/agentcarto/agentcarto/internal/cache"
 	searchpkg "github.com/agentcarto/agentcarto/internal/search"
 	convlogic "github.com/agentcarto/core/conversation"
 	"github.com/agentcarto/core/domain"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -755,5 +759,143 @@ func TestToolResultUsesToolDetail(t *testing.T) {
 	b := eventBlock(domain.Event{Kind: domain.EventToolResult, Text: "Chunk ID: abc\nraw", ToolDetail: "real output\njson output"})
 	if strings.Join(b.Body, "\n") != "real output\njson output" || b.Label != "result (2 lines)" {
 		t.Fatalf("result block=%#v", b)
+	}
+}
+
+// The list shows one line per session: what an agent made of the whole session,
+// and the first prompt that started it when `s` swaps them out.
+func TestListSwapsHeadlinesForTitles(t *testing.T) {
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "sessabcd", CWD: "/repo", Title: "このディレクトリ配下のgitを一括でpullするスクリプトつくって"}
+	m := Model{width: 120, height: 20, sessions: []domain.Session{s}, view: "time"}
+	m.headlines = map[domain.SessionKey]cache.Summary{s.Key(): {Turn: 0, Headline: "複数gitリポジトリ一括pullスクリプトの作成"}}
+	m.filter()
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "複数gitリポジトリ一括pull") {
+		t.Fatalf("the list starts on the headline:\n%s", out)
+	}
+	if strings.Contains(out, "このディレクトリ配下") {
+		t.Errorf("the title should not hold the column by default:\n%s", out)
+	}
+	if !strings.Contains(out, "s title") {
+		t.Errorf("the footer should name what the key switches to:\n%s", out)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m = updated.(Model)
+	out = stripANSI(m.View())
+	if !strings.Contains(out, "このディレクトリ配下") {
+		t.Fatalf("`s` should show the title:\n%s", out)
+	}
+	if !strings.Contains(out, "s summary") {
+		t.Errorf("the footer should now offer the way back:\n%s", out)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if out = stripANSI(updated.(Model).View()); !strings.Contains(out, "複数gitリポジトリ一括pull") {
+		t.Errorf("`s` is a toggle; the headlines should come back:\n%s", out)
+	}
+}
+
+// A session the summary worker has not reached keeps its title rather than an
+// empty column, and a machine with no summaries at all is not offered the key.
+func TestListKeepsTitlesWithoutHeadlines(t *testing.T) {
+	with := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "withone", CWD: "/repo", Title: "要約済みセッション"}
+	without := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "withnone", CWD: "/repo", Title: "まだ要約されていないセッション"}
+	m := Model{width: 120, height: 20, sessions: []domain.Session{with, without}, view: "time"}
+	m.headlines = map[domain.SessionKey]cache.Summary{with.Key(): {Turn: 0, Headline: "見出しのあるセッション"}}
+	m.filter()
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "見出しのあるセッション") {
+		t.Fatalf("the session with a headline should show it:\n%s", out)
+	}
+	if !strings.Contains(out, "まだ要約されていないセッション") {
+		t.Fatalf("a session without one keeps its title:\n%s", out)
+	}
+
+	// Nothing to swap in at all: the key is inert and not advertised.
+	bare := Model{width: 120, height: 20, sessions: []domain.Session{without}, view: "time"}
+	bare.filter()
+	if out := stripANSI(bare.View()); strings.Contains(out, "s title") || strings.Contains(out, "s summary") {
+		t.Errorf("the footer should not offer the toggle with no headlines:\n%s", out)
+	}
+	updated, _ := bare.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if updated.(Model).listTitles {
+		t.Error("`s` should not switch a column that is the title either way")
+	}
+}
+
+// The summary worker writes headlines while the TUI is running, so each scan
+// reads them again. Reading only at startup would leave a headline invisible
+// until the next launch.
+func TestScanPicksUpHeadlinesWrittenSinceStartup(t *testing.T) {
+	db, e := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if e != nil {
+		t.Fatalf("open cache: %v", e)
+	}
+	defer db.Close()
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "sessabcd", CWD: "/repo", Title: "タイトル",
+		UpdatedAt: time.Now(), SourceRef: domain.SessionRef{Source: "/logs/s.jsonl"}}
+	m := Model{width: 120, height: 20, sessions: []domain.Session{s}, view: "time", cache: db,
+		app: &app.App{}}
+	m.filter()
+	if len(m.headlines) != 0 {
+		t.Fatalf("nothing has been summarized yet, got %v", m.headlines)
+	}
+
+	// The worker finishes a summary while the list is open.
+	if e := db.PutSummaries(context.Background(), s, []cache.Summary{{Turn: 0, Text: "要約", Headline: "生成された見出し"}}); e != nil {
+		t.Fatalf("put summaries: %v", e)
+	}
+	snap := domain.Snapshot{Sessions: []domain.Session{s}}
+	updated, _ := m.Update(scanMsg{snap: snap, sessions: []domain.Session{s}})
+	m = updated.(Model)
+
+	if got := m.headlines[s.Key()].Headline; got != "生成された見出し" {
+		t.Fatalf("the scan did not pick up the headline, got %q", got)
+	}
+}
+
+// Sessions without a headline keep their title in either mode, so the rows
+// themselves do not say which mode the list is in. The header says when the
+// column is not the one it usually is.
+func TestListHeaderSaysWhenItShowsTitles(t *testing.T) {
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "sessabcd", CWD: "/repo", Title: "タイトル"}
+	m := Model{width: 120, height: 20, sessions: []domain.Session{s}, view: "time"}
+	m.headlines = map[domain.SessionKey]cache.Summary{s.Key(): {Turn: 0, Headline: "見出し"}}
+	m.filter()
+
+	if head := strings.SplitN(stripANSI(m.View()), "\n", 2)[0]; strings.Contains(head, "[title]") {
+		t.Fatalf("the list starts on headlines, which the header does not announce, got %q", head)
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if head := strings.SplitN(stripANSI(updated.(Model).View()), "\n", 2)[0]; !strings.Contains(head, "[title]") {
+		t.Fatalf("the header should say the column went back to titles, got %q", head)
+	}
+}
+
+// The list is where a session is chosen, so a headline that describes a session
+// which has since gone on says so there too — the detail header is not the
+// first place a reader would find out.
+func TestListMarksAStaleHeadline(t *testing.T) {
+	written := time.Now().Add(-time.Hour)
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "sessabcd", CWD: "/repo", Title: "タイトル",
+		Fingerprint: "fp", UpdatedAt: written.Add(time.Minute)}
+	m := Model{width: 140, height: 20, sessions: []domain.Session{s}, view: "time"}
+	m.headlines = map[domain.SessionKey]cache.Summary{
+		s.Key(): {Turn: 0, Headline: "古い見出し", Fingerprint: "fp", Created: written},
+	}
+	m.filter()
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "(stale) 古い見出し") {
+		t.Fatalf("a headline older than the session's last write should be marked:\n%s", out)
+	}
+
+	// A headline written after the last write is current and unmarked.
+	m.headlines[s.Key()] = cache.Summary{Turn: 0, Headline: "新しい見出し", Fingerprint: "fp", Created: s.UpdatedAt.Add(time.Minute)}
+	if out := stripANSI(m.View()); strings.Contains(out, "(stale)") {
+		t.Fatalf("a current headline should carry no mark:\n%s", out)
 	}
 }
