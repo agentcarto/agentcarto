@@ -71,12 +71,19 @@ func Open(path string) (*DB, error) {
 		"PRAGMA journal_mode=WAL",
 		"CREATE TABLE IF NOT EXISTS sessions (plugin_id TEXT, session_id TEXT, data BLOB NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id))",
 		"CREATE TABLE IF NOT EXISTS artifacts (plugin_id TEXT, session_id TEXT, fingerprint TEXT, parser_version TEXT, kind TEXT, data BLOB NOT NULL, accessed INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,kind))",
-		"CREATE TABLE IF NOT EXISTS summaries (plugin_id TEXT, session_id TEXT, turn_index INTEGER, node_id TEXT NOT NULL, summary TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,turn_index))",
+		"CREATE TABLE IF NOT EXISTS summaries (plugin_id TEXT, session_id TEXT, turn_index INTEGER, node_id TEXT NOT NULL, summary TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, headline TEXT NOT NULL DEFAULT '', PRIMARY KEY(plugin_id,session_id,turn_index))",
 	} {
 		if _, e = d.Exec(q); e != nil {
 			d.Close()
 			return nil, e
 		}
+	}
+	// headline was added after summaries shipped. Everything else in this file is
+	// derived data that can be dropped and rebuilt, but a summary was paid for by
+	// an API call, so the table is migrated instead.
+	if e = addColumn(d, "summaries", "headline", "TEXT NOT NULL DEFAULT ''"); e != nil {
+		d.Close()
+		return nil, e
 	}
 	// Enforce reclaims space with incremental_vacuum, which is a no-op unless
 	// auto_vacuum=incremental. The setting only takes effect on an empty database
@@ -96,6 +103,55 @@ func Open(path string) (*DB, error) {
 	_ = os.Chmod(path, 0600)
 	return &DB{d, path}, nil
 }
+
+// addColumn adds a column to a table that may already have it, which is how a
+// database that cannot be rebuilt gains one. SQLite has no ADD COLUMN IF NOT
+// EXISTS, so the columns it has are read first — and read again if the ALTER
+// fails, because several processes share this file (a TUI starts its summary
+// worker, and both open the cache) and any of them can add it in between.
+//
+// table, name and decl are literals from this file — no caller passes anything
+// through, which is what makes the string concatenation safe here.
+func addColumn(d *sql.DB, table, name, decl string) error {
+	has, e := hasColumn(d, table, name)
+	if e != nil || has {
+		return e
+	}
+	if _, e = d.Exec("ALTER TABLE " + table + " ADD COLUMN " + name + " " + decl); e != nil {
+		// Another process may have just added it, which is success and not
+		// failure. Anything else — a full disk, a read-only file — is still an
+		// error, so the column is looked for rather than the message read.
+		if has, e2 := hasColumn(d, table, name); e2 == nil && has {
+			return nil
+		}
+		return e
+	}
+	return nil
+}
+
+// hasColumn reports whether a table already has a column.
+func hasColumn(d *sql.DB, table, name string) (bool, error) {
+	rows, e := d.Query("PRAGMA table_info(" + table + ")")
+	if e != nil {
+		return false, e
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var col, typ string
+		var notNull int
+		var dflt any
+		var pk int
+		if e := rows.Scan(&cid, &col, &typ, &notNull, &dflt, &pk); e != nil {
+			return false, e
+		}
+		if col == name {
+			return true, rows.Err()
+		}
+	}
+	return false, rows.Err()
+}
+
 func (d *DB) GetArtifact(ctx context.Context, s domain.Session, kind string, dst any) bool {
 	var b []byte
 	e := d.db.QueryRowContext(ctx, "SELECT data FROM artifacts WHERE plugin_id=? AND session_id=? AND fingerprint=? AND parser_version=? AND kind=?", s.PluginID, s.SessionID, s.Fingerprint, s.ParserVersion, kind).Scan(&b)

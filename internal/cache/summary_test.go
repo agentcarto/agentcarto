@@ -2,7 +2,10 @@ package cache
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -456,5 +459,139 @@ func TestSummariesCarryTheirWriteTime(t *testing.T) {
 	}
 	if time.Since(got.Created) > time.Minute {
 		t.Fatalf("write time is not the time it was written: %v", got.Created)
+	}
+}
+
+// A headline rides with the session summary it belongs to.
+func TestSummaryHeadlineRoundTrip(t *testing.T) {
+	d := openTemp(t)
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	if e := d.PutSummaries(context.Background(), s, []Summary{
+		{Turn: 0, Text: "セッション全体の要約", Headline: "pull-all.shの作成"},
+		{Turn: 1, NodeID: "n1", Text: "ターンの要約"},
+	}); e != nil {
+		t.Fatalf("put: %v", e)
+	}
+	got := d.Summaries(context.Background(), s, map[int]string{1: "n1"})
+	if got[0].Headline != "pull-all.shの作成" {
+		t.Errorf("session headline=%q", got[0].Headline)
+	}
+	if got[1].Headline != "" {
+		t.Errorf("a turn summary has no headline, got %q", got[1].Headline)
+	}
+}
+
+// MarkExamined records that a session was looked at. It must not cost the
+// session the headline it already has — that was paid for.
+func TestMarkExaminedKeepsTheHeadline(t *testing.T) {
+	d := openTemp(t)
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	if e := d.PutSummaries(context.Background(), s, []Summary{{Turn: 0, Text: "要約", Headline: "見出し"}}); e != nil {
+		t.Fatalf("put: %v", e)
+	}
+	grown := s
+	grown.Fingerprint = "fp2"
+	if e := d.MarkExamined(context.Background(), grown); e != nil {
+		t.Fatalf("mark: %v", e)
+	}
+	got := d.Summaries(context.Background(), grown, nil)[0]
+	if got.Headline != "見出し" || got.Text != "要約" {
+		t.Errorf("MarkExamined overwrote the summary: %+v", got)
+	}
+}
+
+// The column was added after the table shipped, and the rows in it were paid
+// for: an existing cache is migrated in place rather than rebuilt.
+func TestOpenAddsTheHeadlineColumnToAnOlderCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	old, e := sql.Open("sqlite", path)
+	if e != nil {
+		t.Fatalf("open raw: %v", e)
+	}
+	if _, e := old.Exec("CREATE TABLE summaries (plugin_id TEXT, session_id TEXT, turn_index INTEGER, node_id TEXT NOT NULL, summary TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,turn_index))"); e != nil {
+		t.Fatalf("create old schema: %v", e)
+	}
+	if _, e := old.Exec("INSERT INTO summaries VALUES('claude','s',0,'','古い要約','claude claude-sonnet-5','fp',1)"); e != nil {
+		t.Fatalf("seed: %v", e)
+	}
+	if e := old.Close(); e != nil {
+		t.Fatalf("close raw: %v", e)
+	}
+
+	d, e := Open(path)
+	if e != nil {
+		t.Fatalf("open: %v", e)
+	}
+	defer d.Close()
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	got := d.Summaries(context.Background(), s, nil)[0]
+	if got.Text != "古い要約" {
+		t.Fatalf("the migration lost what was already stored: %+v", got)
+	}
+	if got.Headline != "" {
+		t.Errorf("a row from before the column has no headline, got %q", got.Headline)
+	}
+	if e := d.PutSummaries(context.Background(), s, []Summary{{Turn: 0, Text: "新しい要約", Headline: "見出し"}}); e != nil {
+		t.Fatalf("put after migration: %v", e)
+	}
+	if got := d.Summaries(context.Background(), s, nil)[0]; got.Headline != "見出し" {
+		t.Errorf("headline=%q after writing to the migrated table", got.Headline)
+	}
+}
+
+// Several processes share the cache — a TUI starts its summary worker, and both
+// open it. On the first open after a column was added they all try to migrate,
+// and none of them may fail for it.
+func TestConcurrentOpensMigrateWithoutFailing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	old, e := sql.Open("sqlite", path)
+	if e != nil {
+		t.Fatalf("open raw: %v", e)
+	}
+	if _, e := old.Exec("CREATE TABLE summaries (plugin_id TEXT, session_id TEXT, turn_index INTEGER, node_id TEXT NOT NULL, summary TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,turn_index))"); e != nil {
+		t.Fatalf("create old schema: %v", e)
+	}
+	if e := old.Close(); e != nil {
+		t.Fatalf("close raw: %v", e)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	start := make(chan struct{})
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			d, e := Open(path)
+			errs[i] = e
+			if d != nil {
+				d.Close()
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("open %d failed: %v", i, e)
+		}
+	}
+}
+
+// Created is stored to the second while a session's UpdatedAt has more
+// precision. A summary written just after the log it describes shares that
+// second, and must not read as describing an earlier session.
+func TestASummaryWrittenWithinTheSecondIsNotStale(t *testing.T) {
+	written := time.Unix(1800000005, 0)
+	sum := Summary{Turn: 0, Text: "要約", Fingerprint: "fp", Created: written}
+	sess := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp", UpdatedAt: written.Add(700 * time.Millisecond)}
+	if sum.Stale(sess) {
+		t.Error("a summary written 700ms into the second it is stamped with reads as stale")
+	}
+	// A write in the next second is what staleness is for.
+	sess.UpdatedAt = written.Add(time.Second)
+	if !sum.Stale(sess) {
+		t.Error("a session written to after the summary's second should be stale")
 	}
 }

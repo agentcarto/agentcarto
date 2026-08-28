@@ -40,6 +40,11 @@ type Summary struct {
 	// Created is when the row was written. Zero for a row stored before this
 	// field was read back.
 	Created time.Time
+	// Headline is the session in one line, for where there is room for a line and
+	// not a paragraph (the session list, the collapsed detail header). Only turn 0
+	// carries one, and only when the model that wrote the summary wrote one too:
+	// an older row has none, and what shows it falls back to the summary.
+	Headline string
 }
 
 // Stale reports whether this session summary describes a session that has since
@@ -59,7 +64,10 @@ func (s Summary) Stale(sess domain.Session) bool {
 	if s.Fingerprint != sess.Fingerprint {
 		return true
 	}
-	return !s.Created.IsZero() && !sess.UpdatedAt.IsZero() && s.Created.Before(sess.UpdatedAt)
+	// Created is stored to the second, so the comparison is made at that
+	// resolution: a summary written 200ms after the log it describes shares the
+	// second with it and is not stale.
+	return !s.Created.IsZero() && !sess.UpdatedAt.IsZero() && s.Created.Before(sess.UpdatedAt.Truncate(time.Second))
 }
 
 // PutSummaries stores summaries for one session, replacing any row that already
@@ -100,9 +108,12 @@ func (d *DB) putSummaries(ctx context.Context, s domain.Session, sums []Summary,
 	}
 	now := time.Now().Unix()
 	for _, sum := range sums {
+		// Columns are named rather than positional: the table gains one now and
+		// then (headline did), and a positional insert breaks silently when it does.
 		if _, e = tx.ExecContext(ctx,
-			"INSERT INTO summaries VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(plugin_id,session_id,turn_index) DO UPDATE SET node_id=excluded.node_id,summary=excluded.summary,model=excluded.model,fingerprint=excluded.fingerprint,created=excluded.created",
-			s.PluginID, s.SessionID, sum.Turn, sum.NodeID, sum.Text, sum.Model, s.Fingerprint, now); e != nil {
+			"INSERT INTO summaries (plugin_id,session_id,turn_index,node_id,summary,model,fingerprint,created,headline) VALUES(?,?,?,?,?,?,?,?,?)"+
+				" ON CONFLICT(plugin_id,session_id,turn_index) DO UPDATE SET node_id=excluded.node_id,summary=excluded.summary,model=excluded.model,fingerprint=excluded.fingerprint,created=excluded.created,headline=excluded.headline",
+			s.PluginID, s.SessionID, sum.Turn, sum.NodeID, sum.Text, sum.Model, s.Fingerprint, now, sum.Headline); e != nil {
 			return e
 		}
 	}
@@ -122,7 +133,7 @@ func (d *DB) putSummaries(ctx context.Context, s domain.Session, sums []Summary,
 // Turns absent from the result are the ones that still need generating — there
 // is no separate query for that.
 func (d *DB) Summaries(ctx context.Context, s domain.Session, nodeByTurn map[int]string) map[int]Summary {
-	rows, e := d.db.QueryContext(ctx, "SELECT turn_index,node_id,summary,model,fingerprint,created FROM summaries WHERE plugin_id=? AND session_id=?", s.PluginID, s.SessionID)
+	rows, e := d.db.QueryContext(ctx, "SELECT turn_index,node_id,summary,model,fingerprint,created,headline FROM summaries WHERE plugin_id=? AND session_id=?", s.PluginID, s.SessionID)
 	if e != nil {
 		return nil
 	}
@@ -131,7 +142,7 @@ func (d *DB) Summaries(ctx context.Context, s domain.Session, nodeByTurn map[int
 	for rows.Next() {
 		var sum Summary
 		var created int64
-		if e := rows.Scan(&sum.Turn, &sum.NodeID, &sum.Text, &sum.Model, &sum.Fingerprint, &created); e != nil {
+		if e := rows.Scan(&sum.Turn, &sum.NodeID, &sum.Text, &sum.Model, &sum.Fingerprint, &created, &sum.Headline); e != nil {
 			return nil
 		}
 		if created > 0 {
@@ -213,8 +224,11 @@ func (d *DB) DropSummaries(ctx context.Context, s domain.Session) error {
 // there is no row yet, a blank one is created with created=0, which SummarizedAt
 // reads as never summarized — which is the truth.
 func (d *DB) MarkExamined(ctx context.Context, s domain.Session) error {
+	// The update touches the fingerprint alone, so a session that already has a
+	// summary keeps its text and its headline.
 	_, e := d.db.ExecContext(ctx,
-		"INSERT INTO summaries VALUES(?,?,0,'','','',?,0) ON CONFLICT(plugin_id,session_id,turn_index) DO UPDATE SET fingerprint=excluded.fingerprint",
+		"INSERT INTO summaries (plugin_id,session_id,turn_index,node_id,summary,model,fingerprint,created,headline) VALUES(?,?,0,'','','',?,0,'')"+
+			" ON CONFLICT(plugin_id,session_id,turn_index) DO UPDATE SET fingerprint=excluded.fingerprint",
 		s.PluginID, s.SessionID, s.Fingerprint)
 	return e
 }
