@@ -290,3 +290,84 @@ func TestDetailHeadRowsReflowOnResize(t *testing.T) {
 		t.Fatalf("the resize moved the cursor off its turn (row %d of %d)", m.detailCursor, len(m.detailRows))
 	}
 }
+
+// The head row is a row of the list now, so it can be the cursor's row — and the
+// breadcrumb that says which level was descended into has to survive that.
+func TestDetailHeadRowKeepsBreadcrumbWhenSelected(t *testing.T) {
+	ts := func(s int64) time.Time { return time.Unix(s, 0) }
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "question", Prompt: "question"}}},
+		{ID: "a", Parent: "u", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "main-line continuation"}}},
+		{ID: "b", Parent: "u", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventUser, Text: "rewound continuation", Prompt: "rewound continuation"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "sessabcd99", CWD: "/repo", Title: "t"}
+	m := Model{width: 140, height: 20, detailSession: &s}
+	upd, _ := m.Update(convMsg{c: &c, focusLeaf: "b", reset: true})
+	m = upd.(Model)
+	if len(m.detailPathStack) != 2 {
+		t.Fatalf("did not descend into the rewound branch: stack depth=%d", len(m.detailPathStack))
+	}
+	if out := stripANSI(m.detailView()); !strings.Contains(out, "▸") {
+		t.Fatalf("no breadcrumb to begin with:\n%s", out)
+	}
+
+	m.detailCursor = 0 // the head row
+	if out := stripANSI(m.detailView()); !strings.Contains(out, "▸") {
+		t.Fatalf("the breadcrumb disappears when the head row is the cursor's row:\n%s", out)
+	}
+}
+
+// The fork lineage belongs to the head row's first line whether that line is
+// holding the title or the summary in its place.
+func TestDetailHeadRowKeepsForkLineageWithSummary(t *testing.T) {
+	m := detailWithSummary(t, "セッション全体の要約", "fp", "fp", 140, 20)
+	s := *m.detailSession
+	s.ParentSessionID = "parent01"
+	m.detailSession = &s
+
+	line := stripANSI(m.detailHeadLines(&s, 0)[0])
+	if !strings.Contains(line, "§") {
+		t.Fatalf("the head row should still be the summary, got %q", line)
+	}
+	if !strings.Contains(line, "forked from: parent01") {
+		t.Fatalf("the fork lineage should stay on the head row, got %q", line)
+	}
+}
+
+// One summary is one hit, however many lines it is wrapped into: the footer's
+// count and n/N would otherwise report the wrapping as matches of its own.
+func TestDetailSearchCountsOpenSummaryOnce(t *testing.T) {
+	m := detailWithSummary(t, "pull-all.shを作成。git pull --ff-onlyのみを使う方針で実装し、6リポジトリ全てを確認。", "fp", "fp", 60, 24)
+	m = pressKey(m, "s")
+	if headRows(m) < 3 {
+		t.Fatalf("expected the summary to wrap into several rows, got %d", headRows(m))
+	}
+	m.turnQuery = "pull-all"
+	m.turnHitsStale = true
+	(&m).syncTurnHits()
+
+	if hits := m.turnListHits(); len(hits) != 1 || hits[0] != 0 {
+		t.Fatalf("an open summary should be one hit on the head row, got %v", hits)
+	}
+}
+
+// The worker rewrites summaries in the background, so a reload can change how
+// many rows the head takes under an open view. The cursor moves with the rows.
+func TestDetailHeadRowsFollowASummaryRewrittenWhileOpen(t *testing.T) {
+	m := detailWithSummary(t, "短い要約", "fp", "fp", 60, 24)
+	m = pressKey(m, "s")
+	m.detailCursor = len(m.detailRows) - 1 // turn #1
+	turn := m.detailRows[m.detailCursor].Turn
+
+	if e := m.cache.PutSummaries(context.Background(), *m.detailSession,
+		[]cache.Summary{{Turn: 0, Text: strings.Repeat("長くなった要約。", 20), Model: "claude claude-sonnet-5"}}); e != nil {
+		t.Fatalf("put summaries: %v", e)
+	}
+	c := twoTurns()
+	updated, _ := m.Update(convMsg{c: &c}) // the reload a scan sends, not an open
+	m = updated.(Model)
+
+	if got := m.detailRows[m.detailCursor].Turn; len(got) == 0 || got[0] != turn[0] {
+		t.Fatalf("a summary rewritten under the open view moved the cursor off its turn (row %d of %d)", m.detailCursor, len(m.detailRows))
+	}
+}

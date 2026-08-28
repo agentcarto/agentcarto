@@ -71,8 +71,8 @@ type Model struct {
 	afterScan func([]domain.Session)
 	// summaries are the generated descriptions of the session on screen, keyed by
 	// the turn number the detail view shows; key 0 is the session's own summary,
-	// the paragraph the detail header carries. Read once with the conversation
-	// rather than per turn, since opening a turn should not wait on a query.
+	// the paragraph the head row carries. Read once with the conversation rather
+	// than per turn, since opening a turn should not wait on a query.
 	summaries    map[int]string
 	summaryModel string
 	// summaryAt is when the session's own summary was written. Zero when there is
@@ -654,6 +654,10 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 	if m.detailSession != nil && x.key != (domain.SessionKey{}) && x.key != m.detailSession.Key() {
 		return m, nil
 	}
+	// The summary is read again below and the worker rewrites it in the
+	// background, so the head can be a different number of rows than the ones on
+	// screen were built from. Everything under it moves by that difference.
+	headBefore := len(m.detailHeadLines(m.detailSession, -1))
 	if m.detailSession != nil {
 		m.detail = x.c
 		m.detailOrigins = x.origins
@@ -721,9 +725,9 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 			m.turnCursor = 0
 			m.turnOffset = 0
 		} else {
-			if m.detailCursor >= len(m.detailRows) {
-				m.detailCursor = max(0, len(m.detailRows)-1)
-			}
+			// setDetailPath has already rebuilt the rows with the summary as it is
+			// now, so only the cursor is left to move.
+			(&m).shiftCursorForHead(headBefore)
 			m.ensureDetailOffset()
 			if m.turnOpen {
 				m.openCurrentTurn(false)
@@ -939,8 +943,16 @@ func (m Model) toggleSummary() (tea.Model, tea.Cmd) {
 // as much, so it stays on the row it was on rather than on whatever slid into
 // that position.
 func (m *Model) reflowDetailRows(before int) {
-	after := len(m.detailHeadLines(m.detailSession, -1))
 	m.rebuildDetailRows(m.currentDetailPath())
+	m.shiftCursorForHead(before)
+	m.ensureDetailOffset()
+}
+
+// shiftCursorForHead moves the cursor by however many lines the head gained or
+// lost, so it keeps pointing at the row it pointed at. The rows must already be
+// rebuilt: what the cursor is clamped to is their new length.
+func (m *Model) shiftCursorForHead(before int) {
+	after := len(m.detailHeadLines(m.detailSession, -1))
 	if m.detailCursor >= before {
 		m.detailCursor += after - before
 	} else {
@@ -949,7 +961,6 @@ func (m *Model) reflowDetailRows(before int) {
 		m.detailCursor = min(m.detailCursor, max(0, after-1))
 	}
 	m.detailCursor = max(0, min(m.detailCursor, len(m.detailRows)-1))
-	m.ensureDetailOffset()
 }
 
 // updateTurnFull handles keys in the full (single-turn) view, including its own inline
@@ -2167,8 +2178,11 @@ func (m Model) detailCWDLine(s *domain.Session) string {
 // lineage, and (when descended without a fork route) a breadcrumb of the current
 // level. The working directory is on its own line above (detailCWDLine).
 //
-// generated colors the line as generated text rather than as something the
-// session recorded, which is the difference between the two things head can be.
+// generated says the line is generated text rather than something the session
+// recorded, which is the difference between the two things head can be. It picks
+// the color the rest of the program gives generated text; that this currently
+// resolves to the same color as a title is why the § mark, not the color, is
+// what tells them apart.
 // selected marks it as the cursor's row: it is a row of the list, not a header.
 func (m Model) detailSubLine(s *domain.Session, head string, generated, selected bool) string {
 	sub := " " + head
@@ -2193,17 +2207,24 @@ func (m Model) detailSubLine(s *domain.Session, head string, generated, selected
 		color = roleColor("meta")
 	}
 	w := max(20, m.width-1)
+	sub = clip(sub, w)
+	// When descended without a fork route shown (e.g. rewind), use a breadcrumb to
+	// indicate which level we are on. It is measured before the padding below,
+	// because padding to the full width first would leave it no room at all.
+	crumb := ""
+	if len(m.detailPathStack) > 1 && len(route) == 0 {
+		if avail := max(0, w-runewidth.StringWidth(sub)); avail > 0 {
+			crumb = clip("  ▸ "+m.detailCrumb(), avail)
+		}
+	}
 	if selected {
 		// Selected rows are padded to the width so the highlight covers the line,
-		// as the turn rows are.
-		sub = padCol(clip(sub, w), w)
+		// as the turn rows are — less whatever the breadcrumb takes.
+		sub = padCol(sub, max(0, w-runewidth.StringWidth(crumb)))
 	}
-	subLine := styled(clip(sub, w), color, selected, false)
-	// When descended without a fork route shown (e.g. rewind), use a breadcrumb to indicate which level we are on.
-	if len(m.detailPathStack) > 1 && len(route) == 0 {
-		if avail := max(0, m.width-1-lipgloss.Width(subLine)); avail > 0 {
-			subLine += styled(clip("  ▸ "+m.detailCrumb(), avail), lipgloss.Color("5"), true, false)
-		}
+	subLine := styled(sub, color, selected, false)
+	if crumb != "" {
+		subLine += styled(crumb, lipgloss.Color("5"), true, false)
 	}
 	return subLine
 }
@@ -2789,7 +2810,12 @@ func (m Model) detailRowText(r detailRow) string {
 	if m.detail == nil {
 		return ""
 	}
-	if r.Kind == "head" || r.Kind == "headtext" {
+	if r.Kind == "headtext" {
+		// The lines an open summary wraps into are not hits of their own: it is
+		// matched once, on the head row above them.
+		return ""
+	}
+	if r.Kind == "head" {
 		// The generated summary is searchable here because it is searchable at the
 		// list level (cache.SummaryTexts): a session found by its summary and then
 		// opened has to find it inside as well. The title is not matched here — it
