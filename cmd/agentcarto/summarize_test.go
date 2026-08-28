@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agentcarto/agentcarto/internal/cache"
+	"github.com/agentcarto/agentcarto/internal/summary"
 	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 )
@@ -239,5 +242,44 @@ func TestUsageWarnsThatSummarizeCosts(t *testing.T) {
 	}
 	if !strings.Contains(line, "costs money") {
 		t.Errorf("the usage line does not warn about the cost: %q", line)
+	}
+}
+
+// --force replaces everything a session has stored. The headline has to ride
+// along with the summary it belongs to, or a forced run leaves the list with a
+// paragraph it cannot show.
+func TestForceReplacesTheHeadlineAlongWithTheSummary(t *testing.T) {
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	nodes := map[int]string{1: "n1"}
+	if err := d.PutSummaries(ctx, s, []cache.Summary{
+		{Turn: 0, Text: "古い要約", Headline: "古い見出し", Model: "m"},
+		{Turn: 1, NodeID: "n1", Text: "古いターン", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// What a --force run holds when it is done: every turn it remade, plus the
+	// session summary and headline of the call that saw them.
+	all := summary.Result{
+		Session:  "新しい要約",
+		Headline: "新しい見出し",
+		Turns:    map[int]string{1: "新しいターン"},
+	}
+	if err := storeSummaries(ctx, d, s, all, nodes, "m2", true); err != nil {
+		t.Fatal(err)
+	}
+
+	got := d.Summaries(ctx, s, nodes)
+	if got[0].Headline != "新しい見出し" {
+		t.Errorf("headline=%q — --force dropped the line the list shows", got[0].Headline)
+	}
+	if got[0].Text != "新しい要約" || got[1].Text != "新しいターン" {
+		t.Errorf("--force did not replace what it remade: %+v", got)
 	}
 }

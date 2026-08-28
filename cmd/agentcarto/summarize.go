@@ -152,9 +152,12 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 			fmt.Fprintf(os.Stderr, "--- what %s returned (already paid for) ---\n%s\n---\n", gen.Name(), out)
 			stopAfter(w, all, i, len(batches), fmt.Errorf("summarize %s: %w", s.SessionID, err))
 		}
-		// The last batch's session summary wins: it saw the most recent turns.
+		// The last batch's session summary wins: it saw the most recent turns. The
+		// headline goes with it — the two describe the same reading of the session,
+		// and keeping one from an earlier batch would pair a line with a paragraph
+		// that no longer says the same thing.
 		if res.Session != "" {
-			all.Session = res.Session
+			all.Session, all.Headline = res.Session, res.Headline
 		}
 		for n, text := range res.Turns {
 			all.Turns[n] = text
@@ -194,8 +197,8 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		for n, text := range all.Turns {
 			whole[n] = text // the ones just made, in case the read raced the write
 		}
-		if sum := sessionSummary(ctx, gen, s, whole, w); sum != "" {
-			all.Session = sum
+		if made := sessionSummary(ctx, gen, s, whole, w); made.Session != "" {
+			all.Session, all.Headline = made.Session, made.Headline
 		}
 	}
 	if *force {
@@ -212,7 +215,7 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 			fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
 		}
 	} else if all.Session != "" {
-		if err := storeSummaries(ctx, db, s, summary.Result{Session: all.Session}, nodes, gen.Name(), false); err != nil {
+		if err := storeSummaries(ctx, db, s, summary.Result{Session: all.Session, Headline: all.Headline}, nodes, gen.Name(), false); err != nil {
 			fail(fmt.Errorf("summarize %s: %w", s.SessionID, err))
 		}
 	}
@@ -234,20 +237,23 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 	printSummaries(w, all)
 }
 
-// sessionSummary asks for the session's own summary from the turn summaries.
+// sessionSummary asks for the session's own summary from the turn summaries. It
+// returns the answer whole — the paragraph and the headline that stands in for
+// it — since both come from this one call.
+//
 // A failure here is reported and shrugged off: the turn summaries are stored
 // and useful on their own, and losing the run over the line that describes them
 // would be worse than leaving that line as it was.
-func sessionSummary(ctx context.Context, gen summary.Generator, s domain.Session, turns map[int]string, w io.Writer) string {
+func sessionSummary(ctx context.Context, gen summary.Generator, s domain.Session, turns map[int]string, w io.Writer) summary.Result {
 	out, err := gen.Generate(ctx, summary.SessionSystem, summary.SessionPrompt(s, turns))
 	if err == nil {
 		var res summary.Result
 		if res, err = summary.Parse(out, nil); err == nil {
-			return res.Session
+			return summary.Result{Session: res.Session, Headline: res.Headline}
 		}
 	}
 	fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be made: %v\n", err)
-	return ""
+	return summary.Result{}
 }
 
 // sessionSummaryDue reports whether the session's own summary is old enough to
@@ -267,16 +273,17 @@ func sessionSummaryDue(ctx context.Context, db *cache.DB, s domain.Session, ever
 //
 // fromWholeSession is the answer of a call that saw every turn of the session —
 // a first summary of a short one. That answer already describes the session, so
-// it is stored as it stands.
+// it is stored as it stands, headline and all. Its Turns are not read here: they
+// were stored by the call that made them.
 //
 // Otherwise the summary is made again from the turn summaries, and only once the
 // interval has passed. What is never done is storing the session summary of a
 // call that saw part of the session: it describes those turns, not the session
 // (SessionSystem says as much), and doing it is what made a long session's
 // summary read as a list of its newest turns.
-func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generator, s domain.Session, nodes map[int]string, fromWholeSession string, every time.Duration, w io.Writer) bool {
-	if fromWholeSession != "" {
-		if err := storeSummaries(ctx, db, s, summary.Result{Session: fromWholeSession}, nodes, gen.Name(), false); err != nil && w != nil {
+func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generator, s domain.Session, nodes map[int]string, fromWholeSession summary.Result, every time.Duration, w io.Writer) bool {
+	if fromWholeSession.Session != "" {
+		if err := storeSummaries(ctx, db, s, summary.Result{Session: fromWholeSession.Session, Headline: fromWholeSession.Headline}, nodes, gen.Name(), false); err != nil && w != nil {
 			fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be: %v\n", err)
 		}
 		return false
@@ -293,8 +300,8 @@ func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generato
 	if len(turns) == 0 {
 		return false // nothing to build one from
 	}
-	if text := sessionSummary(ctx, gen, s, turns, w); text != "" {
-		if err := storeSummaries(ctx, db, s, summary.Result{Session: text}, nodes, gen.Name(), false); err != nil && w != nil {
+	if made := sessionSummary(ctx, gen, s, turns, w); made.Session != "" {
+		if err := storeSummaries(ctx, db, s, made, nodes, gen.Name(), false); err != nil && w != nil {
 			fmt.Fprintf(w, "  the session summary was made but could not be stored: %v\n", err)
 		}
 	}
@@ -309,8 +316,11 @@ func storeSummaries(ctx context.Context, db *cache.DB, s domain.Session, res sum
 	sums := make([]cache.Summary, 0, len(res.Turns)+1)
 	if res.Session != "" {
 		// Turn 0 is rewritten whenever any turn is, since adding turns is what
-		// makes the session's own summary out of date.
-		sums = append(sums, cache.Summary{Turn: 0, Text: res.Session, Model: model})
+		// makes the session's own summary out of date. The headline is written with
+		// it and never on its own: the two are one answer, and a headline stored
+		// beside a paragraph it was not written with would describe another reading
+		// of the session.
+		sums = append(sums, cache.Summary{Turn: 0, Text: res.Session, Headline: res.Headline, Model: model})
 	}
 	for n, text := range res.Turns {
 		sums = append(sums, cache.Summary{Turn: n, NodeID: nodes[n], Text: text, Model: model})

@@ -377,3 +377,89 @@ func TestACallThatSawEveryTurnWritesTheSessionSummaryItself(t *testing.T) {
 		t.Errorf("session summary=%q, want the answer of the call that saw every turn", got[0].Text)
 	}
 }
+
+// The headline is written by the call that writes the session summary, and is
+// stored with it. This is the path a short session takes: one call sees every
+// turn, so its answer describes the session as a whole.
+func TestTheHeadlineIsStoredWithASummaryFromAWholeSessionCall(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "short", Fingerprint: "fp1"}
+	r := summary.Request{
+		PluginID: "claude", SessionID: "short", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"}, Batches: [][]int{{1}}, Prompts: []string{"doc"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeGenerator{out: "@@HEADLINE\npull-all.shの作成\n\n@@SESSION\nスクリプトを作って6リポジトリのpullを確認した話\n\n@@TURN 1\nターン1の要約\n"}
+	var log bytes.Buffer
+
+	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour); !spent {
+		t.Fatalf("the request was dropped: %s", log.String())
+	}
+	got := d.Summaries(ctx, s, r.Nodes)
+	if got[0].Headline != "pull-all.shの作成" {
+		t.Errorf("headline=%q, want the one the call wrote", got[0].Headline)
+	}
+	if got[0].Text != "スクリプトを作って6リポジトリのpullを確認した話" {
+		t.Errorf("the summary the headline belongs to was not stored: %q", got[0].Text)
+	}
+	if got[1].Headline != "" {
+		t.Errorf("a turn summary carries no headline, got %q", got[1].Headline)
+	}
+}
+
+// The other path: the session summary is remade from the turn summaries once
+// the interval has passed. That call writes its own headline, and the stored
+// one is replaced along with the paragraph it belongs to.
+func TestTheRemadeSessionSummaryBringsItsOwnHeadline(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "long", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, s, []cache.Summary{
+		{Turn: 0, Text: "古いセッション要約", Headline: "古い見出し", Model: "m"},
+		{Turn: 1, NodeID: "n1", Text: "ターン1", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := summary.Request{
+		PluginID: "claude", SessionID: "long", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1", 2: "n2"}, Batches: [][]int{{2}}, Prompts: []string{"doc"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeGenerator{out: "@@HEADLINE\n新しい見出し\n\n@@SESSION\nターン要約から作り直した要約\n\n@@TURN 2\nターン2の要約\n"}
+	var log bytes.Buffer
+
+	// An interval of zero: the session summary is always due.
+	if spent := runRequest(ctx, &log, q, d, g, r, 0); !spent {
+		t.Fatalf("the request was dropped: %s", log.String())
+	}
+	got := d.Summaries(ctx, s, r.Nodes)
+	if got[0].Headline != "新しい見出し" {
+		t.Errorf("headline=%q — the remade summary should bring its own", got[0].Headline)
+	}
+	if got[0].Text != "ターン要約から作り直した要約" {
+		t.Errorf("summary=%q", got[0].Text)
+	}
+}

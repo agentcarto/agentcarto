@@ -400,9 +400,9 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 			if err = storeSummaries(ctx, db, answered, summary.Result{Turns: res.Turns}, r.Nodes, gen.Name(), false); err == nil && !r.Held {
 				// Held requests write nothing to turn 0 — see the worker, which
 				// does the same for the same reason.
-				var whole string
+				var whole summary.Result
 				if len(r.Batches[0]) == len(r.Nodes) {
-					whole = res.Session
+					whole = summary.Result{Session: res.Session, Headline: res.Headline}
 				}
 				storeSessionSummary(ctx, db, gen, answered, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), os.Stderr)
 				_ = db.MarkExamined(ctx, answered)

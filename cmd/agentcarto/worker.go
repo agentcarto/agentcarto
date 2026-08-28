@@ -138,9 +138,10 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	}
 
 	all := summary.Result{Turns: map[int]string{}}
-	// whole is the session summary of a call that saw every turn there is. Only
-	// such a call can describe the session; see storeSessionSummary.
-	var whole string
+	// whole is the session summary — and the headline written beside it — of a
+	// call that saw every turn there is. Only such a call can describe the
+	// session; see storeSessionSummary.
+	var whole summary.Result
 	asked := 0
 	for i, prompt := range r.Prompts {
 		if ctx.Err() != nil {
@@ -163,7 +164,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		}
 		asked += len(r.Batches[i])
 		if res.Session != "" && len(r.Prompts) == 1 && asked == len(r.Nodes) {
-			whole = res.Session
+			whole = summary.Result{Session: res.Session, Headline: res.Headline}
 		}
 		for n, text := range res.Turns {
 			all.Turns[n] = text
