@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -622,5 +623,81 @@ func TestHeadlinesReadsThemAllAtOnce(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("Headlines returned %d entries, want 1: %v", len(got), got)
+	}
+}
+
+// Headlines reads one row per session out of a table that holds one row per
+// turn, and the session list reads it on every scan. Without an index that suits
+// it, that is a scan of every turn summary on the machine — so the plan is
+// checked rather than left to chance.
+func TestHeadlinesReadsThroughItsIndex(t *testing.T) {
+	d := openTemp(t)
+	ctx := context.Background()
+	// A session with a headline among many turn summaries, which is the shape the
+	// index exists for.
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	sums := []Summary{{Turn: 0, Text: "要約", Headline: "見出し"}}
+	for i := 1; i <= 50; i++ {
+		sums = append(sums, Summary{Turn: i, NodeID: fmt.Sprintf("n%d", i), Text: "ターンの要約"})
+	}
+	if e := d.PutSummaries(ctx, s, sums); e != nil {
+		t.Fatal(e)
+	}
+
+	rows, e := d.db.QueryContext(ctx, "EXPLAIN QUERY PLAN SELECT plugin_id,session_id,headline,fingerprint,created FROM summaries WHERE turn_index=0 AND headline <> ''")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer rows.Close()
+	plan := ""
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if e := rows.Scan(&id, &parent, &notUsed, &detail); e != nil {
+			t.Fatal(e)
+		}
+		plan += detail + "\n"
+	}
+	if !strings.Contains(plan, "summaries_headline") {
+		t.Errorf("the headline read does not use its index — every turn summary is scanned:\n%s", plan)
+	}
+	if got := d.Headlines(ctx); got[s.Key()].Headline != "見出し" {
+		t.Errorf("the index changed what comes back: %+v", got)
+	}
+}
+
+// The index is built on a column that older caches do not have, so it can only
+// be created after the migration that adds it. Opening a cache from before the
+// column must build both.
+func TestOpenBuildsTheHeadlineIndexOnAnOlderCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	old, e := sql.Open("sqlite", path)
+	if e != nil {
+		t.Fatalf("open raw: %v", e)
+	}
+	if _, e := old.Exec("CREATE TABLE summaries (plugin_id TEXT, session_id TEXT, turn_index INTEGER, node_id TEXT NOT NULL, summary TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,turn_index))"); e != nil {
+		t.Fatalf("create old schema: %v", e)
+	}
+	if _, e := old.Exec("INSERT INTO summaries VALUES('claude','s',0,'','古い要約','m','fp',1)"); e != nil {
+		t.Fatalf("seed: %v", e)
+	}
+	if e := old.Close(); e != nil {
+		t.Fatalf("close raw: %v", e)
+	}
+
+	d, e := Open(path)
+	if e != nil {
+		t.Fatalf("open: %v", e)
+	}
+	defer d.Close()
+	var n int
+	if e := d.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='summaries_headline'").Scan(&n); e != nil {
+		t.Fatal(e)
+	}
+	if n != 1 {
+		t.Errorf("the index was not built on a cache that predates the column")
+	}
+	if got := d.Summaries(context.Background(), domain.Session{PluginID: "claude", SessionID: "s"}, nil)[0].Text; got != "古い要約" {
+		t.Errorf("the migration lost what was stored: %q", got)
 	}
 }

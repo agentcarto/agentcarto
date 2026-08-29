@@ -85,6 +85,19 @@ func Open(path string) (*DB, error) {
 		d.Close()
 		return nil, e
 	}
+	// After that column exists, not with the other schema statements: an index
+	// whose WHERE names headline cannot be built on a table that does not have it
+	// yet, which is every cache written before this.
+	//
+	// Headlines reads one row per session out of a table holding one row per turn,
+	// and the session list reads it on every scan. The primary key leads with
+	// plugin_id and cannot serve a lookup by turn_index, so without this the read
+	// scans every turn summary on the machine. Partial, so it holds the handful of
+	// rows it is for rather than a copy of the key for every turn.
+	if _, e = d.Exec("CREATE INDEX IF NOT EXISTS summaries_headline ON summaries(plugin_id,session_id) WHERE turn_index=0 AND headline <> ''"); e != nil {
+		d.Close()
+		return nil, e
+	}
 	// Enforce reclaims space with incremental_vacuum, which is a no-op unless
 	// auto_vacuum=incremental. The setting only takes effect on an empty database
 	// or after a full VACUUM, so migrate existing files once here. On a database
