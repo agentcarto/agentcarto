@@ -1,56 +1,64 @@
-# AgentCarto 設定ファイルのサンプル。
+# A sample AgentCarto configuration.
 #
-# このファイルは組み込みデフォルトへ「マージ」されます（全項目を書く必要はなく、
-# 上書きしたいキーだけ書けば足ります）。plugins は id をキーにマージされます。
+# This file is merged onto the built-in defaults: write only the keys you want to
+# change. Plugins are merged by id.
 #
-# 配置先（このファイルを置けば自動で読み込まれます）:
+# Where to put it (found and read automatically):
 #   Linux   : ${XDG_CONFIG_HOME:-~/.config}/agentcarto/config.yaml
 #   macOS   : ~/Library/Application Support/agentcarto/config.yaml
 #   Windows : %AppData%\agentcarto\config.yaml
 #
-# 明示指定とチェック:
-#   agentcarto --config ./config.example.yaml config validate   # 設定を検証
-#   agentcarto --config ./config.example.yaml config print       # マージ後の設定を表示
-#   agentcarto --config ./config.example.yaml plugins list       # プラグインと capability を表示
+# Naming one explicitly, and checking it:
+#   agentcarto --config ./config.example.yaml config validate   # check the settings
+#   agentcarto --config ./config.example.yaml config print      # print them as merged
+#   agentcarto --config ./config.example.yaml plugins list      # list plugins and capabilities
 
 version: 1
 
 ui:
-  refresh_interval: 2s      # 稼働判定などの再描画間隔
-  rescan_interval: 3s       # セッション再走査の間隔
-  default_view: time        # 一覧の既定ビュー: time | folder
+  refresh_interval: 2s      # how often the screen is redrawn (running sessions, elapsed times)
+  rescan_interval: 3s       # how often sessions are scanned again
+  default_view: time        # the list's starting view: time | folder
 
 index:
-  max_chars_per_session: 131072  # 全文検索インデックスの1セッションあたり最大バイト数（日本語なら約1/3の文字数）
+  max_chars_per_session: 131072  # bytes of one session held in the full-text index (a third as many characters in Japanese)
 
 cache:
   enabled: true
   cache_conversations: true
-  max_size: 512MiB          # 単位: B / KiB / MiB / GiB
-  max_age: 720h             # 期間: 例 30m, 12h, 720h
+  max_size: 512MiB          # units: B / KiB / MiB / GiB
+  max_age: 720h             # durations: 30m, 12h, 720h
 
-# agentcarto show が表示するターン要約の生成設定。
-# 生成には AI エージェントの CLI を実行するため、料金が発生し、セッション本文がその
-# エージェントの提供元に送信されます。agent が空のあいだは一切生成しません（既定）。
+# Generated summaries — the per-turn lines and the session's own, shown by
+# `agentcarto show` and in the TUI.
+#
+# Generating them runs an AI agent's CLI, which costs money and sends the
+# session's contents to that agent's provider. Nothing is generated while agent
+# is empty, which is the default.
 summary:
-  agent: ""                 # claude / codex / ""（空 = 生成しない）
-  model: claude-sonnet-5    # agent に渡すモデル名。agent を設定したら必須
-  timeout: 10m              # 1 セッションの生成にかける上限
-  max_per_run: 20           # バックグラウンド 1 回で要約するセッション数の上限
-  session_interval: 1h      # セッション全体の要約を作り直す最短間隔（ターンの要約は待たずに作られます）
-  language: ""              # 要約を書く言語。空 = セッションが書かれている言語に合わせる
-                            # 明示する場合は言語名をそのまま書きます（English / 日本語 / Français など）
+  agent: ""                 # claude / codex / "" (empty generates nothing)
+  model: claude-sonnet-5    # passed to that CLI; required once agent is set
+  timeout: 10m              # bounds one session's generation
+  max_per_run: 20           # sessions one background run will summarize
+  session_interval: 1h      # shortest gap between two writes of a session's own summary
+                            # (per-turn summaries are not held back by it)
+  language: ""              # what the summaries are written in
+                            # empty follows the session's own language; otherwise name one
+                            # as you would say it: English / 日本語 / Français
 
-# 各エージェントのプラグイン。本体は各プラグインを独立した実行ファイル（サブプロセス）として
-# 起動します。type はプラグインが名乗る識別子。実行ファイルは既定で本体と同じディレクトリ、または
-# PATH 上の "agentcarto-plugin-<type>" を探します。別の場所に置く場合は command で明示します。
-# color は default/black/red/green/yellow/blue/magenta/cyan/white/orange または bright-*。
+# One plugin per agent. Each runs as its own executable (a subprocess); type is
+# the identifier a plugin answers to. The executable is looked for beside the
+# agentcarto binary and then on PATH, as "agentcarto-plugin-<type>" — name it
+# with command when it lives somewhere else.
+#
+# color is one of default/black/red/green/yellow/blue/magenta/cyan/white/orange,
+# or any of those as bright-*.
 plugins:
   - id: claude
     type: claude
     enabled: true
     color: cyan
-    # command: /opt/agentcarto/agentcarto-plugin-claude   # 実行ファイルの明示パス（省略可）
+    # command: /opt/agentcarto/agentcarto-plugin-claude   # an explicit path to the executable
     options: {}
   - id: codex
     type: codex
