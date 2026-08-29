@@ -67,6 +67,16 @@ type Options struct {
 	// label alone, which is the size a session was exported at before there was
 	// a CLI to search from.
 	TaskReports bool
+	// Context is text to be read before a turn, keyed by turn number. It is not
+	// part of the log the turn holds: it exists for a document that carries only
+	// some of a session's turns, where what a turn answers was said in a turn
+	// that is not here. Like Summaries it arrives as plain strings, so rendering
+	// stays independent of what the caller decided is worth carrying over.
+	//
+	// A document read by a person never sets this — the reader can scroll up. It
+	// is set by the one built for a model that is shown a handful of turns and
+	// asked what they did.
+	Context map[int]string
 	// Summaries are generated descriptions of what happened, keyed by turn number
 	// with 0 for the session's own. A headline says what was asked for, which the
 	// reader can already see; these say what came of it, which is the part that
@@ -99,6 +109,10 @@ func Markdown(s domain.Session, c domain.Conversation, turns []Turn, o Options) 
 	var body []string
 	for _, t := range turns {
 		if lines := turnLines(c, t, s.CWD, o); len(lines) > 0 {
+			// Above the heading, not inside turnLines: a turn that renders to
+			// nothing gets no context either, so what this document describes stays
+			// exactly what RenderedTurns reports.
+			body = append(body, contextLines(o.Context[t.Index+1])...)
 			body = append(body, lines...)
 			rendered++
 		}
@@ -259,6 +273,23 @@ func turnLines(c domain.Conversation, t Turn, cwd string, o Options) []string {
 		out = append(out, "> _(generated summary)_", ">", "> "+strings.ReplaceAll(sum, "\n", "\n> "), "")
 	}
 	return append(append(out, body...), "")
+}
+
+// ContextLabel marks a context block. It is exported because whoever puts one
+// in a document has to say what it is: the reader of an Options.Context block is
+// a model, and a caller that asks it about the turns below has to name the thing
+// it must not mistake for one of them.
+const ContextLabel = "_(context)_"
+
+// contextLines renders what is to be read before a turn. It is quoted line by
+// line rather than printed as-is: the text is somebody's reply, and a heading or
+// a list inside it would otherwise read as part of the document's own structure
+// — the same way a turn heading quoted inside a conversation does.
+func contextLines(text string) []string {
+	if text = strings.TrimSpace(text); text == "" {
+		return nil
+	}
+	return []string{ContextLabel, "", "> " + strings.ReplaceAll(text, "\n", "\n> "), ""}
 }
 
 // editedFiles renders the consolidated file section the turn view puts at the

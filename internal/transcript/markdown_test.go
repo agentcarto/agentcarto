@@ -634,3 +634,61 @@ func TestNoNoticeWhenNoSummaryShows(t *testing.T) {
 		}
 	}
 }
+
+// Context is read before the turn it belongs to, and quoted so that a heading
+// inside somebody's reply cannot pass for one of the document's own.
+func TestMarkdownPutsContextAboveTheHeading(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "できた"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	turns := Turns(c, c.ActivePath())
+	got, _ := Markdown(s, c, turns, Options{Context: map[int]string{1: "## 見出し\n続き"}})
+
+	if !strings.Contains(got, ContextLabel) {
+		t.Errorf("the context block is not labelled:\n%s", got)
+	}
+	if !strings.Contains(got, "> ## 見出し\n> 続き") {
+		t.Errorf("the context was not quoted line by line:\n%s", got)
+	}
+	if strings.Index(got, ContextLabel) > strings.Index(got, "## Turn 1") {
+		t.Errorf("the context comes after the turn it belongs to:\n%s", got)
+	}
+	// Quoting is what keeps the heading inside it out of the document's structure.
+	if n := strings.Count(got, "\n## "); n != 1 {
+		t.Errorf("headings outside quotes=%d want 1 (the turn's own):\n%s", n, got)
+	}
+}
+
+// A turn holding nothing a reader can see gets no context either. Context is
+// read alongside a turn, and printing it for a turn that is not there would put
+// a block in the document that RenderedTurns says nothing about.
+func TestContextOnlyShowsForARenderedTurn(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: time.Unix(1, 0), Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: time.Unix(2, 0), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "できた"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x", Title: "t"}
+	// A turn whose nodes are not in the conversation renders to nothing — the
+	// same shape as one holding only events a document drops.
+	turns := append(Turns(c, c.ActivePath()), Turn{Index: 1, Nodes: []string{"gone"}})
+	o := Options{Context: map[int]string{1: "本物のターンの文脈", 2: "空のターンの文脈"}}
+
+	got, rendered := Markdown(s, c, turns, o)
+	if strings.Contains(got, "空のターンの文脈") {
+		t.Errorf("a turn that renders to nothing carried a context block:\n%s", got)
+	}
+	if !strings.Contains(got, "本物のターンの文脈") {
+		t.Errorf("the context of the rendered turn is missing:\n%s", got)
+	}
+	if rendered != 1 || len(RenderedTurns(c, turns, s.CWD, o)) != 1 {
+		t.Errorf("context changed which turns the document describes: rendered=%d turns=%v", rendered, RenderedTurns(c, turns, s.CWD, o))
+	}
+	// TurnSizes measures the log and nothing else. Context comes from the caller,
+	// so its cost is the caller's to budget for — what must not happen is a size
+	// that silently changes with a decision the caller has not made yet.
+	if TurnSizes(c, turns, s.CWD, o)[1] != TurnSizes(c, turns, s.CWD, Options{})[1] {
+		t.Error("context was counted into the size of a turn")
+	}
+}
