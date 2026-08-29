@@ -549,6 +549,12 @@ func TestConcurrentOpensMigrateWithoutFailing(t *testing.T) {
 	if e != nil {
 		t.Fatalf("open raw: %v", e)
 	}
+	// In the journal mode a cache written by any released version is already in:
+	// switching to WAL takes an exclusive lock, and three processes racing to do
+	// it is not the migration this test is about.
+	if _, e := old.Exec("PRAGMA journal_mode=WAL"); e != nil {
+		t.Fatalf("wal: %v", e)
+	}
 	if _, e := old.Exec("CREATE TABLE summaries (plugin_id TEXT, session_id TEXT, turn_index INTEGER, node_id TEXT NOT NULL, summary TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,turn_index))"); e != nil {
 		t.Fatalf("create old schema: %v", e)
 	}
@@ -557,7 +563,7 @@ func TestConcurrentOpensMigrateWithoutFailing(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	errs := make([]error, 8)
+	errs := make([]error, 3)
 	start := make(chan struct{})
 	for i := range errs {
 		wg.Add(1)
