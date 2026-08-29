@@ -158,6 +158,14 @@ func TestValidateSummary(t *testing.T) {
 		{"model required once on", func(c *Config) { c.Summary.Agent = "claude"; c.Summary.Model = "" }, "summary.model"},
 		{"timeout must be positive", func(c *Config) { c.Summary.Agent = "claude"; c.Summary.Timeout = 0 }, "summary.timeout"},
 		{"max_per_run must be positive", func(c *Config) { c.Summary.Agent = "claude"; c.Summary.MaxPerRun = 0 }, "summary.max_per_run"},
+		// The language is a name handed to the model as written, so anything is
+		// allowed except what is plainly not a name.
+		{"a language name is fine", func(c *Config) { c.Summary.Agent = "claude"; c.Summary.Language = "日本語" }, ""},
+		{"no language is fine", func(c *Config) { c.Summary.Agent = "claude"; c.Summary.Language = "" }, ""},
+		{"a sentence is not a language", func(c *Config) {
+			c.Summary.Agent = "claude"
+			c.Summary.Language = strings.Repeat("x", 65)
+		}, "summary.language"},
 		// While off, the other fields are not checked: a half-filled section
 		// that nobody uses is not an error.
 		{"off ignores the rest", func(c *Config) { c.Summary = Summary{} }, ""},
