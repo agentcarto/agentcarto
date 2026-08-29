@@ -382,7 +382,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// summary.
 	_ = q.Done(r)
 	fmt.Fprintf(os.Stderr, "agentcarto: summarizing %d turns of this session (about half a minute)…\n", turnsIn(r))
-	out, err := gen.Generate(ctx, summary.System, r.Prompts[0])
+	out, err := gen.Generate(ctx, summary.System(cfg.Summary.Language), r.Prompts[0])
 	if err == nil {
 		var res summary.Result
 		if res, err = summary.Parse(out, r.Batches[0]); err == nil {
@@ -404,7 +404,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 				if len(r.Batches[0]) == len(r.Nodes) {
 					whole = summary.Result{Session: res.Session, Headline: res.Headline}
 				}
-				storeSessionSummary(ctx, db, gen, answered, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), os.Stderr)
+				storeSessionSummary(ctx, db, gen, answered, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr)
 				_ = db.MarkExamined(ctx, answered)
 			}
 		}

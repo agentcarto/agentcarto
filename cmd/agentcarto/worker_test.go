@@ -126,7 +126,7 @@ func TestARequestQueuedAfterTheLastSummaryIsAnswered(t *testing.T) {
 	g := &fakeGenerator{out: "@@TURN 2\n新しいターンの要約\n"}
 	var log bytes.Buffer
 
-	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour); !spent {
+	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour, ""); !spent {
 		t.Fatalf("the request was dropped instead of answered: %s", log.String())
 	}
 	if g.calls != 1 {
@@ -181,7 +181,7 @@ func TestAnIncrementalCallDoesNotOverwriteTheSessionSummary(t *testing.T) {
 	g := &fakeGenerator{out: "@@SESSION\n直近のターンだけを見た要約\n\n@@TURN 3\nターン3の要約\n"}
 	var log bytes.Buffer
 
-	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour); !spent {
+	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour, ""); !spent {
 		t.Fatalf("the request was dropped: %s", log.String())
 	}
 	if g.calls != 1 {
@@ -232,7 +232,7 @@ func TestTheSessionSummaryIsRemadeFromTheTurnsWhenItIsDue(t *testing.T) {
 	var log bytes.Buffer
 
 	// An interval of zero: the session summary is always due.
-	if spent := runRequest(ctx, &log, q, d, g, r, 0); !spent {
+	if spent := runRequest(ctx, &log, q, d, g, r, 0, ""); !spent {
 		t.Fatalf("the request was dropped: %s", log.String())
 	}
 	if g.calls != 2 {
@@ -277,7 +277,7 @@ func TestAnAnswerWithNoTurnStillRecordsTheVersion(t *testing.T) {
 	g := &fakeGenerator{out: "@@SESSION\n1ターンしか見ていない話\n"}
 	var log bytes.Buffer
 
-	runRequest(ctx, &log, q, d, g, r, time.Hour)
+	runRequest(ctx, &log, q, d, g, r, time.Hour, "")
 
 	if worthOpening(ctx, d, q, s) {
 		t.Error("the session would be opened, requested and paid for again on the next scan")
@@ -322,7 +322,7 @@ func TestAHeldRequestDoesNotRecordTheVersionAsAnswered(t *testing.T) {
 	g := &fakeGenerator{out: "@@SESSION\n全体を見たつもりの要約\n\n@@TURN 1\nターン1\n\n@@TURN 2\nターン2\n"}
 	var log bytes.Buffer
 
-	if spent := runRequest(ctx, &log, q, d, g, r, 0); !spent {
+	if spent := runRequest(ctx, &log, q, d, g, r, 0, ""); !spent {
 		t.Fatalf("the request was dropped: %s", log.String())
 	}
 	// The turns it did cover are stored.
@@ -367,7 +367,7 @@ func TestACallThatSawEveryTurnWritesTheSessionSummaryItself(t *testing.T) {
 	g := &fakeGenerator{out: "@@SESSION\n全体を見た要約\n\n@@TURN 1\nターン1\n\n@@TURN 2\nターン2\n"}
 	var log bytes.Buffer
 
-	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour); !spent {
+	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour, ""); !spent {
 		t.Fatalf("the request was dropped: %s", log.String())
 	}
 	if g.calls != 1 {
@@ -404,7 +404,7 @@ func TestTheHeadlineIsStoredWithASummaryFromAWholeSessionCall(t *testing.T) {
 	g := &fakeGenerator{out: "@@HEADLINE\npull-all.shの作成\n\n@@SESSION\nスクリプトを作って6リポジトリのpullを確認した話\n\n@@TURN 1\nターン1の要約\n"}
 	var log bytes.Buffer
 
-	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour); !spent {
+	if spent := runRequest(ctx, &log, q, d, g, r, time.Hour, ""); !spent {
 		t.Fatalf("the request was dropped: %s", log.String())
 	}
 	got := d.Summaries(ctx, s, r.Nodes)
@@ -452,7 +452,7 @@ func TestTheRemadeSessionSummaryBringsItsOwnHeadline(t *testing.T) {
 	var log bytes.Buffer
 
 	// An interval of zero: the session summary is always due.
-	if spent := runRequest(ctx, &log, q, d, g, r, 0); !spent {
+	if spent := runRequest(ctx, &log, q, d, g, r, 0, ""); !spent {
 		t.Fatalf("the request was dropped: %s", log.String())
 	}
 	got := d.Summaries(ctx, s, r.Nodes)

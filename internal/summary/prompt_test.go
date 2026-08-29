@@ -110,12 +110,47 @@ func TestPromptOfNoTurns(t *testing.T) {
 // both have to ask for a headline. If one stops asking, the sessions that take
 // that path silently lose theirs.
 func TestBothSessionPromptsAskForAHeadline(t *testing.T) {
-	for name, prompt := range map[string]string{"System": System, "SessionSystem": SessionSystem} {
+	for name, prompt := range map[string]string{"System": System(""), "SessionSystem": SessionSystem("")} {
 		if !strings.Contains(prompt, headlineMarker) {
 			t.Errorf("%s does not ask for %s", name, headlineMarker)
 		}
 		if !strings.Contains(prompt, sessionMarker) {
 			t.Errorf("%s does not ask for %s", name, sessionMarker)
+		}
+	}
+}
+
+// The prompts are in English; what the summaries come out in is a setting.
+// Empty follows the session, which is what suits the person who had it.
+func TestPromptsCarryTheLanguageSetting(t *testing.T) {
+	for name, of := range map[string]func(string) string{"System": System, "SessionSystem": SessionSystem} {
+		if got := of("日本語"); !strings.Contains(got, "in 日本語") {
+			t.Errorf("%s does not pass the configured language through:\n%s", name, got)
+		}
+		auto := of("")
+		if strings.Contains(auto, "in 日本語") {
+			t.Errorf("%s kept a language it was not given", name)
+		}
+		if !strings.Contains(auto, "the language the session itself is written in") {
+			t.Errorf("%s with no setting should follow the session:\n%s", name, auto)
+		}
+		// Whitespace is not a language.
+		if of("   ") != auto {
+			t.Errorf("%s treated blank as a language name", name)
+		}
+	}
+}
+
+// The instruction itself is English regardless of what it asks the summaries to
+// be written in: a prompt in one language and summaries in another is what lets
+// sessions in any language be summarized well.
+func TestPromptsAreWrittenInEnglish(t *testing.T) {
+	for name, prompt := range map[string]string{"System": System(""), "SessionSystem": SessionSystem("")} {
+		for _, r := range prompt {
+			if r > 0x3000 { // CJK and kana start here
+				t.Errorf("%s holds non-ASCII instruction text: %q", name, string(r))
+				break
+			}
 		}
 	}
 }

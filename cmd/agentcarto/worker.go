@@ -97,7 +97,7 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		if _, still := q.Find(r.PluginID, r.SessionID); !still {
 			continue
 		}
-		if runRequest(ctx, log, q, db, gen, r, time.Duration(cfg.Summary.SessionInterval)) {
+		if runRequest(ctx, log, q, db, gen, r, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language) {
 			done++
 		}
 	}
@@ -114,7 +114,7 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 // summarized session, and a session whose generation failed for a reason that
 // will fail again — because a request that stays costs another call on the next
 // run.
-func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.DB, gen summary.Generator, r summary.Request, sessionEvery time.Duration) bool {
+func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.DB, gen summary.Generator, r summary.Request, sessionEvery time.Duration, language string) bool {
 	// The fingerprint travels with the request rather than being looked up here.
 	// It has to be the version the prompts were built from — the session may have
 	// grown while the request waited — and it is what every reader compares
@@ -147,7 +147,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		if ctx.Err() != nil {
 			return true // leave the request queued: this is not the session's fault
 		}
-		out, err := gen.Generate(ctx, summary.System, prompt)
+		out, err := gen.Generate(ctx, summary.System(language), prompt)
 		if err != nil {
 			// Keep what earlier calls stored, and put the request back with the
 			// failure recorded. Dropping it would mean the next scan queues the
@@ -196,7 +196,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		_ = q.Done(r)
 		return true
 	}
-	if storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, log) {
+	if storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, language, log) {
 		calls++
 	}
 	// Recording the version matters most when the answer held nothing. Parse

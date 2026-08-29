@@ -117,6 +117,15 @@ type Summary struct {
 	// keeps a first run over a machine's whole history from spending without
 	// warning.
 	MaxPerRun int `yaml:"max_per_run"`
+	// Language is what the summaries are written in, named the way a person would
+	// name it ("English", "日本語", "Français") — it is handed to the model as
+	// written, so there is no list of supported values to keep.
+	//
+	// Empty follows the session: one had in Japanese is summarized in Japanese,
+	// one in English in English. That is the default because the reader of a
+	// summary is whoever had the session, and any fixed language would be the
+	// wrong one for someone.
+	Language string `yaml:"language"`
 }
 type Config struct {
 	Version int      `yaml:"version"`
@@ -131,7 +140,7 @@ const defaults = `version: 1
 ui: {refresh_interval: 2s, rescan_interval: 3s, default_view: time}
 index: {max_chars_per_session: 131072}
 cache: {enabled: true, cache_conversations: true, max_size: 512MiB, max_age: 720h}
-summary: {agent: "", model: claude-sonnet-5, timeout: 10m, max_per_run: 20, session_interval: 1h}
+summary: {agent: "", model: claude-sonnet-5, timeout: 10m, max_per_run: 20, session_interval: 1h, language: ""}
 plugins:
   - {id: claude, type: claude, enabled: true, color: cyan, options: {}}
   - {id: codex, type: codex, enabled: true, color: red, options: {}}
@@ -295,6 +304,12 @@ func Validate(c Config) error {
 		}
 		if c.Summary.MaxPerRun <= 0 {
 			return fmt.Errorf("summary.max_per_run: must be positive")
+		}
+		if n := len(strings.TrimSpace(c.Summary.Language)); n > 64 {
+			// A language is named in a word or two. Anything longer is a sentence
+			// that found its way into the field, and it would be handed to the model
+			// as an instruction of its own.
+			return fmt.Errorf("summary.language: expected a language name, got %d characters", n)
 		}
 		if c.Summary.SessionInterval <= 0 {
 			return fmt.Errorf("summary.session_interval: must be positive")

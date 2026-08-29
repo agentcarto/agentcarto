@@ -173,7 +173,7 @@ func TestGenerateAgainstTheRealCLIs(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			out, e := g.Generate(context.Background(), System, doc)
+			out, e := g.Generate(context.Background(), System(""), doc)
 			if e != nil {
 				t.Fatalf("Generate: %v", e)
 			}

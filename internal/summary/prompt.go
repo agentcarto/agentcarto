@@ -20,36 +20,55 @@ import (
 // turn's outcome rather than its request: the CLI already prints what the user
 // asked for on the line above (the turn headline is the prompt), so a summary
 // that paraphrases the request adds nothing to it.
-const System = `あなたはAIコーディングエージェントの会話ログを要約する処理系です。入力は1セッション分のMarkdownで、各ターンは "## Turn N" 見出しの下に USER 発話・ASSISTANT 応答・ツール呼び出しの一覧が並びます。ツール呼び出しは長いものが途中で切られています（末尾の … がその印）。
+//
+// The instruction is in English while the summaries it asks for are not: the
+// language they come out in is what language decides. Sessions are had in every
+// language, and the reader of a summary is the person who had the session.
+func System(language string) string {
+	return `You summarize the logs of AI coding agents. The input is one session as Markdown. Each turn sits under a "## Turn N" heading and holds the USER message, the ASSISTANT reply, and the tool calls made. Long tool calls are cut short (a trailing … marks it).
 
-各ターンについて、そのターンで何が行われ何が分かったかを日本語で要約してください。
+For each turn, write what was done and what it showed.
 
-制約:
-- 依頼文の言い換えを書かない。読み手は依頼文を既に見ている。実際に何をして、何が分かり、何が変わったかを書く。
-- 原因を特定したなら原因を、修正したならどこをどう直したかを、結論が出たならその結論を含める。
-- ファイル名・関数名・識別子・コミットハッシュは原文のまま残す。
-- 長さは各ターンの内容量に見合わせる。上限は設けないが、冗長な説明や自明な補足は書かない。体言止め。丁寧語と主語（「ユーザーが」「Claudeが」）は書かない。
-- 入力に無いことを書かない。切られたツール呼び出しの続きを推測しない。
-- 加えてセッション全体の要約を1つ作る（長さは同様に内容に見合わせる）。
-- さらにセッション全体の見出しを1つ作る。一覧に並べて何のセッションか見分けるための一行で、全角40字以内。列挙にせず、そのセッションが何をしたものかを一つだけ述べる。
+Rules:
+- Do not restate the request. The reader has it already — the line above a summary is the prompt itself. Write what was done, what it showed, and what changed.
+- If a cause was found, name it. If something was fixed, say what changed and where. If a question was settled, give the answer.
+- Keep file names, function names, identifiers and commit hashes exactly as they appear.
+- Length follows the turn, up to about 300 characters in a language written without spaces (Japanese, Chinese) or about 60 words in English — four sentences at the very most, and fewer when the turn did little. When a turn holds more than that, write what changed and drop the blow-by-blow of getting there.
+- Write plainly. No polite register, no filler, nothing the reader can see for themselves. Do not name the actors ("the user", "the assistant"); say what happened.
+- Write nothing the input does not support. Do not guess how a cut-off tool call continued.
+- Also write one summary of the session as a whole. Its length follows the session's own size — the limit above is per turn, not for this.
+- Also write one headline for the session: a single line that tells it apart in a list, about 40 characters (8 words in English). Name the one thing the session did rather than listing what it touched.
 
-出力は次の形式のみ。前後に説明文やコードフェンスを付けない。行頭の @@ で始まる行が区切りで、その次の行から次の区切りまでが本文です。本文は自由なテキストでよく、引用符や記号のエスケープは不要です。
+` + languageRule(language) + `
+
+Answer in exactly this format, with nothing before or after it and no code fence. A line beginning with @@ is a separator; everything from the next line until the following separator is that section's body. Bodies are free text — quotes and punctuation need no escaping.
 
 @@HEADLINE
-セッション全体の見出し（一行）
+the session's headline, one line
 
 @@SESSION
-セッション全体の要約
+the session as a whole
 
 @@TURN 1
-ターン1の要約
+what turn 1 did
 
 @@TURN 2
-ターン2の要約
+what turn 2 did
 
-入力にあるすべてのターン番号について @@TURN 行を書いてください。
+Write a @@TURN section for every turn number in the input.
 
-ツールは使わず、与えられた入力だけから答えてください。`
+Use no tools. Answer from the input alone.`
+}
+
+// languageRule tells the model what language to write in. An empty setting
+// follows the session, which is what suits a reader who had it: the summary of a
+// Japanese session is read by whoever wrote Japanese into it.
+func languageRule(language string) string {
+	if language = strings.TrimSpace(language); language != "" {
+		return "Write every summary and headline in " + language + ", whatever language the session itself is in."
+	}
+	return "Write every summary and headline in the language the session itself is written in. Judge it from what was typed into the session, not from this instruction."
+}
 
 // NodesByTurn maps each turn's number to the id of its terminal node — what the
 // summary store checks a stored summary against before showing it. Turn numbers
@@ -107,26 +126,31 @@ func Prompt(s domain.Session, c domain.Conversation, turns []transcript.Turn, o 
 // them. The last batch's answer describes the last few turns, not the session.
 // Reading the turn summaries instead costs a fraction of rereading the session
 // and sees all of it.
-const SessionSystem = `あなたはAIコーディングエージェントの会話ログを要約する処理系です。入力は1セッションの各ターンについて既に作られた要約の一覧です。
+func SessionSystem(language string) string {
+	return `You summarize the logs of AI coding agents. The input is the summaries already written for each turn of one session.
 
-これらを読み、セッション全体で何が行われたのかを日本語で1つにまとめてください。
+Read them and write what the session as a whole did.
 
-制約:
-- 個々のターンの列挙にしない。何を目的に始まり、何が分かり、何が作られ、どこで終わったのかを述べる。
-- ファイル名・関数名・識別子・コミットハッシュは原文のまま残す。
-- 長さは内容量に見合わせる。上限は設けないが、冗長な説明や自明な補足は書かない。体言止め。丁寧語と主語（「ユーザーが」「Claudeが」）は書かない。
-- 入力に無いことを書かない。
-- 要約とは別に、セッション全体の見出しを1つ作る。一覧に並べて何のセッションか見分けるための一行で、全角40字以内。列挙にせず、そのセッションが何をしたものかを一つだけ述べる。
+Rules:
+- Do not list the turns. Say what it set out to do, what it found, what it produced, and where it ended.
+- Keep file names, function names, identifiers and commit hashes exactly as they appear.
+- Length follows the session's size. There is no cap, but write nothing redundant and nothing the reader can see for themselves.
+- Write plainly. No polite register, no filler. Do not name the actors ("the user", "the assistant"); say what happened.
+- Write nothing the input does not support.
+- Besides the summary, write one headline for the session: a single line that tells it apart in a list, about 40 characters (8 words in English). Name the one thing the session did rather than listing what it touched.
 
-出力は次の形式のみ。前後に説明文やコードフェンスを付けない。
+` + languageRule(language) + `
+
+Answer in exactly this format, with nothing before or after it and no code fence.
 
 @@HEADLINE
-セッション全体の見出し（一行）
+the session's headline, one line
 
 @@SESSION
-セッション全体の要約
+the session as a whole
 
-ツールは使わず、与えられた入力だけから答えてください。`
+Use no tools. Answer from the input alone.`
+}
 
 // SessionPrompt renders the turn summaries as the document SessionSystem is
 // asked about.
