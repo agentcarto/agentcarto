@@ -22,6 +22,14 @@ const maxCharsPerCall = 200_000
 // limit loses every turn after the cut, and the call is paid for either way.
 const maxTurnsPerCall = 60
 
+// contextReserve is what a call holds back for the blocks Prompt adds after the
+// split (see carriedContext). Sizing happens before the split and carrying
+// happens after it, so the two cannot be one calculation — what keeps them
+// honest is that the reserve here and the budget there come from the same
+// number. A rune is three bytes in a Japanese session and four at the widest,
+// so reserving at the widest holds for any log.
+const contextReserve = 4 * maxContextRunesPerDoc
+
 // Batch splits the turns to ask about into runs that each fit one call, in turn
 // order. Splitting matters beyond staying under the limits: a session that
 // fails halfway keeps the batches that finished, so the next run costs only
@@ -46,7 +54,7 @@ func Batch(c domain.Conversation, turns []transcript.Turn, want map[int]bool, cw
 		// Start a new batch when this turn would push the current one past
 		// either limit — unless the current batch is empty, since a batch has to
 		// hold at least the turn that overflows it.
-		if len(cur) > 0 && (len(cur) >= maxTurnsPerCall || curChars+sizes[n] > maxCharsPerCall) {
+		if len(cur) > 0 && (len(cur) >= maxTurnsPerCall || curChars+sizes[n] > maxCharsPerCall-contextReserve) {
 			out = append(out, cur)
 			cur, curChars = nil, 0
 		}

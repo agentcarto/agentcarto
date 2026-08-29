@@ -145,9 +145,58 @@ func TestBatchesProducePromptsWithinTheLimit(t *testing.T) {
 		if len(asked) != len(b) {
 			t.Errorf("batch %d asked about %d turns, want %d", i, len(asked), len(b))
 		}
-		// The header adds a few hundred bytes on top of the turns themselves.
-		if len(doc) > maxCharsPerCall+4096 {
+		// The context blocks Prompt adds after the split are reserved for, and the
+		// header fits in what the reserve leaves over: it is worked out at four
+		// bytes to the rune, which no real log reaches.
+		if len(doc) > maxCharsPerCall {
 			t.Errorf("batch %d renders to %d chars, over the %d limit", i, len(doc), maxCharsPerCall)
+		}
+	}
+}
+
+// A batch that starts partway through a session opens on a turn whose
+// predecessor is in the batch before it. What that turn closed with is carried
+// over, and the first batch — which opens the session — has nothing to carry.
+func TestLaterBatchesCarryWhatTheFirstDoesNot(t *testing.T) {
+	s, c, turns := session(t, 150, 1000)
+	batches := Batch(c, turns, allTurns(turns), s.CWD)
+	if len(batches) < 2 {
+		t.Fatalf("150 turns produced %d batches", len(batches))
+	}
+	for i, b := range batches {
+		doc, _ := Prompt(s, c, turns, Options{Turns: TurnSet(b)})
+		switch carries := strings.Contains(doc, transcript.ContextLabel); {
+		case i == 0 && carries:
+			t.Error("the first batch opens the session; nothing precedes it to carry over")
+		case i > 0 && !carries:
+			t.Errorf("batch %d does not carry what the turn before it closed with", i)
+		}
+	}
+}
+
+// A scattered set of turns — what a model that skipped some leaves for the next
+// run — needs a block above every heading, which would carry half a call's
+// worth of text nobody asked for. The budget stops it, and the reserve Batch
+// holds back keeps what does get carried inside the limit the split worked to.
+func TestContextStaysWithinItsBudget(t *testing.T) {
+	s, c, turns := session(t, 200, 1000)
+	want := map[int]bool{}
+	for _, t := range turns {
+		if n := t.Index + 1; n%2 == 1 {
+			want[n] = true
+		}
+	}
+	batches := Batch(c, turns, want, s.CWD)
+	if len(batches) < 2 {
+		t.Fatalf("100 scattered turns produced %d batches", len(batches))
+	}
+	for i, b := range batches {
+		doc, _ := Prompt(s, c, turns, Options{Turns: TurnSet(b)})
+		if n, max := strings.Count(doc, transcript.ContextLabel), maxContextRunesPerDoc/contextRunes; n > max {
+			t.Errorf("batch %d carries %d context blocks, over the %d the budget allows", i, n, max)
+		}
+		if len(doc) > maxCharsPerCall {
+			t.Errorf("batch %d renders to %d chars, over the %d limit the split reserved for", i, len(doc), maxCharsPerCall)
 		}
 	}
 }
