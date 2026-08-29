@@ -154,3 +154,123 @@ func TestPromptsAreWrittenInEnglish(t *testing.T) {
 		}
 	}
 }
+
+// The turn a growing session adds is often a reply to what the turn before it
+// closed with — "はい", "実装" — and that turn was summarized on an earlier run,
+// so it is not in this document. Its closing reply is carried over instead.
+func TestPromptCarriesTheReplyTheAbsentTurnClosedWith(t *testing.T) {
+	s, c, turns := conv(t)
+	doc, asked := Prompt(s, c, turns, Options{Turns: map[int]bool{2: true}})
+
+	if len(asked) != 1 || asked[0] != 2 {
+		t.Fatalf("asked=%v want [2] — context is not a turn to summarize", asked)
+	}
+	if !strings.Contains(doc, transcript.ContextLabel) || !strings.Contains(doc, "> yキーを足した") {
+		t.Errorf("the preceding reply was not carried over:\n%s", doc)
+	}
+	// Only the reply. The rest of that turn — its prompt, its tool calls — is
+	// what the reader is not paying for.
+	for _, unwanted := range []string{"コピーしたい", "- Bash"} {
+		if strings.Contains(doc, unwanted) {
+			t.Errorf("the absent turn's %q came along with its reply:\n%s", unwanted, doc)
+		}
+	}
+	if strings.Index(doc, "> yキーを足した") > strings.Index(doc, "## Turn 2") {
+		t.Errorf("the context is below the turn it belongs to:\n%s", doc)
+	}
+}
+
+// A document that already holds the preceding turn carries no context: the turn
+// itself is there, whole, and a quoted excerpt of it would be the same text
+// twice.
+func TestPromptCarriesNoContextWhenThePrecedingTurnIsThere(t *testing.T) {
+	s, c, turns := conv(t)
+	for name, o := range map[string]Options{
+		"the whole session": {},
+		"the first turn":    {Turns: map[int]bool{1: true}},
+		"both turns":        {Turns: map[int]bool{1: true, 2: true}},
+	} {
+		if doc, _ := Prompt(s, c, turns, o); strings.Contains(doc, transcript.ContextLabel) {
+			t.Errorf("%s: a context block was added where none was needed:\n%s", name, doc)
+		}
+	}
+}
+
+// A turn whose agent said nothing that survives to a document — a reply that is
+// encrypted thinking and no text — leaves the turn after it without context.
+// That is the state every prompt was in before this existed, not a failure.
+func TestPromptCarriesNoContextFromASilentTurn(t *testing.T) {
+	ts := func(n int64) time.Time { return time.Unix(n, 0).UTC() }
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: ts(2), Events: []domain.Event{
+			{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: "$ go test"},
+			{Kind: domain.EventAssistant, Text: "   "},
+		}},
+		{ID: "u2", Parent: "a1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventUser, Text: "はい", Prompt: "はい"}}},
+		{ID: "a2", Parent: "u2", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "直した"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s1"}
+	turns := transcript.Turns(c, c.ActivePath())
+	if doc, _ := Prompt(s, c, turns, Options{Turns: map[int]bool{2: true}}); strings.Contains(doc, transcript.ContextLabel) {
+		t.Errorf("a turn that said nothing produced a context block:\n%s", doc)
+	}
+}
+
+// The tail is what is kept: a reply's proposal, its question, the choices it
+// offered are at its end, and that is what the next turn answers.
+func TestPromptKeepsTheEndOfALongReply(t *testing.T) {
+	ts := func(n int64) time.Time { return time.Unix(n, 0).UTC() }
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "調べて", Prompt: "調べて"}}},
+		{ID: "a1", Parent: "u1", Timestamp: ts(2), Events: []domain.Event{
+			{Kind: domain.EventAssistant, Text: "冒頭の分析" + strings.Repeat("あ", contextRunes) + "どちらにしますか"},
+		}},
+		{ID: "u2", Parent: "a1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventUser, Text: "前者", Prompt: "前者"}}},
+		{ID: "a2", Parent: "u2", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "やった"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s1"}
+	turns := transcript.Turns(c, c.ActivePath())
+	doc, _ := Prompt(s, c, turns, Options{Turns: map[int]bool{2: true}})
+
+	if !strings.Contains(doc, "どちらにしますか") {
+		t.Errorf("the question the turn answers was cut off:\n%s", doc)
+	}
+	if strings.Contains(doc, "冒頭の分析") {
+		t.Error("a reply longer than the limit went into the prompt whole")
+	}
+	if !strings.Contains(doc, "> …") {
+		t.Errorf("a cut context does not say it was cut:\n%s", doc)
+	}
+}
+
+func TestTailRunes(t *testing.T) {
+	for name, tc := range map[string]struct{ in, want string }{
+		"shorter than the limit": {"あい", "あい"},
+		"exactly the limit":      {"あいう", "あいう"},
+		"cut":                    {"あいうえお", "…うえお"},
+		// The cut can land just before a space, which would otherwise print as
+		// an ellipsis with a gap after it.
+		"space at the seam": {"あいう えお", "…えお"},
+	} {
+		if got := tailRunes(tc.in, 3); got != tc.want {
+			t.Errorf("%s: tailRunes(%q, 3)=%q want %q", name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// The document holds one kind of block that is not a turn, and the instruction
+// is the only thing that says so. If it stops naming the marker Prompt actually
+// prints, the model reads the carried-over reply as a turn and writes a @@TURN
+// section for one that was summarized on an earlier run.
+func TestSystemNamesTheMarkerPromptPrints(t *testing.T) {
+	s, c, turns := conv(t)
+	doc, _ := Prompt(s, c, turns, Options{Turns: map[int]bool{2: true}})
+	label := transcript.ContextLabel
+	if !strings.Contains(doc, label) {
+		t.Fatalf("the document carries no context block to describe:\n%s", doc)
+	}
+	if !strings.Contains(System(""), label) {
+		t.Errorf("System does not name %q, which the document it is asked about carries", label)
+	}
+}
