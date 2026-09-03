@@ -884,7 +884,9 @@ func TestListMarksAStaleHeadline(t *testing.T) {
 		Fingerprint: "fp", UpdatedAt: written.Add(time.Minute)}
 	m := Model{width: 140, height: 20, sessions: []domain.Session{s}, view: "time"}
 	m.headlines = map[domain.SessionKey]cache.Summary{
-		s.Key(): {Turn: 0, Headline: "古い見出し", Fingerprint: "fp", Created: written},
+		// A turn was described after the headline was written, so it describes a
+		// session that has since gone on.
+		s.Key(): {Turn: 0, Headline: "古い見出し", Fingerprint: "fp", Created: written, TurnSummarizedAt: written.Add(time.Minute)},
 	}
 	m.filter()
 

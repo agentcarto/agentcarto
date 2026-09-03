@@ -40,6 +40,14 @@ type Summary struct {
 	// Created is when the row was written. Zero for a row stored before this
 	// field was read back.
 	Created time.Time
+	// TurnSummarizedAt is when the newest of the session's turn summaries was
+	// written, and it is carried by turn 0 alone. It is what tells a session
+	// summary that fell behind the turns it is made of from one that is merely
+	// older than a log which grew without gaining a turn — see Stale.
+	//
+	// Zero where the reader did not ask for the turns: worthOpening reads turn 0
+	// with no nodes at all, and never asks whether it is stale.
+	TurnSummarizedAt time.Time
 	// Headline is the session in one line, for where there is room for a line and
 	// not a paragraph (the session list, the collapsed detail header). Only turn 0
 	// carries one, and only when the model that wrote the summary wrote one too:
@@ -52,11 +60,20 @@ type Summary struct {
 // altogether when the node it was made from moves (see Summaries).
 //
 // Two things can say so, and either is enough. The fingerprint catches a log
-// that changed under a summary the worker has not looked at since. The time
-// catches what the fingerprint cannot: a worker run that summarized the new
-// turns but left the session summary alone (summary.session_interval had not
-// elapsed) and then called MarkExamined, which brings the fingerprint up to date
-// while the text stays behind.
+// the worker has not looked at since it changed — which is every session being
+// written to right now, whose newest turns nothing has been asked about yet. The
+// turn summaries catch what the fingerprint cannot: a worker run that summarized
+// the new turns but left the session summary alone (summary.session_interval had
+// not elapsed) and then called MarkExamined, which brings the fingerprint up to
+// date while the text stays behind.
+//
+// What is deliberately not asked is whether the log is newer than the text. A
+// log grows for reasons that add no turn to describe — an agent appending its
+// own bookkeeping to a conversation that ended days ago — and the scan that finds
+// nothing to summarize records the version through MarkExamined without
+// rewriting turn 0. Measured against the log, such a session would read as stale
+// from that moment until it is next summarized, which is never: nothing will ask
+// about a session whose every turn is already described.
 func (s Summary) Stale(sess domain.Session) bool {
 	// A row with neither text nor headline is MarkExamined's note that the
 	// session was looked at, not a summary. One that carries only a headline is
@@ -67,10 +84,10 @@ func (s Summary) Stale(sess domain.Session) bool {
 	if s.Fingerprint != sess.Fingerprint {
 		return true
 	}
-	// Created is stored to the second, so the comparison is made at that
-	// resolution: a summary written 200ms after the log it describes shares the
-	// second with it and is not stale.
-	return !s.Created.IsZero() && !sess.UpdatedAt.IsZero() && s.Created.Before(sess.UpdatedAt.Truncate(time.Second))
+	// Both times are stored to the second, and a session summary written in the
+	// same call as the turns under it shares theirs: only a turn described after
+	// this text was written makes it stale.
+	return !s.Created.IsZero() && s.Created.Before(s.TurnSummarizedAt)
 }
 
 // PutSummaries stores summaries for one session, replacing any row that already
@@ -142,6 +159,7 @@ func (d *DB) Summaries(ctx context.Context, s domain.Session, nodeByTurn map[int
 	}
 	defer rows.Close()
 	out := map[int]Summary{}
+	var newestTurn time.Time
 	for rows.Next() {
 		var sum Summary
 		var created int64
@@ -155,11 +173,24 @@ func (d *DB) Summaries(ctx context.Context, s domain.Session, nodeByTurn map[int
 			if node, ok := nodeByTurn[sum.Turn]; !ok || node != sum.NodeID {
 				continue
 			}
+			// The rows that survive the node check are the turns this session is
+			// currently described by, and only those say anything about how far
+			// behind turn 0 is: one made against a node that moved describes
+			// content the reader is not being shown.
+			if sum.Created.After(newestTurn) {
+				newestTurn = sum.Created
+			}
 		}
 		out[sum.Turn] = sum
 	}
 	if rows.Err() != nil {
 		return nil
+	}
+	// After the loop rather than in it: the rows arrive in no particular order,
+	// so turn 0 can be read before the turns it has to be measured against.
+	if sum, ok := out[0]; ok {
+		sum.TurnSummarizedAt = newestTurn
+		out[0] = sum
 	}
 	return out
 }
@@ -210,8 +241,17 @@ func (d *DB) SummaryTexts(ctx context.Context) map[domain.SessionKey]string {
 // where a reader chooses what to open, and a headline that describes a session
 // as it was this morning has to say so there too — not only once the session is
 // open.
+//
+// The turn time Stale needs comes from a subquery, which is where this differs
+// from Summaries: with no turns to name, the newest turn summary is taken as
+// stored rather than as shown, so a row whose node has moved still counts. The
+// two answers part only for a session whose branch changed under its summaries,
+// and there the fingerprint has moved as well and says stale first.
 func (d *DB) Headlines(ctx context.Context) map[domain.SessionKey]Summary {
-	rows, e := d.db.QueryContext(ctx, "SELECT plugin_id,session_id,headline,fingerprint,created FROM summaries WHERE turn_index=0 AND headline <> ''")
+	rows, e := d.db.QueryContext(ctx,
+		"SELECT s.plugin_id,s.session_id,s.headline,s.fingerprint,s.created,"+
+			"COALESCE((SELECT MAX(t.created) FROM summaries t WHERE t.plugin_id=s.plugin_id AND t.session_id=s.session_id AND t.turn_index<>0),0)"+
+			" FROM summaries s WHERE s.turn_index=0 AND s.headline <> ''")
 	if e != nil {
 		return nil
 	}
@@ -220,12 +260,15 @@ func (d *DB) Headlines(ctx context.Context) map[domain.SessionKey]Summary {
 	for rows.Next() {
 		var k domain.SessionKey
 		sum := Summary{Turn: 0}
-		var created int64
-		if rows.Scan(&k.PluginID, &k.SessionID, &sum.Headline, &sum.Fingerprint, &created) != nil {
+		var created, turns int64
+		if rows.Scan(&k.PluginID, &k.SessionID, &sum.Headline, &sum.Fingerprint, &created, &turns) != nil {
 			return nil
 		}
 		if created > 0 {
 			sum.Created = time.Unix(created, 0)
+		}
+		if turns > 0 {
+			sum.TurnSummarizedAt = time.Unix(turns, 0)
 		}
 		out[k] = sum
 	}

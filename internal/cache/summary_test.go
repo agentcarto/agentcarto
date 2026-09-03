@@ -418,10 +418,12 @@ func TestSummaryTexts(t *testing.T) {
 // its text stays behind.
 func TestSessionSummaryStale(t *testing.T) {
 	written := time.Now().Add(-time.Hour)
-	cur := Summary{Turn: 0, Text: "セッション全体の要約", Fingerprint: "fp", Created: written}
+	// Turn 0 and the turns under it were written by the same call, so they share
+	// a timestamp: the summary describes every turn there is.
+	cur := Summary{Turn: 0, Text: "セッション全体の要約", Fingerprint: "fp", Created: written, TurnSummarizedAt: written}
 	sess := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp", UpdatedAt: written.Add(-time.Minute)}
 	if cur.Stale(sess) {
-		t.Error("a summary written after the session's last write is current")
+		t.Error("a summary written with the newest turn it describes is current")
 	}
 
 	grown := sess
@@ -430,10 +432,20 @@ func TestSessionSummaryStale(t *testing.T) {
 		t.Error("a log that changed under the summary should read as stale")
 	}
 
-	examined := sess // MarkExamined kept the fingerprint current
-	examined.UpdatedAt = written.Add(time.Minute)
-	if !cur.Stale(examined) {
-		t.Error("a session written to after the summary should read as stale even with a matching fingerprint")
+	behind := cur // MarkExamined kept the fingerprint current
+	behind.TurnSummarizedAt = written.Add(time.Minute)
+	if !behind.Stale(sess) {
+		t.Error("a session summary older than the turns under it should read as stale")
+	}
+
+	// A log grows for reasons that add no turn to describe — an agent appending
+	// its own bookkeeping to a conversation that ended days ago. Measured against
+	// the log, such a session read as stale from that moment on and never stopped:
+	// nothing summarizes a session whose every turn is already described.
+	quiet := sess
+	quiet.UpdatedAt = written.Add(48 * time.Hour)
+	if cur.Stale(quiet) {
+		t.Error("a log that grew without gaining a turn does not make the summary stale")
 	}
 
 	blank := Summary{Turn: 0, Text: "  ", Fingerprint: "old", Created: written}
@@ -586,20 +598,82 @@ func TestConcurrentOpensMigrateWithoutFailing(t *testing.T) {
 	}
 }
 
-// Created is stored to the second while a session's UpdatedAt has more
-// precision. A summary written just after the log it describes shares that
-// second, and must not read as describing an earlier session.
-func TestASummaryWrittenWithinTheSecondIsNotStale(t *testing.T) {
-	written := time.Unix(1800000005, 0)
-	sum := Summary{Turn: 0, Text: "要約", Fingerprint: "fp", Created: written}
-	sess := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp", UpdatedAt: written.Add(700 * time.Millisecond)}
-	if sum.Stale(sess) {
-		t.Error("a summary written 700ms into the second it is stamped with reads as stale")
+// The time a session summary is measured against comes back with it: the newest
+// of the turn summaries the reader is being shown.
+func TestSummariesCarryTheNewestTurnTime(t *testing.T) {
+	ctx := context.Background()
+	d := openTemp(t)
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	if e := d.PutSummaries(ctx, s, []Summary{
+		{Turn: 0, Text: "セッション全体の要約"},
+		{Turn: 1, NodeID: "n1", Text: "ターン1の要約"},
+	}); e != nil {
+		t.Fatalf("put: %v", e)
 	}
-	// A write in the next second is what staleness is for.
-	sess.UpdatedAt = written.Add(time.Second)
-	if !sum.Stale(sess) {
-		t.Error("a session written to after the summary's second should be stale")
+	nodes := map[int]string{1: "n1"}
+	if got := d.Summaries(ctx, s, nodes)[0]; !got.TurnSummarizedAt.Equal(got.Created) {
+		t.Errorf("turns and session summary written together: %v vs %v", got.TurnSummarizedAt, got.Created)
+	} else if got.Stale(s) {
+		t.Error("a session summary written with its turns is current")
+	}
+
+	// The session summary now predates the turn under it, which is what
+	// session_interval leaves behind.
+	hourAgo := time.Now().Add(-time.Hour).Unix()
+	if _, e := d.db.ExecContext(ctx, "UPDATE summaries SET created=? WHERE turn_index=0", hourAgo); e != nil {
+		t.Fatalf("age turn 0: %v", e)
+	}
+	if got := d.Summaries(ctx, s, nodes)[0]; !got.Stale(s) {
+		t.Error("a session summary older than the turn under it should read as stale")
+	}
+	// A turn whose node moved is withheld from the reader, so it says nothing
+	// about how far behind the session summary is.
+	if got := d.Summaries(ctx, s, map[int]string{1: "moved"})[0]; got.Stale(s) {
+		t.Error("a turn summary that is not shown should not make the session summary stale")
+	}
+}
+
+// The list judges staleness the same way, from the same times, without knowing
+// what the turns of each session are.
+func TestHeadlinesCarryTheNewestTurnTime(t *testing.T) {
+	ctx := context.Background()
+	d := openTemp(t)
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	if e := d.PutSummaries(ctx, s, []Summary{
+		{Turn: 0, Text: "セッション全体の要約", Headline: "要約機能の実装"},
+		{Turn: 1, NodeID: "n1", Text: "ターン1の要約"},
+	}); e != nil {
+		t.Fatalf("put: %v", e)
+	}
+	if got := d.Headlines(ctx)[s.Key()]; got.Stale(s) {
+		t.Error("a headline written with its turns is current")
+	}
+	hourAgo := time.Now().Add(-time.Hour).Unix()
+	if _, e := d.db.ExecContext(ctx, "UPDATE summaries SET created=? WHERE turn_index=0", hourAgo); e != nil {
+		t.Fatalf("age turn 0: %v", e)
+	}
+	if got := d.Headlines(ctx)[s.Key()]; !got.Stale(s) {
+		t.Error("a headline older than the turn under it should read as stale")
+	}
+}
+
+// A session that has no turn summaries at all — one short enough to be described
+// by a single answer — has nothing to fall behind, and must not read as stale
+// because its log went on growing.
+func TestASessionSummaryWithoutTurnsIsNotStale(t *testing.T) {
+	ctx := context.Background()
+	d := openTemp(t)
+	s := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	if e := d.PutSummaries(ctx, s, []Summary{{Turn: 0, Text: "セッション全体の要約", Headline: "見出し"}}); e != nil {
+		t.Fatalf("put: %v", e)
+	}
+	grown := s
+	grown.UpdatedAt = time.Now().Add(48 * time.Hour)
+	if got := d.Summaries(ctx, s, nil)[0]; got.Stale(grown) {
+		t.Error("a session summary with no turns under it should not read as stale")
+	}
+	if got := d.Headlines(ctx)[s.Key()]; got.Stale(grown) {
+		t.Error("the same answer is owed to the list")
 	}
 }
 

@@ -29,25 +29,30 @@ func twoTurns() domain.Conversation {
 }
 
 // detailWithSummary loads the conversation into a detail view whose cache holds
-// the given session summary, written now. updatedAt is when the session was last
-// written to: later than now is a session that went on after it was summarized
-// (the summary is stale), and the zero value is one that did not.
-func detailWithSummary(t *testing.T, text string, updatedAt time.Time, width, height int) Model {
-	return detailWithHeadline(t, text, "", updatedAt, width, height)
+// the given session summary, written now. stale says whether the session has
+// gone on since it was written.
+func detailWithSummary(t *testing.T, text string, stale bool, width, height int) Model {
+	return detailWithHeadline(t, text, "", stale, width, height)
 }
 
 // detailWithHeadline is detailWithSummary with the one-line headline the model
 // writes beside the summary.
-func detailWithHeadline(t *testing.T, text, headline string, updatedAt time.Time, width, height int) Model {
+//
+// stale moves the log out from under the summary, which is the way a reader
+// most often meets one: the session was written to after it was described.
+func detailWithHeadline(t *testing.T, text, headline string, stale bool, width, height int) Model {
 	t.Helper()
 	db, e := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
 	if e != nil {
 		t.Fatalf("open cache: %v", e)
 	}
 	t.Cleanup(func() { db.Close() })
-	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo", Title: summaryTestTitle, UpdatedAt: updatedAt}
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo", Title: summaryTestTitle, Fingerprint: "fp"}
 	if e := db.PutSummaries(context.Background(), s, []cache.Summary{{Turn: 0, Text: text, Headline: headline, Model: "claude claude-sonnet-5"}}); e != nil {
 		t.Fatalf("put summaries: %v", e)
+	}
+	if stale {
+		s.Fingerprint = "moved"
 	}
 	m := Model{width: width, height: height, detailSession: &s, cache: db}
 	c := twoTurns()
@@ -80,7 +85,7 @@ func headRows(m Model) int {
 // held: the title is the session's first prompt, which turn #1 carries anyway,
 // and the § marks the line as generated rather than as something that was said.
 func TestDetailHeadRowShowsSummaryInPlaceOfTitle(t *testing.T) {
-	m := detailWithSummary(t, "pull-all.shを作成し6リポジトリのpullを確認", time.Time{}, 120, 20)
+	m := detailWithSummary(t, "pull-all.shを作成し6リポジトリのpullを確認", false, 120, 20)
 
 	if got := m.detailRows[0].Kind; got != "head" {
 		t.Fatalf("the head row should lead the list, got kind %q", got)
@@ -114,7 +119,7 @@ func TestDetailHeadRowShowsSummaryInPlaceOfTitle(t *testing.T) {
 // the list — so a summary longer than the screen scrolls instead of being cut.
 func TestDetailHeadRowOpensToFullTitleAndSummary(t *testing.T) {
 	long := strings.Repeat("長い要約の文章。", 60)
-	m := detailWithSummary(t, long, time.Time{}, 60, 12)
+	m := detailWithSummary(t, long, false, 60, 12)
 
 	m = pressKey(m, "s")
 	if headRows(m) < 8 {
@@ -138,7 +143,7 @@ func TestDetailHeadRowOpensToFullTitleAndSummary(t *testing.T) {
 // Opening does not bring the title back: the head unfolds under the line it was
 // closed to. The session's first prompt is turn #1's own headline, one row down.
 func TestDetailHeadRowOpenKeepsTheHeadlineOnTop(t *testing.T) {
-	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成し、6リポジトリ全てを確認した。", "一括pullスクリプトの作成", time.Time{}, 60, 24)
+	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成し、6リポジトリ全てを確認した。", "一括pullスクリプトの作成", false, 60, 24)
 	m = pressKey(m, "s")
 
 	lines := strings.Split(stripANSI(m.detailView()), "\n")
@@ -160,7 +165,7 @@ func TestDetailHeadRowOpenKeepsTheHeadlineOnTop(t *testing.T) {
 // Enter on the head does what `s` does, including on the rows the summary added:
 // a row that grew out of the head folds back the way it came.
 func TestDetailHeadRowEnterToggles(t *testing.T) {
-	m := detailWithSummary(t, "セッション全体の要約", time.Time{}, 80, 20)
+	m := detailWithSummary(t, "セッション全体の要約", false, 80, 20)
 	closed := len(m.detailRows)
 
 	m.detailCursor = 0 // the head row; opening a session lands on a turn instead
@@ -184,7 +189,7 @@ func TestDetailHeadRowEnterToggles(t *testing.T) {
 // Opening and closing moves the rows below, so the cursor moves with them and
 // stays on the turn it was on.
 func TestDetailHeadRowKeepsCursorOnItsTurn(t *testing.T) {
-	m := detailWithSummary(t, strings.Repeat("要約の文。", 30), time.Time{}, 80, 24)
+	m := detailWithSummary(t, strings.Repeat("要約の文。", 30), false, 80, 24)
 	m.detailCursor = len(m.detailRows) - 1 // turn #1, the last row
 	turn := m.detailRows[m.detailCursor].Turn
 
@@ -202,7 +207,7 @@ func TestDetailHeadRowKeepsCursorOnItsTurn(t *testing.T) {
 // longer are. It is said in front of the summary, which is the part of the line
 // a narrow terminal keeps.
 func TestDetailSummaryMarksStale(t *testing.T) {
-	m := detailWithSummary(t, "古い要約", time.Now().Add(time.Hour), 120, 20)
+	m := detailWithSummary(t, "古い要約", true, 120, 20)
 
 	line := strings.Split(stripANSI(m.detailView()), "\n")[2]
 	if !strings.Contains(line, "(stale)") {
@@ -217,7 +222,7 @@ func TestDetailSummaryMarksStale(t *testing.T) {
 // about. That is a record of having looked, not a summary: the title keeps the
 // row, and neither `s` nor the footer pretends there is anything to open.
 func TestDetailSummaryIgnoresBlankRow(t *testing.T) {
-	m := detailWithSummary(t, "  ", time.Time{}, 120, 20)
+	m := detailWithSummary(t, "  ", false, 120, 20)
 
 	out := stripANSI(m.detailView())
 	lines := strings.Split(out, "\n")
@@ -240,7 +245,7 @@ func TestDetailSummaryIgnoresBlankRow(t *testing.T) {
 // sessions by their summaries (cache.SummaryTexts), and one opened that way has
 // to find it here as well.
 func TestDetailSearchMatchesSummary(t *testing.T) {
-	m := detailWithSummary(t, "pull-all.shを作成", time.Time{}, 120, 20)
+	m := detailWithSummary(t, "pull-all.shを作成", false, 120, 20)
 	m.turnQuery = "pull-all"
 	m.turnHitsStale = true
 	(&m).syncTurnHits()
@@ -255,7 +260,7 @@ func TestDetailSearchMatchesSummary(t *testing.T) {
 // highlighted like any other — summary or title, whichever it is holding.
 func TestDetailHeadRowHighlightedWhenSelected(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
-	m := detailWithSummary(t, "セッション全体の要約", time.Time{}, 80, 20)
+	m := detailWithSummary(t, "セッション全体の要約", false, 80, 20)
 	m.detailCursor = 0
 
 	line := strings.Split(m.detailView(), "\n")[2]
@@ -268,7 +273,7 @@ func TestDetailHeadRowHighlightedWhenSelected(t *testing.T) {
 // when the cursor reaches it — not just the first.
 func TestDetailHeadTextRowsHighlightWhenSelected(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI256)
-	m := detailWithSummary(t, strings.Repeat("要約の文。", 20), time.Time{}, 80, 24)
+	m := detailWithSummary(t, strings.Repeat("要約の文。", 20), false, 80, 24)
 	m = pressKey(m, "s")
 	if headRows(m) < 3 {
 		t.Fatalf("expected the summary to span several rows, got %d", headRows(m))
@@ -286,7 +291,7 @@ func TestDetailHeadTextRowsHighlightWhenSelected(t *testing.T) {
 // moves with them, so the turn it was on is still the turn it is on — including
 // while a turn is open, where the cursor is what that view reads.
 func TestDetailHeadRowsReflowOnResize(t *testing.T) {
-	m := detailWithSummary(t, strings.Repeat("要約の文。", 20), time.Time{}, 100, 24)
+	m := detailWithSummary(t, strings.Repeat("要約の文。", 20), false, 100, 24)
 	m = pressKey(m, "s")
 	wide := headRows(m)
 	m.detailCursor = len(m.detailRows) - 1
@@ -331,7 +336,7 @@ func TestDetailHeadRowKeepsBreadcrumbWhenSelected(t *testing.T) {
 // The fork lineage belongs to the head row's first line whether that line is
 // holding the title or the summary in its place.
 func TestDetailHeadRowKeepsForkLineageWithSummary(t *testing.T) {
-	m := detailWithSummary(t, "セッション全体の要約", time.Time{}, 140, 20)
+	m := detailWithSummary(t, "セッション全体の要約", false, 140, 20)
 	s := *m.detailSession
 	s.ParentSessionID = "parent01"
 	m.detailSession = &s
@@ -348,7 +353,7 @@ func TestDetailHeadRowKeepsForkLineageWithSummary(t *testing.T) {
 // One summary is one hit, however many lines it is wrapped into: the footer's
 // count and n/N would otherwise report the wrapping as matches of its own.
 func TestDetailSearchCountsOpenSummaryOnce(t *testing.T) {
-	m := detailWithSummary(t, "pull-all.shを作成。git pull --ff-onlyのみを使う方針で実装し、6リポジトリ全てを確認。", time.Time{}, 60, 24)
+	m := detailWithSummary(t, "pull-all.shを作成。git pull --ff-onlyのみを使う方針で実装し、6リポジトリ全てを確認。", false, 60, 24)
 	m = pressKey(m, "s")
 	if headRows(m) < 3 {
 		t.Fatalf("expected the summary to wrap into several rows, got %d", headRows(m))
@@ -365,7 +370,7 @@ func TestDetailSearchCountsOpenSummaryOnce(t *testing.T) {
 // The worker rewrites summaries in the background, so a reload can change how
 // many rows the head takes under an open view. The cursor moves with the rows.
 func TestDetailHeadRowsFollowASummaryRewrittenWhileOpen(t *testing.T) {
-	m := detailWithSummary(t, "短い要約", time.Time{}, 60, 24)
+	m := detailWithSummary(t, "短い要約", false, 60, 24)
 	m = pressKey(m, "s")
 	m.detailCursor = len(m.detailRows) - 1 // turn #1
 	turn := m.detailRows[m.detailCursor].Turn
@@ -386,7 +391,7 @@ func TestDetailHeadRowsFollowASummaryRewrittenWhileOpen(t *testing.T) {
 // The paragraph is credited to the model that wrote it, not to whichever turn
 // summary the map happened to yield last.
 func TestDetailSummaryCreditNamesTheSessionSummarysModel(t *testing.T) {
-	m := detailWithSummary(t, "セッション全体の要約", time.Time{}, 100, 24)
+	m := detailWithSummary(t, "セッション全体の要約", false, 100, 24)
 	sums := map[int]cache.Summary{
 		0: {Turn: 0, Text: "セッション全体の要約", Model: "claude claude-sonnet-5"},
 		1: {Turn: 1, Text: "ターンの要約", Model: "claude claude-haiku-4-5"},
@@ -409,7 +414,7 @@ func TestDetailSummaryCreditNamesTheSessionSummarysModel(t *testing.T) {
 // taller than the screen, and a frame showing only the summary is not the
 // session someone just opened.
 func TestDetailOpenBringsTheViewportToTheCursor(t *testing.T) {
-	m := detailWithSummary(t, strings.Repeat("長い要約の文章。", 40), time.Time{}, 60, 12)
+	m := detailWithSummary(t, strings.Repeat("長い要約の文章。", 40), false, 60, 12)
 	m = pressKey(m, "s")
 	if headRows(m) <= m.detailBodyRows() {
 		t.Fatalf("this test needs a head taller than the body (%d rows vs %d)", headRows(m), m.detailBodyRows())
@@ -431,7 +436,7 @@ func TestDetailOpenBringsTheViewportToTheCursor(t *testing.T) {
 // summary's own first line is only its first line, which is what the reader
 // could not make sense of before headlines existed.
 func TestDetailHeadRowPrefersTheHeadline(t *testing.T) {
-	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成。git pull --ff-onlyのみを使う方針で実装した。", "複数gitリポジトリ一括pullスクリプトの作成", time.Time{}, 120, 20)
+	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成。git pull --ff-onlyのみを使う方針で実装した。", "複数gitリポジトリ一括pullスクリプトの作成", false, 120, 20)
 
 	line := strings.Split(stripANSI(m.detailView()), "\n")[2]
 	if !strings.Contains(line, "複数gitリポジトリ一括pullスクリプトの作成") {
@@ -451,7 +456,7 @@ func TestDetailHeadRowPrefersTheHeadline(t *testing.T) {
 // A summary written before headlines existed keeps working: its paragraph is
 // flattened onto the line as it was.
 func TestDetailHeadRowFallsBackToTheSummary(t *testing.T) {
-	m := detailWithHeadline(t, "見出しのない古い要約", "", time.Time{}, 120, 20)
+	m := detailWithHeadline(t, "見出しのない古い要約", "", false, 120, 20)
 
 	line := strings.Split(stripANSI(m.detailView()), "\n")[2]
 	if !strings.Contains(line, "見出しのない古い要約") {
@@ -461,7 +466,7 @@ func TestDetailHeadRowFallsBackToTheSummary(t *testing.T) {
 
 // The stale mark belongs in front of whichever of the two is on the line.
 func TestDetailHeadlineCarriesTheStaleMark(t *testing.T) {
-	m := detailWithHeadline(t, "古い要約", "古い見出し", time.Now().Add(time.Hour), 120, 20)
+	m := detailWithHeadline(t, "古い要約", "古い見出し", true, 120, 20)
 
 	line := strings.Split(stripANSI(m.detailView()), "\n")[2]
 	if !strings.Contains(line, "(stale)") || !strings.Contains(line, "古い見出し") {
@@ -472,7 +477,7 @@ func TestDetailHeadlineCarriesTheStaleMark(t *testing.T) {
 // Without a headline the closed line is the paragraph flattened, so opening
 // must not repeat it above the paragraph.
 func TestDetailHeadRowOpenWithoutAHeadlineDoesNotRepeatItself(t *testing.T) {
-	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成。6リポジトリ全てを確認した。", "", time.Time{}, 100, 24)
+	m := detailWithHeadline(t, "agentcarto配下の複数gitリポジトリを一括pullするpull-all.shを作成。6リポジトリ全てを確認した。", "", false, 100, 24)
 	m = pressKey(m, "s")
 
 	lines := strings.Split(stripANSI(m.detailView()), "\n")[2 : 2+headRows(m)]
@@ -489,7 +494,7 @@ func TestDetailHeadRowOpenWithoutAHeadlineDoesNotRepeatItself(t *testing.T) {
 // to be findable: a search that reports nothing while the word is on screen
 // reads as broken.
 func TestDetailSearchMatchesTheHeadline(t *testing.T) {
-	m := detailWithHeadline(t, "agentcarto配下のリポジトリをまとめて更新する仕組みを用意した。", "pull-all.shの導入", time.Time{}, 120, 20)
+	m := detailWithHeadline(t, "agentcarto配下のリポジトリをまとめて更新する仕組みを用意した。", "pull-all.shの導入", false, 120, 20)
 	m.turnQuery = "pull-all"
 	m.turnHitsStale = true
 	(&m).syncTurnHits()
