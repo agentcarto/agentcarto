@@ -149,12 +149,12 @@ func TestAGrownSessionReportsItsSummaryAsStale(t *testing.T) {
 	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "セッション全体", Model: "m"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, stale := storedSummaries(ctx, d, s, nil); stale {
+	if _, _, stale := storedSummaries(ctx, d, s, nil, 0); stale {
 		t.Error("a summary made from this very version of the log reads as stale")
 	}
 	grown := s
 	grown.Fingerprint = "fp2"
-	sums, model, stale := storedSummaries(ctx, d, grown, nil)
+	sums, model, stale := storedSummaries(ctx, d, grown, nil, 0)
 	if !stale {
 		t.Error("a summary made before the newest turns does not report itself as stale")
 	}
@@ -234,7 +234,7 @@ func TestASessionWithNothingToSummarizeIsNotOpenedTwice(t *testing.T) {
 	}
 	// The record must not show up as a summary: it has no text, and every reader
 	// tests for that before printing.
-	if sums, model, stale := storedSummaries(ctx, d, s, nil); len(sums) != 0 || model != "" || stale {
+	if sums, model, stale := storedSummaries(ctx, d, s, nil, 0); len(sums) != 0 || model != "" || stale {
 		t.Errorf("the blank record reads back as a summary: %v %q stale=%v", sums, model, stale)
 	}
 	// A log that grew is reconsidered: the fingerprint no longer matches.
@@ -823,7 +823,7 @@ func TestNoticingThereIsNothingToAddKeepsTheSummary(t *testing.T) {
 	if worthOpening(ctx, d, q, fresh) {
 		t.Error("a session with nothing to summarize would be opened again")
 	}
-	if sums, _, _ := storedSummaries(ctx, d, fresh, nil); len(sums) != 0 {
+	if sums, _, _ := storedSummaries(ctx, d, fresh, nil, 0); len(sums) != 0 {
 		t.Errorf("the blank record reads back as a summary: %v", sums)
 	}
 	// And it does not read as one to what paces the session summary. A session

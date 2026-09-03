@@ -422,19 +422,19 @@ func TestSessionSummaryStale(t *testing.T) {
 	// a timestamp: the summary describes every turn there is.
 	cur := Summary{Turn: 0, Text: "セッション全体の要約", Fingerprint: "fp", Created: written, TurnSummarizedAt: written}
 	sess := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp", UpdatedAt: written.Add(-time.Minute)}
-	if cur.Stale(sess) {
+	if cur.Stale(sess, 0) {
 		t.Error("a summary written with the newest turn it describes is current")
 	}
 
 	grown := sess
 	grown.Fingerprint = "fp2"
-	if !cur.Stale(grown) {
+	if !cur.Stale(grown, 0) {
 		t.Error("a log that changed under the summary should read as stale")
 	}
 
 	behind := cur // MarkExamined kept the fingerprint current
 	behind.TurnSummarizedAt = written.Add(time.Minute)
-	if !behind.Stale(sess) {
+	if !behind.Stale(sess, 0) {
 		t.Error("a session summary older than the turns under it should read as stale")
 	}
 
@@ -444,17 +444,47 @@ func TestSessionSummaryStale(t *testing.T) {
 	// nothing summarizes a session whose every turn is already described.
 	quiet := sess
 	quiet.UpdatedAt = written.Add(48 * time.Hour)
-	if cur.Stale(quiet) {
+	if cur.Stale(quiet, 0) {
 		t.Error("a log that grew without gaining a turn does not make the summary stale")
 	}
 
 	blank := Summary{Turn: 0, Text: "  ", Fingerprint: "old", Created: written}
-	if blank.Stale(grown) {
+	if blank.Stale(grown, 0) {
 		t.Error("MarkExamined's blank row is not a summary and cannot be stale")
 	}
 	turn := Summary{Turn: 3, Text: "ターンの要約", Fingerprint: "old", Created: written}
-	if turn.Stale(grown) {
+	if turn.Stale(grown, 0) {
 		t.Error("a turn summary is withheld when its node moves, so it is never stale")
+	}
+}
+
+// A session being worked in describes a turn every few minutes while its own
+// summary is remade at most once an interval, so asked strictly it reads as stale
+// from its second turn onward and never stops. The interval is handed in as the
+// grace that pacing already grants.
+func TestSessionSummaryWithinTheIntervalIsNotStale(t *testing.T) {
+	written := time.Now().Add(-time.Hour)
+	sum := Summary{Turn: 0, Text: "セッション全体の要約", Fingerprint: "fp", Created: written,
+		TurnSummarizedAt: written.Add(20 * time.Minute)}
+	sess := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp"}
+	if !sum.Stale(sess, 0) {
+		t.Error("asked strictly, a summary older than the turns under it is stale")
+	}
+	if sum.Stale(sess, time.Hour) {
+		t.Error("a turn described 20 minutes into an hourly interval is the pacing working, not staleness")
+	}
+
+	// Past the interval the session summary is genuinely overdue: the run that
+	// should have remade it did not.
+	sum.TurnSummarizedAt = written.Add(90 * time.Minute)
+	if !sum.Stale(sess, time.Hour) {
+		t.Error("a turn described after the interval had elapsed should read as stale")
+	}
+	// The grace is no excuse for a log that moved: that is a different question.
+	grown := sess
+	grown.Fingerprint = "fp2"
+	if !sum.Stale(grown, 24*time.Hour) {
+		t.Error("a changed log is stale however long the grace")
 	}
 }
 
@@ -613,7 +643,7 @@ func TestSummariesCarryTheNewestTurnTime(t *testing.T) {
 	nodes := map[int]string{1: "n1"}
 	if got := d.Summaries(ctx, s, nodes)[0]; !got.TurnSummarizedAt.Equal(got.Created) {
 		t.Errorf("turns and session summary written together: %v vs %v", got.TurnSummarizedAt, got.Created)
-	} else if got.Stale(s) {
+	} else if got.Stale(s, 0) {
 		t.Error("a session summary written with its turns is current")
 	}
 
@@ -623,12 +653,12 @@ func TestSummariesCarryTheNewestTurnTime(t *testing.T) {
 	if _, e := d.db.ExecContext(ctx, "UPDATE summaries SET created=? WHERE turn_index=0", hourAgo); e != nil {
 		t.Fatalf("age turn 0: %v", e)
 	}
-	if got := d.Summaries(ctx, s, nodes)[0]; !got.Stale(s) {
+	if got := d.Summaries(ctx, s, nodes)[0]; !got.Stale(s, 0) {
 		t.Error("a session summary older than the turn under it should read as stale")
 	}
 	// A turn whose node moved is withheld from the reader, so it says nothing
 	// about how far behind the session summary is.
-	if got := d.Summaries(ctx, s, map[int]string{1: "moved"})[0]; got.Stale(s) {
+	if got := d.Summaries(ctx, s, map[int]string{1: "moved"})[0]; got.Stale(s, 0) {
 		t.Error("a turn summary that is not shown should not make the session summary stale")
 	}
 }
@@ -645,14 +675,14 @@ func TestHeadlinesCarryTheNewestTurnTime(t *testing.T) {
 	}); e != nil {
 		t.Fatalf("put: %v", e)
 	}
-	if got := d.Headlines(ctx)[s.Key()]; got.Stale(s) {
+	if got := d.Headlines(ctx)[s.Key()]; got.Stale(s, 0) {
 		t.Error("a headline written with its turns is current")
 	}
 	hourAgo := time.Now().Add(-time.Hour).Unix()
 	if _, e := d.db.ExecContext(ctx, "UPDATE summaries SET created=? WHERE turn_index=0", hourAgo); e != nil {
 		t.Fatalf("age turn 0: %v", e)
 	}
-	if got := d.Headlines(ctx)[s.Key()]; !got.Stale(s) {
+	if got := d.Headlines(ctx)[s.Key()]; !got.Stale(s, 0) {
 		t.Error("a headline older than the turn under it should read as stale")
 	}
 }
@@ -669,10 +699,10 @@ func TestASessionSummaryWithoutTurnsIsNotStale(t *testing.T) {
 	}
 	grown := s
 	grown.UpdatedAt = time.Now().Add(48 * time.Hour)
-	if got := d.Summaries(ctx, s, nil)[0]; got.Stale(grown) {
+	if got := d.Summaries(ctx, s, nil)[0]; got.Stale(grown, 0) {
 		t.Error("a session summary with no turns under it should not read as stale")
 	}
-	if got := d.Headlines(ctx)[s.Key()]; got.Stale(grown) {
+	if got := d.Headlines(ctx)[s.Key()]; got.Stale(grown, 0) {
 		t.Error("the same answer is owed to the list")
 	}
 }

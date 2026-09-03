@@ -685,7 +685,7 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 			// Turn 0 alone can describe a session that has since gone on; what makes
 			// it so is the store's business, not the view's (cache.Summary.Stale).
 			m.summaryAt = m.summaries[0].Created
-			m.summaryStale = m.summaries[0].Stale(*m.detailSession)
+			m.summaryStale = m.summaries[0].Stale(*m.detailSession, m.summaryGrace())
 		}
 	}
 	if x.c != nil && m.detail != nil {
@@ -1743,7 +1743,7 @@ func (m Model) sessionRow(s domain.Session, selected bool, maxN int, prefix stri
 	if !m.listTitles {
 		if h := m.headlines[s.Key()]; strings.TrimSpace(h.Headline) != "" {
 			lead = strings.TrimSpace(h.Headline)
-			if h.Stale(s) {
+			if h.Stale(s, m.summaryGrace()) {
 				// The same mark the detail header uses, for the same reason: this is
 				// the screen where a session is chosen, and one described as it was
 				// this morning must not read as current.
@@ -2377,6 +2377,17 @@ func headLine(text string, color lipgloss.Color, w int, selected bool) string {
 // which is what makes it worth opening (with no summary it is the title, and
 // there is nothing under it).
 func (m Model) hasSessionSummary() bool { return strings.TrimSpace(m.summaries[0].Text) != "" }
+
+// summaryGrace is how far behind the turns a session summary may fall before the
+// screen says so, which is the interval it is remade on: a turn described since
+// the last one is the pacing working, not the summary going out of date. A model
+// built without a config — a test — asks the strict question instead.
+func (m Model) summaryGrace() time.Duration {
+	if m.app == nil {
+		return 0
+	}
+	return time.Duration(m.app.Config.Summary.SessionInterval)
+}
 
 // summaryCredit names what wrote the session summary and when it was written,
 // or "" when neither is known. The time comes from the store rather than the

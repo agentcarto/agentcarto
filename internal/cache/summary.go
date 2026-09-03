@@ -74,7 +74,15 @@ type Summary struct {
 // rewriting turn 0. Measured against the log, such a session would read as stale
 // from that moment until it is next summarized, which is never: nothing will ask
 // about a session whose every turn is already described.
-func (s Summary) Stale(sess domain.Session) bool {
+//
+// within is how far behind the turns a session summary is allowed to be before
+// it is worth saying so, and callers pass summary.session_interval: a session
+// summary is deliberately made at most that often, so a turn described since the
+// last one is the design working rather than a summary going out of date. Without
+// it every session being worked in reads as stale from its second turn onward,
+// which says nothing a reader can act on. Zero asks the strict question, which is
+// what a caller with no interval to hand (a test, --no-cache) wants.
+func (s Summary) Stale(sess domain.Session, within time.Duration) bool {
 	// A row with neither text nor headline is MarkExamined's note that the
 	// session was looked at, not a summary. One that carries only a headline is
 	// what Headlines reads back, and it goes stale like any other.
@@ -86,8 +94,9 @@ func (s Summary) Stale(sess domain.Session) bool {
 	}
 	// Both times are stored to the second, and a session summary written in the
 	// same call as the turns under it shares theirs: only a turn described after
-	// this text was written makes it stale.
-	return !s.Created.IsZero() && s.Created.Before(s.TurnSummarizedAt)
+	// this text was written — by more than the interval it is remade on — makes it
+	// stale.
+	return !s.Created.IsZero() && s.Created.Add(within).Before(s.TurnSummarizedAt)
 }
 
 // PutSummaries stores summaries for one session, replacing any row that already

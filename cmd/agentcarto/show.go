@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/agentcarto/agentcarto/internal/app"
 	"github.com/agentcarto/agentcarto/internal/cache"
@@ -84,12 +85,12 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 	path := conv.ActivePath()
 	turns := transcript.Turns(*conv, path)
 	opts.Branches = transcript.Branches(*conv, path)
-	opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns)
+	opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns, time.Duration(cfg.Summary.SessionInterval))
 
 	// Summarizing comes before printing, not after: whoever ran this asked to
 	// read the session, and an outline of "done", "y" and "1" is not that.
 	if len(opts.Summaries) == 0 && summarizeForShow(ctx, a, cfg, db, s, ref) {
-		opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns)
+		opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns, time.Duration(cfg.Summary.SessionInterval))
 	}
 	if selectors == 0 {
 		// An outline with no `↳` under any turn is the shape this feature exists to
@@ -122,7 +123,7 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 // agent working through many sessions, and a command that quietly spent money
 // per session would be a poor thing to hand one. `agentcarto summarize` is
 // where that happens.
-func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns []transcript.Turn) (map[int]string, string, bool) {
+func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns []transcript.Turn, sessionEvery time.Duration) (map[int]string, string, bool) {
 	if db == nil {
 		return nil, "", false // --no-cache: summaries live in the cache
 	}
@@ -150,7 +151,7 @@ func storedSummaries(ctx context.Context, db *cache.DB, s domain.Session, turns 
 		// withheld when it moves, so a stale one is never returned at all. What
 		// counts as gone on is the store's call, so the TUI header and this
 		// document cannot disagree about it.
-		if sum.Stale(s) {
+		if sum.Stale(s, sessionEvery) {
 			stale = true
 		}
 	}
