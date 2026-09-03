@@ -193,10 +193,10 @@ func TestALogDeletedSessionIsSummarizedFromTheCachedConversation(t *testing.T) {
 	if err := d.PutBlob(ctx, kept, app.ConversationArtifactKind, conv); err != nil {
 		t.Fatal(err)
 	}
-	if !worthOpening(ctx, d, q, kept) {
+	if !worthOpening(ctx, d, q, kept, time.Hour) {
 		t.Error("a deleted session whose conversation was kept was ruled out")
 	}
-	if worthOpening(ctx, d, q, lost) {
+	if worthOpening(ctx, d, q, lost, time.Hour) {
 		t.Error("a deleted session with no copy would be opened, and fail, on every run")
 	}
 }
@@ -226,10 +226,10 @@ func TestASessionWithNothingToSummarizeIsNotOpenedTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if queued, _ := queueOne(ctx, a, d, q, s); queued {
+	if queued, _ := queueOne(ctx, a, d, q, s, time.Hour); queued {
 		t.Fatal("a session with no turns was queued")
 	}
-	if worthOpening(ctx, d, q, s) {
+	if worthOpening(ctx, d, q, s, time.Hour) {
 		t.Error("the session would be opened again on the next run")
 	}
 	// The record must not show up as a summary: it has no text, and every reader
@@ -240,8 +240,93 @@ func TestASessionWithNothingToSummarizeIsNotOpenedTwice(t *testing.T) {
 	// A log that grew is reconsidered: the fingerprint no longer matches.
 	grown := s
 	grown.Fingerprint = "fp2"
-	if !worthOpening(ctx, d, q, grown) {
+	if !worthOpening(ctx, d, q, grown, time.Hour) {
 		t.Error("a session that grew was still treated as having nothing to summarize")
+	}
+}
+
+// A session summary the interval deferred must not be lost. The run that stored
+// a new turn and left turn 0 alone recorded the version through MarkExamined all
+// the same, so the fingerprint says there is nothing to do — and the log of a
+// conversation that has ended never moves again. Without asking this second
+// question the deferral is permanent.
+func TestADeferredSessionSummaryIsAskedForAgain(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	when := time.Now().Add(-time.Hour)
+	s := domain.Session{
+		PluginID: "claude", AgentType: "claude", SessionID: "deferred", Fingerprint: "fp1",
+		UpdatedAt: when, LastKind: domain.EventTurnComplete,
+		SourceRef: domain.SessionRef{Source: "/logs/deferred.jsonl"},
+	}
+	a, _ := fixtureApp([]domain.Session{s}, map[string]domain.Conversation{
+		"/logs/deferred.jsonl": domain.NewConversation([]domain.ConvNode{
+			{ID: "u1", Timestamp: when, Events: talk("何を決めたか", "こう決めた")},
+		}),
+	})
+	// The session summary first and the turn a second later, which is the shape a
+	// run that deferred turn 0 leaves behind. Created is stored to the second, so
+	// the two have to fall in different ones.
+	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "セッション全体の要約"}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 1, NodeID: "u1", Text: "ターン1の要約"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worthOpening(ctx, d, q, s, time.Hour) {
+		t.Error("the interval has not elapsed, so nothing is owed yet and opening the session costs a parse for nothing")
+	}
+	if !worthOpening(ctx, d, q, s, 0) {
+		t.Fatal("a session summary left behind by the turns under it would never be remade")
+	}
+	if queued, _ := queueOne(ctx, a, d, q, s, 0); !queued {
+		t.Fatal("nothing was queued for a session whose own summary is overdue")
+	}
+	r, ok := q.Find(s.PluginID, s.SessionID)
+	if !ok {
+		t.Fatal("the request is not in the queue")
+	}
+	// It asks about no turn: they are all described. What the worker does with such
+	// a request is go straight to the session summary.
+	if len(r.Prompts) != 0 || len(r.Batches) != 0 {
+		t.Errorf("the request carries turn prompts: %d prompts, %d batches", len(r.Prompts), len(r.Batches))
+	}
+	if r.Held {
+		t.Error("a held request writes nothing to turn 0, which is the one thing this asks for")
+	}
+	if r.Nodes[1] != "u1" {
+		t.Errorf("the request must name the turns the summary is built from, got %v", r.Nodes)
+	}
+
+	// The other way turn 0 comes to be owed: a session-summary call that failed
+	// leaves the turns described and the session not. There is no summary to
+	// measure an interval from, so it is owed whatever the interval says.
+	blank := domain.Session{PluginID: "claude", SessionID: "never", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, blank, []cache.Summary{{Turn: 1, NodeID: "n1", Text: "ターン1の要約"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !sessionSummaryOverdue(ctx, d, blank, time.Hour) {
+		t.Error("a session whose turns are described and whose own summary was never written is owed one")
+	}
+	// And a session nothing was ever stored for is not owed anything: the blank
+	// row MarkExamined leaves is a record that there was nothing to describe.
+	examined := domain.Session{PluginID: "claude", SessionID: "examined", Fingerprint: "fp1"}
+	if err := d.MarkExamined(ctx, examined); err != nil {
+		t.Fatal(err)
+	}
+	if sessionSummaryOverdue(ctx, d, examined, time.Hour) {
+		t.Error("a session with nothing stored would be opened and paid for on every scan")
 	}
 }
 
@@ -361,7 +446,7 @@ func TestQueueOneSkipsWithoutParsing(t *testing.T) {
 		if err := q.Add(summary.Request{PluginID: "claude", SessionID: "s1", Prompts: []string{"doc"}}); err != nil {
 			t.Fatal(err)
 		}
-		if queued, _ := queueOne(ctx, nil, d, q, s); queued {
+		if queued, _ := queueOne(ctx, nil, d, q, s, time.Hour); queued {
 			t.Error("a session already in the queue was queued again")
 		}
 	})
@@ -374,7 +459,7 @@ func TestQueueOneSkipsWithoutParsing(t *testing.T) {
 		if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 0, Text: "the session"}}); err != nil {
 			t.Fatal(err)
 		}
-		if queued, _ := queueOne(ctx, nil, d, q, s); queued {
+		if queued, _ := queueOne(ctx, nil, d, q, s, time.Hour); queued {
 			t.Error("a session whose log has not moved since it was summarized was queued")
 		}
 	})
@@ -397,7 +482,7 @@ func TestQueueOneSkipsWithoutParsing(t *testing.T) {
 				t.Error("a session whose log grew was skipped without parsing")
 			}
 		}()
-		_, _ = queueOne(ctx, nil, d, q, grown)
+		_, _ = queueOne(ctx, nil, d, q, grown, time.Hour)
 	})
 }
 
@@ -753,7 +838,7 @@ func TestShowActsOnAQueuedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	// queueOne says false here (already queued), which must not end it.
-	if queued, _ := queueOne(ctx, nil, d, q, s); queued {
+	if queued, _ := queueOne(ctx, nil, d, q, s, time.Hour); queued {
 		t.Fatal("a queued session was queued again")
 	}
 	r, ok := q.Find("claude", "s1")
@@ -814,13 +899,13 @@ func TestNoticingThereIsNothingToAddKeepsTheSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if worthOpening(ctx, d, q, grown) {
+	if worthOpening(ctx, d, q, grown, time.Hour) {
 		t.Error("the marker did not record the version the log moved to")
 	}
 	// A session that never had one still gets the blank record.
 	fresh := domain.Session{PluginID: "claude", SessionID: "s2", Fingerprint: "fp1"}
 	markNothingToSummarize(ctx, d, fresh)
-	if worthOpening(ctx, d, q, fresh) {
+	if worthOpening(ctx, d, q, fresh, time.Hour) {
 		t.Error("a session with nothing to summarize would be opened again")
 	}
 	if sums, _, _ := storedSummaries(ctx, d, fresh, nil, 0); len(sums) != 0 {
@@ -877,7 +962,7 @@ func TestASessionWaitingOnAnOpenTurnIsNotHeldOffForAnHour(t *testing.T) {
 	// summarized once it ended — see
 	// TestATurnInsideTheSettleWindowIsNotWrittenOff. The price is a parse per
 	// scan while the turn is open.
-	if !worthOpening(ctx, d, q, open) {
+	if !worthOpening(ctx, d, q, open, time.Hour) {
 		t.Error("the session was written off while its turn was still being written")
 	}
 	// The turn finishes. Nothing holds the session back now — least of all a
@@ -988,7 +1073,7 @@ func TestATurnInsideTheSettleWindowIsNotWrittenOff(t *testing.T) {
 	if reqs, _ := q.List(); len(reqs) != 0 {
 		t.Fatalf("a turn that ended seconds ago was queued: %v", reqs)
 	}
-	if !worthOpening(ctx, d, q, s) {
+	if !worthOpening(ctx, d, q, s, time.Hour) {
 		t.Fatal("the session was written off as answered — nothing will look at it again, and the turn is lost")
 	}
 	// Once the window passes, the same session queues that turn.

@@ -81,7 +81,7 @@ func EnqueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		} else {
 			s, hi = cand[hi], hi-1
 		}
-		if _, didOpen := queueOne(ctx, a, db, q, s); didOpen {
+		if _, didOpen := queueOne(ctx, a, db, q, s, time.Duration(cfg.Summary.SessionInterval)); didOpen {
 			opened, oldEnd = opened+1, !oldEnd
 		}
 	}
@@ -204,7 +204,7 @@ func pickForSummary(sessions []domain.Session) []domain.Session {
 // and every few seconds in the TUI — so the sessions that plainly need nothing
 // have to be recognized without a parse, or that answer costs a parse of
 // everything on the machine every time.
-func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.Session) bool {
+func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.Session, sessionEvery time.Duration) bool {
 	if _, queued := q.Find(s.PluginID, s.SessionID); queued {
 		return false // already waiting; the request holds the prompt already
 	}
@@ -217,13 +217,44 @@ func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.
 	// Turn 0 carries the fingerprint the session's summaries were made from, and
 	// comes back without needing the turns (it is the one row not matched on a
 	// node). Same fingerprint means the log has not moved since, so there is
-	// nothing new to summarize.
+	// nothing new to summarize — except the session's own summary, which a run
+	// can owe without the log having anything to do with it.
 	if stored := db.Summaries(ctx, s, nil); len(stored) > 0 {
 		if sum, ok := stored[0]; ok && sum.Fingerprint == s.Fingerprint {
-			return false
+			return sessionSummaryOverdue(ctx, db, s, sessionEvery)
 		}
 	}
 	return true
+}
+
+// sessionSummaryOverdue reports whether the turns have left the session's own
+// summary behind and the interval that paces it has since elapsed.
+//
+// It is the one thing a matching fingerprint does not settle. A run that
+// describes a new turn while summary.session_interval has not elapsed stores the
+// turn, leaves turn 0 alone (storeSessionSummary), and records the version
+// through MarkExamined all the same. The version is what worthOpening reads, so
+// the session is not opened again until its log moves — and the log of a
+// conversation that has ended never moves. Without this the deferral is
+// permanent: the reader is left with a session summary that predates turns
+// described beside it, and nothing will ever remake it.
+//
+// Both times come from row lookups, which is what this may cost: it is asked on
+// every scan, of every session, before anything is parsed.
+func sessionSummaryOverdue(ctx context.Context, db *cache.DB, s domain.Session, every time.Duration) bool {
+	newest, any := db.SummarizedAt(ctx, s)
+	if !any {
+		// Nothing is stored but the blank record of a session that was examined and
+		// had nothing to describe. There is no session summary to owe.
+		return false
+	}
+	when, ok := db.SessionSummarizedAt(ctx, s)
+	if !ok {
+		// The turns are described and the session is not, which is what a failed
+		// session-summary call leaves behind. It is owed whatever the interval says.
+		return true
+	}
+	return when.Before(newest) && time.Since(when) >= every
 }
 
 // queueOne writes the request for one session. It reports whether it wrote one,
@@ -234,8 +265,8 @@ func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.
 // program that already has the plugin running — the worker would otherwise have
 // to launch plugins of its own, and the two could disagree about what the turns
 // are.
-func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s domain.Session) (queued, opened bool) {
-	if !worthOpening(ctx, db, q, s) {
+func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s domain.Session, sessionEvery time.Duration) (queued, opened bool) {
+	if !worthOpening(ctx, db, q, s, sessionEvery) {
 		return false, false
 	}
 	conv, err := a.Conversation(ctx, s)
@@ -271,6 +302,14 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 		// turn.
 		if open {
 			return false, true
+		}
+		// The turns are all described, but the session's own summary can still be
+		// owed — see sessionSummaryOverdue. It is asked for with a request that
+		// carries no turn prompts at all: runRequest walks an empty prompt list and
+		// goes straight to the session summary, which is the whole point of it.
+		if sessionSummaryOverdue(ctx, db, s, sessionEvery) {
+			r := summary.Request{PluginID: s.PluginID, SessionID: s.SessionID, Queued: time.Now(), Fingerprint: s.Fingerprint, Nodes: nodes}
+			return q.Add(r) == nil, true
 		}
 		return markNothingToSummarize(ctx, db, s), true
 	}
@@ -335,7 +374,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// and those want opposite things here: a session waiting its turn behind
 	// sixty others is exactly the one someone just asked to read. What decides
 	// is whether a request exists afterwards, not whether this call created it.
-	_, _ = queueOne(ctx, a, db, q, s)
+	_, _ = queueOne(ctx, a, db, q, s, time.Duration(cfg.Summary.SessionInterval))
 	r, ok := q.Find(s.PluginID, s.SessionID)
 	if !ok {
 		return false
@@ -381,6 +420,21 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	// has failed, and the next scan queues it afresh. That costs a backoff, not a
 	// summary.
 	_ = q.Done(r)
+	if len(r.Prompts) == 0 {
+		// The turns are all described and only the session's own summary was left
+		// behind, so there is nothing to ask about the turns — see queueOne.
+		answered := s
+		if r.Fingerprint != "" {
+			answered.Fingerprint = r.Fingerprint
+		}
+		fmt.Fprintln(os.Stderr, "agentcarto: bringing this session's own summary up to date…")
+		if _, wrote := storeSessionSummary(ctx, db, gen, answered, r.Nodes, summary.Result{}, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr); !wrote {
+			_ = q.Retry(r, time.Now())
+			return false
+		}
+		_ = db.MarkExamined(ctx, answered)
+		return true
+	}
 	fmt.Fprintf(os.Stderr, "agentcarto: summarizing %d turns of this session (about half a minute)…\n", turnsIn(r))
 	out, err := gen.Generate(ctx, summary.System(cfg.Summary.Language), r.Prompts[0])
 	if err == nil {

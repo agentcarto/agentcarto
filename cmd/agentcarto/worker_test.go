@@ -279,7 +279,7 @@ func TestAnAnswerWithNoTurnStillRecordsTheVersion(t *testing.T) {
 
 	runRequest(ctx, &log, q, d, g, r, time.Hour, "")
 
-	if worthOpening(ctx, d, q, s) {
+	if worthOpening(ctx, d, q, s, time.Hour) {
 		t.Error("the session would be opened, requested and paid for again on the next scan")
 	}
 	// And the empty answer was not mistaken for a summary.
@@ -331,7 +331,7 @@ func TestAHeldRequestDoesNotRecordTheVersionAsAnswered(t *testing.T) {
 	}
 	// But the version is not recorded, so the next scan opens the session and
 	// finds turn 3 waiting.
-	if !worthOpening(ctx, d, q, s) {
+	if !worthOpening(ctx, d, q, s, time.Hour) {
 		t.Fatal("the held request recorded the version as answered — turn 3 is lost")
 	}
 	// And no session summary was written from a run that did not see turn 3.
@@ -461,5 +461,100 @@ func TestTheRemadeSessionSummaryBringsItsOwnHeadline(t *testing.T) {
 	}
 	if got[0].Text != "ターン要約から作り直した要約" {
 		t.Errorf("summary=%q", got[0].Text)
+	}
+}
+
+// A request that carries no turn prompts asks for the session summary alone —
+// what queueOne writes for a session whose turns are all described and whose
+// turn 0 an interval left behind. The worker has to reach it: the loop it walks
+// first is empty, and everything that matters is after it.
+func TestARequestWithNoPromptsRemakesTheSessionSummary(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "owed", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, s, []cache.Summary{
+		{Turn: 0, Text: "取り残されたセッション要約", Model: "m"},
+		{Turn: 1, NodeID: "n1", Text: "ターン1の要約", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := summary.Request{
+		PluginID: "claude", SessionID: "owed", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeGenerator{out: "@@SESSION\nターン要約から作り直した要約\n"}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, 0, "")
+
+	if got := d.Summaries(ctx, s, r.Nodes)[0].Text; got != "ターン要約から作り直した要約" {
+		t.Errorf("the session summary was not remade: %q\n%s", got, log.String())
+	}
+	if g.calls != 1 {
+		t.Errorf("one call makes a session summary, got %d", g.calls)
+	}
+	if _, still := q.Find("claude", "owed"); still {
+		t.Error("the answered request stayed in the queue and would be paid for again")
+	}
+}
+
+// The same request, unanswered, goes back in the queue rather than being
+// finished. worthOpening asks for it again the moment a scan runs, so finishing
+// it here would put a failing call on a loop that costs money every few seconds;
+// the queue's backoff is what paces a retry.
+func TestASessionSummaryThatCouldNotBeMadeGoesBackInTheQueue(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "owed", Fingerprint: "fp1"}
+	if err := d.PutSummaries(ctx, s, []cache.Summary{
+		{Turn: 0, Text: "取り残されたセッション要約", Model: "m"},
+		{Turn: 1, NodeID: "n1", Text: "ターン1の要約", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := summary.Request{
+		PluginID: "claude", SessionID: "owed", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	// An answer with nothing in it: the model said nothing usable about the session.
+	g := &fakeGenerator{out: ""}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, 0, "")
+
+	back, still := q.Find("claude", "owed")
+	if !still {
+		t.Fatalf("the request was dropped, so nothing will ask for this summary again: %s", log.String())
+	}
+	if back.Attempts != 1 {
+		t.Errorf("the failure was not recorded: attempts=%d", back.Attempts)
+	}
+	// What was already paid for stays as it was.
+	if got := d.Summaries(ctx, s, r.Nodes)[0].Text; got != "取り残されたセッション要約" {
+		t.Errorf("the stored session summary was lost: %q", got)
 	}
 }

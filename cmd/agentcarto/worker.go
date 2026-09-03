@@ -196,8 +196,19 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		_ = q.Done(r)
 		return true
 	}
-	if storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, language, log) {
+	spent, wrote := storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, language, log)
+	if spent {
 		calls++
+	}
+	// A request with no turn prompts existed only to remake a session summary that
+	// had been left behind (sessionSummaryOverdue). Finishing it unwritten would
+	// have the next scan ask for the same thing within seconds, and a call that
+	// keeps failing would be paid for at that rate; the queue's backoff is what
+	// paces a retry.
+	if !wrote && len(r.Prompts) == 0 {
+		fmt.Fprintf(log, "%s %s/%s: the session summary is still owed\n", stamp(), r.PluginID, short8(r.SessionID))
+		_ = q.Retry(r, time.Now())
+		return true
 	}
 	// Recording the version matters most when the answer held nothing. Parse
 	// drops a turn the model declined to describe rather than failing — an answer
