@@ -251,6 +251,24 @@ func TestEventBlockPrototypeTaskAndPseudoUser(t *testing.T) {
 	}
 }
 
+func TestGuardianReviewRiskColors(t *testing.T) {
+	for _, tc := range []struct {
+		risk, style string
+	}{
+		{"Low", "task-low"}, {"Medium", "task-medium"}, {"High", "task-high"},
+	} {
+		b := eventBlock(domain.Event{Kind: domain.EventTask, RawType: "guardian_review",
+			ToolArg: "Auto review [deny]", ToolDetail: "Risk: " + tc.risk})
+		if b.Style != tc.style {
+			t.Errorf("risk %s style=%q want %q", tc.risk, b.Style, tc.style)
+		}
+	}
+	unknown := eventBlock(domain.Event{Kind: domain.EventTask, RawType: "guardian_review", ToolDetail: "pending"})
+	if unknown.Style != "task" {
+		t.Errorf("unknown risk style=%q", unknown.Style)
+	}
+}
+
 func TestToolCallLabelBodyPrototypeBashShell(t *testing.T) {
 	fg := eventBlock(domain.Event{Kind: domain.EventToolCall, ToolName: "Bash", ToolArg: "$ ls -la echo done", ToolDetail: "ls -la\necho done"})
 	if !strings.Contains(fg.Label, "Bash") || !strings.Contains(fg.Label, "$ ls -la echo done") || strings.Contains(fg.Label, "&") {

@@ -3205,7 +3205,18 @@ func eventBlock(e domain.Event) turnBlock {
 		if e.ToolDetail != "" {
 			body = strings.Split(e.ToolDetail, "\n")
 		}
-		return turnBlock{Sym: "⤤", Style: "task", Label: strings.TrimSpace("TASK " + e.ToolArg), Body: body}
+		style := "task"
+		if e.RawType == "guardian_review" {
+			switch {
+			case strings.Contains(e.ToolDetail, "Risk: High"):
+				style = "task-high"
+			case strings.Contains(e.ToolDetail, "Risk: Medium"):
+				style = "task-medium"
+			case strings.Contains(e.ToolDetail, "Risk: Low"):
+				style = "task-low"
+			}
+		}
+		return turnBlock{Sym: "⤤", Style: style, Label: strings.TrimSpace("TASK " + e.ToolArg), Body: body}
 	case domain.EventAssistant:
 		return turnBlock{Sym: "●", Style: "assistant", Label: "ASSISTANT", Body: lines, Open: true}
 	case domain.EventReasoning:
@@ -3447,6 +3458,12 @@ func turnStyle(style string) (lipgloss.Color, bool) {
 		return roleColor("user"), true
 	case "assistant":
 		return roleColor("assistant"), true
+	case "task-high":
+		return lipgloss.Color("1"), true
+	case "task-medium":
+		return lipgloss.Color("3"), true
+	case "task-low":
+		return lipgloss.Color("2"), true
 	case "tool":
 		return roleColor("tool"), false
 	case "meta":
