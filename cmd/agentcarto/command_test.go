@@ -38,10 +38,32 @@ type scanStub struct {
 	sessions []domain.Session
 	convs    map[string]domain.Conversation
 	dead     map[string]string
+	internal []domain.Session
 }
 
-func (s scanStub) Scan(context.Context, plugin.ScanInput) (plugin.ScanOutput, error) {
+func (s scanStub) Scan(_ context.Context, in plugin.ScanInput) (plugin.ScanOutput, error) {
+	if in.IncludeInternal {
+		return plugin.ScanOutput{Sessions: append(append([]domain.Session(nil), s.sessions...), s.internal...)}, nil
+	}
 	return plugin.ScanOutput{Sessions: s.sessions, Dead: s.dead}, nil
+}
+
+func TestShowEmbeddedSessionByID(t *testing.T) {
+	s := domain.Session{PluginID: "codex", SessionID: "review-123", Unresumable: true,
+		SourceRef: domain.SessionRef{Source: "/logs/review.jsonl"}}
+	c := domain.NewConversation([]domain.ConvNode{{ID: "u", Events: talk("review request", "allow")}})
+	a := app.Build(config.Config{}, []plugin.Instance{{ID: "codex",
+		Impl: scanStub{internal: []domain.Session{s}, convs: map[string]domain.Conversation{s.SourceRef.Source: c}}}})
+	for _, args := range [][]string{{"review-123", "--all"}, {"--source", s.SourceRef.Source, "--all"}} {
+		var out bytes.Buffer
+		showCmd(context.Background(), a, a.Config, nil, args, &out)
+		if !strings.Contains(out.String(), "review request") || !strings.Contains(out.String(), "allow") {
+			t.Fatalf("embedded session not rendered: %s", out.String())
+		}
+	}
+	if got := scanSessions(context.Background(), a, a.Config, nil); len(got) != 0 {
+		t.Fatalf("lookup contaminated normal listing: %+v", got)
+	}
 }
 
 func TestScanSessionsExcludesPreviouslyCachedLog(t *testing.T) {

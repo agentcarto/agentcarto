@@ -73,6 +73,19 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 		s, err = app.ResolveSession(sessions, ref)
 	}
 	if err != nil {
+		// Embedded sessions are deliberately absent from listings. Resolve them
+		// on demand without saving the expanded scan or enqueueing its summaries.
+		snap := a.Catalog.ScanIncludingInternal(ctx)
+		if len(snap.Errors) > 0 {
+			fail(fmt.Errorf("show: internal session lookup: %v", snap.Errors))
+		}
+		if *source != "" {
+			s, err = app.ResolveSource(snap.Sessions, *source)
+		} else {
+			s, err = app.ResolveSession(snap.Sessions, ref)
+		}
+	}
+	if err != nil {
 		fail(fmt.Errorf("show: %w", err))
 	}
 	conv, err := a.Conversation(ctx, s)

@@ -19,6 +19,16 @@ type Catalog struct{ Plugins []plugin.Instance }
 const scanTimeout = 5 * time.Minute
 
 func (c Catalog) Scan(ctx context.Context, warm []domain.Session, deadWarm map[string]string) domain.Snapshot {
+	return c.scan(ctx, warm, deadWarm, false)
+}
+
+// ScanIncludingInternal is for explicit lookup of sessions embedded in another
+// session. Its result must not replace the regular catalog or its cache.
+func (c Catalog) ScanIncludingInternal(ctx context.Context) domain.Snapshot {
+	return c.scan(ctx, nil, nil, true)
+}
+
+func (c Catalog) scan(ctx context.Context, warm []domain.Session, deadWarm map[string]string, includeInternal bool) domain.Snapshot {
 	ctx, cancel := context.WithTimeout(ctx, scanTimeout)
 	defer cancel()
 	// The previous results (warm/dead) are handed to each plugin in bulk; the
@@ -29,7 +39,7 @@ func (c Catalog) Scan(ctx context.Context, warm []domain.Session, deadWarm map[s
 	// entries for its own paths.
 	warmByPlugin := groupWarmByPlugin(warm)
 	snap := domain.Snapshot{Dead: map[string]string{}}
-	for r := range c.scanAll(ctx, warmByPlugin, deadWarm) {
+	for r := range c.scanAll(ctx, warmByPlugin, deadWarm, includeInternal) {
 		snap.Sessions = append(snap.Sessions, r.sessions...)
 		for k, v := range r.dead {
 			snap.Dead[k] = v
@@ -65,7 +75,7 @@ type scanResult struct {
 
 // scanAll runs every Scanner plugin concurrently and returns a channel that
 // delivers one result per plugin; it is closed once all plugins have finished.
-func (c Catalog) scanAll(ctx context.Context, warmByPlugin map[string][]domain.Session, deadWarm map[string]string) <-chan scanResult {
+func (c Catalog) scanAll(ctx context.Context, warmByPlugin map[string][]domain.Session, deadWarm map[string]string, includeInternal bool) <-chan scanResult {
 	ch := make(chan scanResult, len(c.Plugins))
 	var wg sync.WaitGroup
 	for _, p := range c.Plugins {
@@ -81,7 +91,7 @@ func (c Catalog) scanAll(ctx context.Context, warmByPlugin map[string][]domain.S
 					ch <- scanResult{err: domain.PluginError{PluginID: p.ID, Reason: "plugin panic", Err: fmt.Errorf("%v", v)}}
 				}
 			}()
-			out, e := sc.Scan(ctx, plugin.ScanInput{Warm: warmByPlugin[p.ID], Dead: deadWarm})
+			out, e := sc.Scan(ctx, plugin.ScanInput{Warm: warmByPlugin[p.ID], Dead: deadWarm, IncludeInternal: includeInternal})
 			if e != nil {
 				ch <- scanResult{err: domain.PluginError{PluginID: p.ID, Reason: "scan failed", Err: e}}
 				return
