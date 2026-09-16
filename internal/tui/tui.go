@@ -266,7 +266,7 @@ func (m Model) scan() tea.Cmd {
 		if m.cache != nil {
 			store = m.cache
 			if warm, e := m.cache.Load(ctx); e == nil {
-				sessions = app.MergeDeletedLogs(sessions, warm, scanSucceeded(m.app, snap))
+				sessions = app.MergeDeletedLogs(sessions, warm, scanSucceeded(m.app, snap), snap.Dead)
 			}
 		}
 		parents := m.sessionParents

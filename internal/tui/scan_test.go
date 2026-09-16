@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,11 +11,43 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/agentcarto/agentcarto/internal/app"
+	"github.com/agentcarto/agentcarto/internal/cache"
 	"github.com/agentcarto/agentcarto/internal/config"
 	"github.com/agentcarto/core/domain"
 	"github.com/agentcarto/core/plugin"
 	"github.com/agentcarto/plugin-claude"
 )
+
+type excludedLogScanner struct{ source string }
+
+func (s excludedLogScanner) Scan(context.Context, plugin.ScanInput) (plugin.ScanOutput, error) {
+	return plugin.ScanOutput{Dead: map[string]string{s.source: "fp"}}, nil
+}
+
+func TestScanDoesNotRestoreExcludedCachedLog(t *testing.T) {
+	ctx := context.Background()
+	db, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	review := domain.Session{PluginID: "codex", SessionID: "review", UpdatedAt: time.Now(),
+		SourceRef: domain.SessionRef{Source: "/logs/review.jsonl"}}
+	if err := db.Save(ctx, []domain.Session{review}); err != nil {
+		t.Fatal(err)
+	}
+	a := app.Build(config.Config{}, []plugin.Instance{{ID: "codex",
+		Impl: excludedLogScanner{source: review.SourceRef.Source}}})
+	m := Model{app: a, cache: db, sessions: []domain.Session{review}}
+	for _, incremental := range []bool{false, true} {
+		m.scanned = incremental
+		sm := m.scan()().(scanMsg)
+		if len(sm.sessions) != 0 {
+			t.Fatalf("incremental=%v restored excluded log: %+v", incremental, sm.sessions)
+		}
+		m.sessions, m.dead = sm.sessions, sm.snap.Dead
+	}
+}
 
 // The first scan right after startup does a full reparse without using the warm (cache), while later
 // periodic scans reuse the warm differentially. Both behaviors are confirmed by a stale warm title
@@ -139,7 +172,7 @@ func TestScanMsgSeparatesWhatWasSeenFromWhatIsShown(t *testing.T) {
 		SourceRef: domain.SessionRef{Source: "/logs/gone.jsonl"}}
 
 	snap := domain.Snapshot{Sessions: []domain.Session{seen}}
-	shown := app.MergeDeletedLogs(snap.Sessions, []domain.Session{seen, gone}, map[string]bool{"claude": true})
+	shown := app.MergeDeletedLogs(snap.Sessions, []domain.Session{seen, gone}, map[string]bool{"claude": true}, snap.Dead)
 	msg := scanMsg{snap: snap, sessions: shown}
 
 	if len(msg.snap.Sessions) != 1 || msg.snap.Sessions[0].SessionID != "alive" {

@@ -37,10 +37,32 @@ func absPath(slash string) string {
 type scanStub struct {
 	sessions []domain.Session
 	convs    map[string]domain.Conversation
+	dead     map[string]string
 }
 
 func (s scanStub) Scan(context.Context, plugin.ScanInput) (plugin.ScanOutput, error) {
-	return plugin.ScanOutput{Sessions: s.sessions}, nil
+	return plugin.ScanOutput{Sessions: s.sessions, Dead: s.dead}, nil
+}
+
+func TestScanSessionsExcludesPreviouslyCachedLog(t *testing.T) {
+	ctx := context.Background()
+	db, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	review := domain.Session{PluginID: "codex", SessionID: "review", UpdatedAt: time.Now(),
+		SourceRef: domain.SessionRef{Source: "/logs/review.jsonl"}}
+	if err := db.Save(ctx, []domain.Session{review}); err != nil {
+		t.Fatal(err)
+	}
+	a := app.Build(config.Config{}, []plugin.Instance{{ID: "codex",
+		Impl: scanStub{dead: map[string]string{review.SourceRef.Source: "fp"}}}})
+	for i := 0; i < 2; i++ {
+		if got := scanSessions(ctx, a, a.Config, db); len(got) != 0 {
+			t.Fatalf("scan %d restored excluded log: %+v", i, got)
+		}
+	}
 }
 
 func (s scanStub) LoadConversation(_ context.Context, ref domain.SessionRef) (*domain.Conversation, error) {

@@ -97,7 +97,7 @@ func TestMergeDeletedLogs(t *testing.T) {
 		{PluginID: "claude", SessionID: "nosource"},
 	}
 	// codex did not scan successfully, so nothing of its is called deleted.
-	out := MergeDeletedLogs(scanned, cached, map[string]bool{"claude": true, "codex": false})
+	out := MergeDeletedLogs(scanned, cached, map[string]bool{"claude": true, "codex": false}, nil)
 	if len(out) != 2 {
 		t.Fatalf("sessions=%d want 2: %+v", len(out), out)
 	}
@@ -122,11 +122,30 @@ func TestMergeDeletedLogsIgnoresAFailedPlugin(t *testing.T) {
 		{PluginID: "claude", SessionID: "a", SourceRef: domain.SessionRef{Source: "/logs/a.jsonl"}},
 		{PluginID: "claude", SessionID: "b", SourceRef: domain.SessionRef{Source: "/logs/b.jsonl"}},
 	}
-	if out := MergeDeletedLogs(nil, cached, map[string]bool{"claude": false}); len(out) != 0 {
+	if out := MergeDeletedLogs(nil, cached, map[string]bool{"claude": false}, nil); len(out) != 0 {
 		t.Errorf("a failed scan should add nothing: %+v", out)
 	}
-	if out := MergeDeletedLogs(nil, cached, map[string]bool{"claude": true}); len(out) != 2 {
+	if out := MergeDeletedLogs(nil, cached, map[string]bool{"claude": true}, nil); len(out) != 2 {
 		t.Errorf("a successful scan that found nothing means both logs are gone: %+v", out)
+	}
+}
+
+func TestMergeDeletedLogsDoesNotRestoreExcludedLogs(t *testing.T) {
+	review := domain.Session{PluginID: "codex", SessionID: "review",
+		SourceRef: domain.SessionRef{Source: "/logs/review.jsonl"}}
+	gone := domain.Session{PluginID: "codex", SessionID: "gone",
+		SourceRef: domain.SessionRef{Source: "/logs/gone.jsonl"}}
+	cached := []domain.Session{review, gone}
+	successful := map[string]bool{"codex": true}
+	dead := map[string]string{review.SourceRef.Source: "current-fingerprint"}
+	got := MergeDeletedLogs(nil, cached, successful, dead)
+	if len(got) != 1 || got[0].SessionID != "gone" || !got[0].LogDeleted {
+		t.Fatalf("excluded review restored or deleted log lost: %+v", got)
+	}
+	// An orphaned review can become visible again in a later scan.
+	got = MergeDeletedLogs([]domain.Session{review}, cached, successful, nil)
+	if len(got) != 2 || got[0].LogDeleted || got[0].SessionID != "review" {
+		t.Fatalf("rescanned review should be live: %+v", got)
 	}
 }
 

@@ -394,7 +394,7 @@ func scanSessions(ctx context.Context, a *app.App, c config.Config, db *cache.DB
 	// The cache is asked what the scan could not find. A log that was deleted took
 	// its session out of every listing until now, though what it takes to read it
 	// was here all along.
-	sessions := app.MergeDeletedLogs(a.MarkEmptyForks(ctx, snap.Sessions), warm, successful)
+	sessions := app.MergeDeletedLogs(a.MarkEmptyForks(ctx, snap.Sessions), warm, successful, snap.Dead)
 	// Every command that lists sessions feeds the summary queue, so that a machine
 	// agentcarto is only ever run from the command line on gets summaries at all.
 	// Hanging this on the TUI alone left them at whatever the TUI had happened to

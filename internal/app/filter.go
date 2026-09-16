@@ -85,14 +85,18 @@ func UnderDir(path, dir string) bool {
 // A session is only called deleted when its plugin scanned successfully. A
 // plugin that crashed or was misconfigured finds nothing either, and marking
 // every one of its sessions as deleted would turn one bad start-up into a wall
-// of wrong answers.
-func MergeDeletedLogs(scanned, cached []domain.Session, successful map[string]bool) []domain.Session {
+// of wrong answers. dead must be the current scan's negative cache: these logs
+// were examined and excluded, rather than deleted, so they must not reappear.
+func MergeDeletedLogs(scanned, cached []domain.Session, successful map[string]bool, dead map[string]string) []domain.Session {
 	found := make(map[string]bool, len(scanned))
 	for _, s := range scanned {
 		found[s.SourceRef.Source] = true
 	}
 	out := scanned
 	for _, s := range cached {
+		if _, excluded := dead[s.SourceRef.Source]; excluded {
+			continue
+		}
 		if s.SourceRef.Source == "" || found[s.SourceRef.Source] || !successful[s.PluginID] {
 			continue
 		}
