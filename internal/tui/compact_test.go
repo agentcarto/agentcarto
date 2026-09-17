@@ -91,8 +91,8 @@ func TestCompactBoundaryKeepsForksReachable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			parent := domain.Session{PluginID: "codex", SessionID: "parent"}
 			children := []domain.Session{
-				{PluginID: "codex", SessionID: "child1", ParentSessionID: "parent"},
-				{PluginID: "codex", SessionID: "child2", ParentSessionID: "parent"},
+				{PluginID: "codex", SessionID: "child1", ParentSessionID: "parent", UpdatedAt: time.Unix(1, 0)},
+				{PluginID: "codex", SessionID: "child2", ParentSessionID: "parent", UpdatedAt: time.Unix(2, 0)},
 			}
 			var nodes []domain.ConvNode
 			path := []string{}
@@ -147,7 +147,7 @@ func TestCompactBoundaryKeepsForksReachable(t *testing.T) {
 			if turns != wantTurns || len(branches) != 2 {
 				t.Fatalf("turns=%d want %d; forks=%d want 2 path=%v rows=%v", turns, wantTurns, len(branches), m.currentDetailPath(), m.detailRows)
 			}
-			if branches[0].Root != "child1" || branches[1].Root != "child2" {
+			if branches[0].Root != "child2" || branches[1].Root != "child1" {
 				t.Fatalf("unexpected sibling order: %v", branches)
 			}
 			if branches[0].LastBranch || !branches[1].LastBranch {

@@ -2814,6 +2814,53 @@ func (m *Model) setDetailPath(path []string) {
 	m.rebuildDetailRows(path)
 }
 
+// forkBranchRanks uses the same subtree-recency order as the unfiltered session
+// list. Rewind rows have no session counterpart and keep their original slots.
+func (m Model) forkBranchRanks() map[string]int {
+	if len(m.detail.ForkRoots) == 0 {
+		return nil
+	}
+	forest := Model{sessions: m.sessions, sessionParents: m.sessionParents}
+	cand := make([]int, len(m.sessions))
+	for i := range cand {
+		cand[i] = i
+	}
+	sort.SliceStable(cand, func(i, j int) bool {
+		return m.sessions[cand[i]].UpdatedAt.After(m.sessions[cand[j]].UpdatedAt)
+	})
+	forest.appendForest(cand)
+	sessionRanks := make(map[domain.SessionKey]int, len(cand))
+	for i, row := range forest.rows {
+		sessionRanks[m.sessions[row.SessIdx].Key()] = i
+	}
+	ranks := make(map[string]int)
+	for _, root := range m.detail.ForkRoots {
+		if s, ok := m.forkBranchSession(root); ok {
+			if rank, listed := sessionRanks[s.Key()]; listed {
+				ranks[root] = rank
+			}
+		}
+	}
+	return ranks
+}
+
+func orderForkBranches(roots []string, ranks map[string]int) {
+	var forks []string
+	for _, root := range roots {
+		if _, ok := ranks[root]; ok {
+			forks = append(forks, root)
+		}
+	}
+	sort.SliceStable(forks, func(i, j int) bool { return ranks[forks[i]] < ranks[forks[j]] })
+	next := 0
+	for i, root := range roots {
+		if _, ok := ranks[root]; ok {
+			roots[i] = forks[next]
+			next++
+		}
+	}
+}
+
 // rebuildDetailRows builds the displayed turns (detailTurns) and rows (detailRows)
 // from path, newest first. Which turns are shown, their numbering and their »
 // badge come from transcript.Turns, so the list, an export and the CLI all agree
@@ -2852,6 +2899,7 @@ func (m *Model) rebuildDetailRows(path []string) {
 	// Compact-only turns have no body to display, but can still be fork points.
 	// Walk the unfiltered path so their branches stay at the original boundary.
 	rawTurns := convlogic.TurnsOfPath(*m.detail, path)
+	forkRanks := m.forkBranchRanks()
 	for i := len(rawTurns) - 1; i >= 0; i-- { // newest first
 		nodes := rawTurns[i]
 		index := -1
@@ -2863,6 +2911,7 @@ func (m *Model) rebuildDetailRows(path []string) {
 			visible--
 		}
 		_, subs := convlogic.TurnBranches(*m.detail, nodes, active)
+		orderForkBranches(subs, forkRanks)
 		for j, root := range subs {
 			m.detailRows = append(m.detailRows, detailRow{Kind: "branch", Turn: nodes, TurnIndex: index, Root: root, LastBranch: j == len(subs)-1})
 		}

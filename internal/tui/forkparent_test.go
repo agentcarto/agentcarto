@@ -315,3 +315,25 @@ func TestBackFromManualBranchKeepsFocusedFork(t *testing.T) {
 		t.Fatalf("back showed another session's conversation: %v", m.detailTurns)
 	}
 }
+
+func TestForkBranchOrderUsesDescendantsAndKeepsRewindsInPlace(t *testing.T) {
+	parent := domain.Session{PluginID: "codex", SessionID: "parent"}
+	older := domain.Session{PluginID: "codex", SessionID: "older", ParentSessionID: "parent", UpdatedAt: time.Unix(1, 0)}
+	newer := domain.Session{PluginID: "codex", SessionID: "newer", ParentSessionID: "parent", UpdatedAt: time.Unix(2, 0)}
+	grandchild := domain.Session{PluginID: "codex", SessionID: "grandchild", ParentSessionID: "older", UpdatedAt: time.Unix(3, 0)}
+	c := domain.NewConversation([]domain.ConvNode{{ID: "older"}, {ID: "newer"}})
+	c.ForkRoots = []string{"older", "newer"}
+	m := Model{detail: &c, detailSession: &parent, sessions: []domain.Session{parent, newer, older, grandchild},
+		detailOrigins: map[string]app.NodeOrigin{"older": {Session: older}, "newer": {Session: newer}}}
+	roots := []string{"newer", "rewind", "older", "unlisted"}
+	orderForkBranches(roots, m.forkBranchRanks())
+	if got := strings.Join(roots, ","); got != "older,rewind,newer,unlisted" {
+		t.Fatalf("subtree order or rewind positions changed: %s", got)
+	}
+	// A logical parent can differ from the session that created the fork.
+	m.sessionParents = map[domain.SessionKey]string{grandchild.Key(): "newer"}
+	orderForkBranches(roots, m.forkBranchRanks())
+	if got := strings.Join(roots, ","); got != "newer,rewind,older,unlisted" {
+		t.Fatalf("logical session tree was ignored: %s", got)
+	}
+}
