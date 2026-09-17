@@ -388,6 +388,66 @@ func TestNestedForkOmitsInheritedTurns(t *testing.T) {
 	}
 }
 
+func TestParentJumpHighlightsForkPoint(t *testing.T) {
+	c := forkConversation()
+	parent := domain.Session{PluginID: "codex", SessionID: "parent"}
+	child := domain.Session{PluginID: "codex", SessionID: "child", ParentSessionID: "parent"}
+	origins := map[string]app.NodeOrigin{
+		"u1": {Session: parent}, "a1": {Session: parent},
+		"p2": {Session: parent, ActiveLeaf: true},
+		"f1": {Session: child}, "f2": {Session: child, ActiveLeaf: true},
+	}
+	// Move the fork point far enough back to require scrolling when selected.
+	last := "p2"
+	for i := 0; i < 15; i++ {
+		id := fmt.Sprintf("later%d", i)
+		c.Nodes[id] = domain.ConvNode{ID: id, Parent: last, Events: []domain.Event{{Kind: domain.EventUser, Text: id, Prompt: id}}}
+		c.Children[last] = []string{id}
+		last = id
+	}
+	c.ActiveLeaf = last
+	origins["p2"] = app.NodeOrigin{Session: parent}
+	origins[last] = app.NodeOrigin{Session: parent, ActiveLeaf: true}
+	for _, async := range []bool{false, true} {
+		t.Run(fmt.Sprintf("async=%v", async), func(t *testing.T) {
+			m := Model{width: 140, height: 10, detailSession: &child, sessions: []domain.Session{parent, child}}
+			u, _ := m.Update(convMsg{c: &c, origins: origins, focusLeaf: "f2", reset: true})
+			m = u.(Model)
+			if async {
+				m.detailSession = &parent
+				m.detail = nil
+				m.forkBack = []domain.Session{child}
+				u, _ = m.Update(convMsg{c: &c, origins: origins, focusLeaf: last, key: parent.Key(), reset: true})
+			} else {
+				u, _ = m.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+			}
+			m = u.(Model)
+			row, ok := m.selectedDetailRow()
+			if !ok || row.Kind != "branch" || row.Root != "f1" {
+				t.Fatalf("parent did not select fork point: %+v", row)
+			}
+			if m.detailOffset == 0 || m.detailCursor < m.detailOffset || m.detailCursor >= m.detailOffset+m.detailBodyRows() {
+				t.Fatalf("fork point is outside viewport: cursor=%d offset=%d", m.detailCursor, m.detailOffset)
+			}
+			if view := stripANSI(m.detailView()); !strings.Contains(view, "↳child fork [fork point]") {
+				t.Fatalf("fork point is not marked: %s", view)
+			}
+			m.detailCursor--
+			if view := stripANSI(m.detailView()); !strings.Contains(view, "↳child fork [fork point]") {
+				t.Fatalf("moving cursor removed fork point: %s", view)
+			}
+			u, _ = m.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+			m = u.(Model)
+			if m.detailSession == nil || m.detailSession.Key() != child.Key() {
+				t.Fatal("back did not return to originating fork")
+			}
+			if strings.Contains(stripANSI(m.detailView()), "[fork point]") {
+				t.Fatal("fork point marker leaked into child")
+			}
+		})
+	}
+}
+
 func TestForkParentLabelUsesTurnBeforeFork(t *testing.T) {
 	for _, compact := range []bool{false, true} {
 		t.Run(fmt.Sprintf("compact=%v", compact), func(t *testing.T) {

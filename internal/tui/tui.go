@@ -719,6 +719,12 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 		m.setDetailPath(m.currentDetailPath())
 		if x.reset {
 			m.detailCursor = m.firstTurnRow()
+			for i, row := range m.detailRows {
+				if row.Kind == "branch" && m.isParentForkPoint(row.Root) {
+					m.detailCursor = i
+					break
+				}
+			}
 			m.detailOffset = 0
 			// The cursor no longer starts at the top — the head rows are above it —
 			// so the window has to be brought to it. Without this the first frame
@@ -2411,6 +2417,18 @@ func (m Model) summaryCredit() string {
 	return "— " + strings.Join(parts, " · ")
 }
 
+func (m Model) isParentForkPoint(root string) bool {
+	if m.detailSession == nil || len(m.forkBack) == 0 {
+		return false
+	}
+	child := m.forkBack[len(m.forkBack)-1]
+	if child.PluginID != m.detailSession.PluginID || m.sessionParentID(child) != m.detailSession.SessionID {
+		return false
+	}
+	origin, ok := m.detailOrigins[root]
+	return ok && origin.Session.Key() == child.Key()
+}
+
 // detailBranchLine renders a branch row: an alternative sub-tree (fork or rewind) the
 // cursor can descend into, with its turn/message/branch counts and lead text.
 func (m Model) detailBranchLine(rowData detailRow, selected bool, colW [9]int, modelW int) string {
@@ -2422,7 +2440,14 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool, colW [9]int, m
 	sz := len(convlogic.Subtree(*m.detail, rowData.Root))
 	nb := convlogic.BranchAltCount(*m.detail, rowData.Root)
 	indent := strings.Repeat(" ", m.detailTurnHeadlineColumn(rowData, colW, modelW))
-	label := fmt.Sprintf("%s%s %s (%dturn/%dmsg/%dbranch) %s", indent, conn, convlogic.BranchKind(*m.detail, rowData.Root), len(bt), sz, nb, convlogic.BranchLead(*m.detail, rowData.Root))
+	kind := convlogic.BranchKind(*m.detail, rowData.Root)
+	if origin, ok := m.detailOrigins[rowData.Root]; kind == "fork" && ok && origin.Session.SessionID != "" {
+		kind = "↳" + shortID(origin.Session.SessionID) + " " + kind
+	}
+	if m.isParentForkPoint(rowData.Root) {
+		kind += " [fork point]"
+	}
+	label := fmt.Sprintf("%s%s %s (%dturn/%dmsg/%dbranch) %s", indent, conn, kind, len(bt), sz, nb, convlogic.BranchLead(*m.detail, rowData.Root))
 	line := styled(clip(label, max(20, m.width-1)), lipgloss.Color("5"), selected, false)
 	if selected && lipgloss.Width(line) < m.width-1 {
 		line += styled(strings.Repeat(" ", m.width-1-lipgloss.Width(line)), "", true, false)
