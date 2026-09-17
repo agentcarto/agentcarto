@@ -2462,15 +2462,31 @@ func (m Model) forkParentLabel() string {
 	if p == nil {
 		return label + " (not loaded)"
 	}
-	if t := strings.Join(strings.Fields(p.Title), " "); t != "" {
-		label += " " + t
+	if m.detail != nil {
+		for _, frame := range m.detailPathStack {
+			if !frame.followFocus || len(frame.path) == 0 {
+				continue
+			}
+			// Read the inherited prefix at the fork, not the parent's current
+			// continuation. Compact-only boundaries are omitted by transcript.
+			prefix := *m.detail
+			prefix.ActiveLeaf = prefix.Nodes[frame.path[0]].Parent
+			turns := transcript.Turns(prefix, prefix.ActivePath())
+			if len(turns) > 0 {
+				headline := convlogic.TurnHeadline(prefix, turns[len(turns)-1].Nodes)
+				if t := strings.Join(strings.Fields(headline), " "); t != "" {
+					label += " " + t
+				}
+			}
+			break
+		}
 	}
 	return label
 }
 
 // detailForkParentLine renders the row under turn #1 that leads to the session
 // this fork was made from. It names the parent by the same ↳<id> the session
-// list uses, and adds its title so the row says which conversation it opens. A
+// list uses, and adds the turn headline immediately before the fork. A
 // parent that is not in the list is still named — knowing a fork came from
 // somewhere is worth more than hiding the row — and selecting it explains
 // itself through jumpToParent's message.

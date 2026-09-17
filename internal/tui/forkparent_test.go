@@ -73,7 +73,7 @@ func TestForkParentRowSitsUnderTheOldestTurn(t *testing.T) {
 		t.Fatalf("row above the fork-parent row is %q index=%d, want turn #1", above.Kind, above.TurnIndex)
 	}
 	view := stripANSI(m.detailView())
-	if !strings.Contains(view, "↳"+shortID("parent")+" forked from where it came from") {
+	if !strings.Contains(view, "↳"+shortID("parent")+" forked from ask") {
 		t.Fatalf("the row does not name the parent:\n%s", view)
 	}
 }
@@ -236,7 +236,7 @@ func TestForkNavigationUsesCanonicalConversationParent(t *testing.T) {
 	if !strings.Contains(view, "forked from: root") || strings.Contains(view, "forked from: root › middle") {
 		t.Fatalf("breadcrumb followed creation ancestry instead of conversation ancestry:\n%s", view)
 	}
-	if !strings.Contains(view, "↳root forked from shared history") {
+	if !strings.Contains(view, "↳root forked from ask") {
 		t.Fatalf("parent row did not name the conversation parent:\n%s", view)
 	}
 
@@ -385,5 +385,39 @@ func TestNestedForkOmitsInheritedTurns(t *testing.T) {
 	m = u.(Model)
 	if cmd != nil || m.detailSession.Key() != grandchild.Key() || len(m.detailTurns) != 2 || m.detailTurns[1][0] != "g1" {
 		t.Fatalf("return to fork restored inherited turns: session=%v turns=%v", m.detailSession, m.detailTurns)
+	}
+}
+
+func TestForkParentLabelUsesTurnBeforeFork(t *testing.T) {
+	for _, compact := range []bool{false, true} {
+		t.Run(fmt.Sprintf("compact=%v", compact), func(t *testing.T) {
+			c := forkConversation()
+			c.Nodes["u2"] = domain.ConvNode{ID: "u2", Parent: "a1", Events: []domain.Event{{Kind: domain.EventUser, Text: "question immediately before fork", Prompt: "question immediately before fork"}}}
+			c.Nodes["a2"] = domain.ConvNode{ID: "a2", Parent: "u2", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer immediately before fork"}}}
+			attach := "a2"
+			if compact {
+				c.Nodes["compact"] = domain.ConvNode{ID: "compact", Parent: attach, Events: []domain.Event{{Kind: domain.EventUser, Text: "internal summary", RawType: domain.RawCompactSummary}}}
+				attach = "compact"
+			}
+			node := c.Nodes["f1"]
+			node.Parent = attach
+			c.Nodes["f1"] = node
+			parent := domain.Session{PluginID: "codex", SessionID: "parent", Title: "first question"}
+			child := domain.Session{PluginID: "codex", SessionID: "child", ParentSessionID: "parent"}
+			m := Model{detail: &c, detailSession: &child, sessions: []domain.Session{parent, child},
+				detailPathStack: []detailFrame{{path: c.ActivePath()}, {path: []string{"f1", "f2"}, followFocus: true}}}
+			want := "↳parent forked from question immediately before fork"
+			if got := m.forkParentLabel(); got != want {
+				t.Fatalf("label=%q want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestForkParentLabelDoesNotGuessWithoutForkBoundary(t *testing.T) {
+	m := forkDetail(true)
+	m.detailPathStack = m.detailPathStack[:1]
+	if got := m.forkParentLabel(); got != "↳parent forked from" {
+		t.Fatalf("unresolved fork point should not show the session's first prompt: %q", got)
 	}
 }
