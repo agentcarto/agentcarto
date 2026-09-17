@@ -283,3 +283,35 @@ func TestForkParentRowNamesAnAbsentParent(t *testing.T) {
 		t.Fatalf("an absent parent should still be named:\n%s", view)
 	}
 }
+
+func TestBackFromFocusedForkDoesNotExposeAncestorConversation(t *testing.T) {
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'q'}},
+		{Type: tea.KeyLeft},
+		{Type: tea.KeyEsc},
+		{Type: tea.KeyRunes, Runes: []rune{'h'}},
+	} {
+		t.Run(key.String(), func(t *testing.T) {
+			m := forkDetail(true)
+			u, cmd := m.Update(key)
+			m = u.(Model)
+			if cmd != nil || m.detailSession != nil || m.detail != nil {
+				t.Fatalf("back from a session should return to the list, got session=%v path=%v", m.detailSession, m.currentDetailPath())
+			}
+		})
+	}
+}
+
+func TestBackFromManualBranchKeepsFocusedFork(t *testing.T) {
+	m := forkDetail(true)
+	m.detailPathStack = append(m.detailPathStack, detailFrame{path: []string{"f2"}, label: "rewind"})
+	m.setDetailPath(m.currentDetailPath())
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = u.(Model)
+	if m.detailSession == nil || m.detailSession.SessionID != "child" || len(m.detailPathStack) != 2 {
+		t.Fatalf("manual branch back lost the focused session: session=%v frames=%v", m.detailSession, m.detailPathStack)
+	}
+	if len(m.detailTurns) != 1 || m.detailTurns[0][0] != "f1" {
+		t.Fatalf("back showed another session's conversation: %v", m.detailTurns)
+	}
+}

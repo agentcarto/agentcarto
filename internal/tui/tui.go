@@ -1169,7 +1169,9 @@ func (m Model) detailBack(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.turnSearchPos = -1
 		return m, nil
 	}
-	if len(m.detailPathStack) > 1 {
+	// An automatic focus frame belongs to the opened session. Popping it would
+	// show the ancestor conversation under the child session’s header.
+	if len(m.detailPathStack) > 1 && !m.detailPathStack[len(m.detailPathStack)-1].followFocus {
 		m.detailPathStack = m.detailPathStack[:len(m.detailPathStack)-1]
 		m.setDetailPath(m.currentDetailPath())
 		m.detailCursor = m.firstTurnRow()
