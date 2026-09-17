@@ -202,7 +202,7 @@ type detailRow struct {
 	Kind       string
 	Turn       []string // displayed turn, or the owning turn whose headline column a branch row aligns with
 	Root       string
-	TurnIndex  int // chronological index of the turn row (0-based; +1 for the # label). May be non-contiguous because compact turns are skipped.
+	TurnIndex  int // public turn index (0-based); -1 for branches on a hidden compact boundary.
 	LastBranch bool
 	Badge      bool // /compact boundary badge (leading »)
 	Line       int  // which of detailHeadLines this row draws ("head" is 0, "headtext" the rest)
@@ -2845,16 +2845,24 @@ func (m *Model) rebuildDetailRows(path []string) {
 		m.detailRows = append(m.detailRows, detailRow{Kind: kind, Line: i})
 	}
 	turns := transcript.Turns(*m.detail, path)
-	for i := len(turns) - 1; i >= 0; i-- { // newest first
-		e := turns[i]
-		if e.Index > m.detailNewestChron {
-			m.detailNewestChron = e.Index
+	m.detailNewestChron = len(turns) - 1
+	visible := len(turns) - 1
+	// Compact-only turns have no body to display, but can still be fork points.
+	// Walk the unfiltered path so their branches stay at the original boundary.
+	rawTurns := convlogic.TurnsOfPath(*m.detail, path)
+	for i := len(rawTurns) - 1; i >= 0; i-- { // newest first
+		nodes := rawTurns[i]
+		index := -1
+		if visible >= 0 && turns[visible].Nodes[0] == nodes[0] {
+			e := turns[visible]
+			index = e.Index
+			m.detailTurns = append(m.detailTurns, e.Nodes)
+			m.detailRows = append(m.detailRows, detailRow{Kind: "turn", Turn: e.Nodes, TurnIndex: e.Index, Badge: e.Compact})
+			visible--
 		}
-		m.detailTurns = append(m.detailTurns, e.Nodes)
-		m.detailRows = append(m.detailRows, detailRow{Kind: "turn", Turn: e.Nodes, TurnIndex: e.Index, Badge: e.Compact})
-		_, subs := convlogic.TurnBranches(*m.detail, e.Nodes, active)
+		_, subs := convlogic.TurnBranches(*m.detail, nodes, active)
 		for j, root := range subs {
-			m.detailRows = append(m.detailRows, detailRow{Kind: "branch", Turn: e.Nodes, TurnIndex: e.Index, Root: root, LastBranch: j == len(subs)-1})
+			m.detailRows = append(m.detailRows, detailRow{Kind: "branch", Turn: nodes, TurnIndex: index, Root: root, LastBranch: j == len(subs)-1})
 		}
 	}
 	// A fork carries a copy of what was said before it, so its oldest turn is
