@@ -337,3 +337,53 @@ func TestForkBranchOrderUsesDescendantsAndKeepsRewindsInPlace(t *testing.T) {
 		t.Fatalf("logical session tree was ignored: %s", got)
 	}
 }
+
+func TestNestedForkOmitsInheritedTurns(t *testing.T) {
+	c := forkConversation()
+	root := domain.Session{PluginID: "codex", SessionID: "root"}
+	child := domain.Session{PluginID: "codex", SessionID: "child", ParentSessionID: "root"}
+	grandchild := domain.Session{PluginID: "codex", SessionID: "grandchild", ParentSessionID: "child"}
+	c.Nodes["g1"] = domain.ConvNode{ID: "g1", Parent: "f2", Events: []domain.Event{{Kind: domain.EventUser, Prompt: "new question", Text: "new question"}}}
+	c.Nodes["g2"] = domain.ConvNode{ID: "g2", Parent: "g1", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "new answer"}}}
+	c.Children["f2"] = []string{"g1"}
+	c.Children["g1"] = []string{"g2"}
+	c.ForkRoots = append(c.ForkRoots, "g1")
+	origins := map[string]app.NodeOrigin{
+		"u1": {Session: root, NodeID: "u1"},
+		"a1": {Session: root, NodeID: "a1"},
+		"p2": {Session: root, NodeID: "p2", ActiveLeaf: true},
+		"f1": {Session: child, NodeID: "f1"},
+		"f2": {Session: child, NodeID: "f2", ActiveLeaf: true},
+		"g1": {Session: grandchild, NodeID: "g1"},
+		"g2": {Session: grandchild, NodeID: "g2", ActiveLeaf: true},
+	}
+	m := Model{width: 160, height: 30, detailSession: &grandchild, sessions: []domain.Session{root, child, grandchild}}
+	u, _ := m.Update(convMsg{c: &c, origins: origins, focusLeaf: "g2", reset: true})
+	m = u.(Model)
+	if len(m.detailTurns) != 1 || strings.Join(m.detailTurns[0], ",") != "g1,g2" {
+		t.Fatalf("inherited turns were not omitted: %v", m.detailTurns)
+	}
+	if !m.forkParentRowVisible() {
+		t.Fatal("parent history must remain accessible")
+	}
+
+	c.Nodes["g3"] = domain.ConvNode{ID: "g3", Parent: "g2", Events: []domain.Event{{Kind: domain.EventUser, Prompt: "follow up", Text: "follow up"}}}
+	c.Children["g2"] = []string{"g3"}
+	origins["g2"] = app.NodeOrigin{Session: grandchild, NodeID: "g2"}
+	origins["g3"] = app.NodeOrigin{Session: grandchild, NodeID: "g3", ActiveLeaf: true}
+	u, _ = m.Update(convMsg{c: &c, origins: origins, focusLeaf: "g3"})
+	m = u.(Model)
+	if len(m.detailTurns) != 2 || m.detailTurns[1][0] != "g1" {
+		t.Fatalf("reload restored inherited turns: %v", m.detailTurns)
+	}
+	u, cmd := m.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = u.(Model)
+	if cmd != nil || m.detailSession.Key() != child.Key() || len(m.detailTurns) != 1 || m.detailTurns[0][0] != "f1" {
+		t.Fatalf("parent navigation lost its own history: session=%v turns=%v", m.detailSession, m.detailTurns)
+	}
+	u, cmd = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = u.(Model)
+	if cmd != nil || m.detailSession.Key() != grandchild.Key() || len(m.detailTurns) != 2 || m.detailTurns[1][0] != "g1" {
+		t.Fatalf("return to fork restored inherited turns: session=%v turns=%v", m.detailSession, m.detailTurns)
+	}
+}

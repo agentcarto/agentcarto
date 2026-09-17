@@ -2657,6 +2657,24 @@ func branchRootOf(c domain.Conversation, leaf string) string {
 // root also contains a newer child fork.
 func (m Model) directFocusFrame(c domain.Conversation, focusLeaf string) (detailFrame, bool) {
 	root := branchRootOf(c, focusLeaf)
+	if m.detailSession != nil {
+		// The backbone belongs to the oldest ancestor. A nested fork starts at
+		// its own graft root, after the history inherited from its parent.
+		ownRoots := make(map[string]bool)
+		for _, id := range c.ForkRoots {
+			if origin, ok := m.detailOrigins[id]; ok && origin.Session.Key() == m.detailSession.Key() {
+				ownRoots[id] = true
+			}
+		}
+		seen := map[string]bool{}
+		for id := focusLeaf; id != "" && !seen[id]; id = c.Nodes[id].Parent {
+			if ownRoots[id] {
+				root = id
+				break
+			}
+			seen[id] = true
+		}
+	}
 	if root == "" {
 		return detailFrame{}, false
 	}
