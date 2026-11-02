@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -197,7 +198,9 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		for n, text := range all.Turns {
 			whole[n] = text // the ones just made, in case the read raced the write
 		}
-		if made := sessionSummary(ctx, gen, s, whole, cfg.Summary.Language, w); made.Session != "" {
+		// The failure has been reported to w, and the line printed below says what
+		// it leaves the reader with.
+		if made, err := sessionSummary(ctx, gen, s, whole, cfg.Summary.Language, w); err == nil {
 			all.Session, all.Headline = made.Session, made.Headline
 		}
 	}
@@ -241,19 +244,20 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 // returns the answer whole — the paragraph and the headline that stands in for
 // it — since both come from this one call.
 //
-// A failure here is reported and shrugged off: the turn summaries are stored
-// and useful on their own, and losing the run over the line that describes them
-// would be worse than leaving that line as it was.
-func sessionSummary(ctx context.Context, gen summary.Generator, s domain.Session, turns map[int]string, language string, w io.Writer) summary.Result {
+// A failure here is reported rather than ending the run: the turn summaries are
+// stored and useful on their own, and losing the run over the line that describes
+// them would be worse than leaving that line as it was. The error is returned for
+// the caller that has to record why.
+func sessionSummary(ctx context.Context, gen summary.Generator, s domain.Session, turns map[int]string, language string, w io.Writer) (summary.Result, error) {
 	out, err := gen.Generate(ctx, summary.SessionSystem(language), summary.SessionPrompt(s, turns))
 	if err == nil {
 		var res summary.Result
 		if res, err = summary.Parse(out, nil); err == nil {
-			return summary.Result{Session: res.Session, Headline: res.Headline}
+			return summary.Result{Session: res.Session, Headline: res.Headline}, nil
 		}
 	}
 	fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be made: %v\n", err)
-	return summary.Result{}
+	return summary.Result{}, err
 }
 
 // sessionSummaryDue reports whether the session's own summary is old enough to
@@ -270,8 +274,9 @@ func sessionSummaryDue(ctx context.Context, db *cache.DB, s domain.Session, ever
 
 // storeSessionSummary writes the session's own summary when this run is the one
 // to write it. spent reports whether it made a call doing so, which is what a
-// run's budget counts; wrote reports whether turn 0 came out of it, which is what
-// a caller holding a request for the session summary alone has to know.
+// run's budget counts. The error says why turn 0 did not come out of it, nil
+// meaning it did: a caller holding a request for the session summary alone has to
+// know that, and to record the reason on the request it puts back.
 //
 // fromWholeSession is the answer of a call that saw every turn of the session —
 // a first summary of a short one. That answer already describes the session, so
@@ -283,18 +288,18 @@ func sessionSummaryDue(ctx context.Context, db *cache.DB, s domain.Session, ever
 // call that saw part of the session: it describes those turns, not the session
 // (SessionSystem says as much), and doing it is what made a long session's
 // summary read as a list of its newest turns.
-func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generator, s domain.Session, nodes map[int]string, fromWholeSession summary.Result, every time.Duration, language string, w io.Writer) (spent, wrote bool) {
+func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generator, s domain.Session, nodes map[int]string, fromWholeSession summary.Result, every time.Duration, language string, w io.Writer) (spent bool, err error) {
 	if fromWholeSession.Session != "" {
 		if err := storeSummaries(ctx, db, s, summary.Result{Session: fromWholeSession.Session, Headline: fromWholeSession.Headline}, nodes, gen.Name(), false); err != nil {
 			if w != nil {
 				fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be: %v\n", err)
 			}
-			return false, false
+			return false, err
 		}
-		return false, true
+		return false, nil
 	}
 	if !sessionSummaryDue(ctx, db, s, every) {
-		return false, false
+		return false, errors.New("the session summary is not due yet")
 	}
 	turns := map[int]string{}
 	for n, sum := range db.Summaries(ctx, s, nodes) {
@@ -303,19 +308,19 @@ func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generato
 		}
 	}
 	if len(turns) == 0 {
-		return false, false // nothing to build one from
+		return false, errors.New("no turn summaries to build a session summary from")
 	}
-	made := sessionSummary(ctx, gen, s, turns, language, w)
-	if made.Session == "" {
-		return true, false
+	made, err := sessionSummary(ctx, gen, s, turns, language, w)
+	if err != nil {
+		return true, err
 	}
 	if err := storeSummaries(ctx, db, s, made, nodes, gen.Name(), false); err != nil {
 		if w != nil {
 			fmt.Fprintf(w, "  the session summary was made but could not be stored: %v\n", err)
 		}
-		return true, false
+		return true, err
 	}
-	return true, true
+	return true, nil
 }
 
 // storeSummaries writes one batch's result. replace is set for the first batch

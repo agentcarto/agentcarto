@@ -428,7 +428,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 			answered.Fingerprint = r.Fingerprint
 		}
 		fmt.Fprintln(os.Stderr, "agentcarto: bringing this session's own summary up to date…")
-		if _, wrote := storeSessionSummary(ctx, db, gen, answered, r.Nodes, summary.Result{}, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr); !wrote {
+		if _, err := storeSessionSummary(ctx, db, gen, answered, r.Nodes, summary.Result{}, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr); err != nil {
 			_ = q.Retry(r, time.Now())
 			return false
 		}
