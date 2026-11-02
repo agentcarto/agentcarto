@@ -246,8 +246,10 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		_ = q.Done(r)
 		return calls > 0
 	}
-	_ = q.MarkWorking(r, 0, 0, time.Now())
-	spent, unwritten := storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, language, log)
+	spent, unwritten := storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, language, log, func() {
+		// Failing to say so costs a status line, as it does for the turns' calls.
+		_ = q.MarkWorking(r, 0, 0, time.Now())
+	})
 	if spent {
 		calls++
 	}

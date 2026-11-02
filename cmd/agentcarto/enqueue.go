@@ -458,7 +458,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 			answered.Fingerprint = r.Fingerprint
 		}
 		fmt.Fprintln(os.Stderr, "agentcarto: bringing this session's own summary up to date…")
-		if _, err := storeSessionSummary(ctx, db, gen, answered, r.Nodes, summary.Result{}, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr); err != nil {
+		if _, err := storeSessionSummary(ctx, db, gen, answered, r.Nodes, summary.Result{}, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr, nil); err != nil {
 			if !errors.Is(err, errSessionSummaryNotDue) {
 				_ = q.Retry(r, time.Now(), err)
 			}
@@ -490,7 +490,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 				if len(r.Batches[0]) == len(r.Nodes) {
 					whole = summary.Result{Session: res.Session, Headline: res.Headline}
 				}
-				storeSessionSummary(ctx, db, gen, answered, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr)
+				storeSessionSummary(ctx, db, gen, answered, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr, nil)
 				_ = db.MarkExamined(ctx, answered)
 			}
 		}

@@ -1178,6 +1178,31 @@ func TestACLIThatDiesOfTheSameSignalFirstIsNotAFailure(t *testing.T) {
 	}
 }
 
+// Announced only when it is about to happen. A call that saw the whole session has
+// answered for the session already, and saying "the session's own summary" there
+// names work that does not exist.
+func TestNoCallIsAnnouncedForASessionSummaryAlreadyInHand(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "short", Queued: time.Now().Add(-time.Hour), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"}, Batches: [][]int{{1}}, Prompts: []string{"a"},
+	}
+	d, q := stoppedFixture(t, r)
+	lock, err := summary.TakeLock(lockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	var log bytes.Buffer
+
+	runRequest(context.Background(), &log, q, d, &fakeGenerator{out: "@@SESSION\nまとめ\n@@TURN 1\nいち"}, r, 0, "")
+
+	st := summary.NewStatusReader(q, lockPath()).Read(time.Now())
+	key := domain.SessionKey{PluginID: "claude", SessionID: "short"}
+	if st.Current == key && st.Sessions[key].CallLabel() == "the session's own summary" {
+		t.Errorf("the status named a call that was never made:\n%s", log.String())
+	}
+}
+
 // With no turn summary to build from, no call is made. That says nothing about spending,
 // and counting it would have a session give up for what cost nothing.
 func TestASessionSummaryWithNothingToBuildFromIsNotCounted(t *testing.T) {

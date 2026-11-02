@@ -303,7 +303,11 @@ var errSessionSummaryNotDue = errors.New("the session summary is not due yet")
 // call that saw part of the session: it describes those turns, not the session
 // (SessionSystem says as much), and doing it is what made a long session's
 // summary read as a list of its newest turns.
-func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generator, s domain.Session, nodes map[int]string, fromWholeSession summary.Result, every time.Duration, language string, w io.Writer) (spent bool, err error) {
+//
+// beforeCall, which may be nil, runs just before a call is made, and not at all when
+// none is: it is how the worker says what it is paying for without saying so about
+// work that turns out not to exist.
+func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generator, s domain.Session, nodes map[int]string, fromWholeSession summary.Result, every time.Duration, language string, w io.Writer, beforeCall func()) (spent bool, err error) {
 	if fromWholeSession.Session != "" {
 		if err := storeSummaries(ctx, db, s, summary.Result{Session: fromWholeSession.Session, Headline: fromWholeSession.Headline}, nodes, gen.Name(), false); err != nil {
 			if w != nil {
@@ -324,6 +328,9 @@ func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generato
 	}
 	if len(turns) == 0 {
 		return false, summary.NotBilled(errors.New("no turn summaries to build a session summary from"))
+	}
+	if beforeCall != nil {
+		beforeCall()
 	}
 	made, err := sessionSummary(ctx, gen, s, turns, language, w)
 	if err != nil {
