@@ -27,11 +27,20 @@ func Detach(args ...string) error {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	return startDetached(cmd)
+}
+
+// startDetached starts cmd and collects it when it exits, which goes no further
+// than this process does: one that has quit leaves the child to the system.
+//
+// Collected rather than released: Process.Release leaves an exited child a zombie
+// until this process ends, one per worker for a TUI that stays open. Its exit status
+// is not wanted, since what it did is in its log and in the cache.
+func startDetached(cmd *exec.Cmd) error {
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	// Release lets the parent exit without leaving the child a zombie. Nothing
-	// here waits for it — what it did is in its log and in the cache.
-	return cmd.Process.Release()
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
