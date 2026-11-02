@@ -79,9 +79,9 @@ spot when one call will do (about half a minute); a longer one goes to the backg
 running, what it has in hand, how many sessions are waiting, and the latest failure.
 
 A plain `kill` ends the worker's run and the call it is making. The next scan starts another worker,
-which makes that call again. `kill -9`, and any way of stopping it on Windows, cannot reach the call
-or the worker's plugin processes and leaves them running. To stop summarizing, empty `summary.agent`
-first, then kill the worker if one is running, and reopen any TUI you have open.
+which makes that call again. `kill -9`, and any way of stopping it on Windows, cannot reach the call,
+which runs on by itself. To stop summarizing, empty `summary.agent` first, then kill the worker if one
+is running, and reopen any TUI you have open.
 
 **The TUI shows where this stands**, and shows nothing while summaries are off. The list's first
 line ends with the whole picture:
