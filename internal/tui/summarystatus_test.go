@@ -517,3 +517,51 @@ func TestATurnRowsSummaryCanBeSearchedFor(t *testing.T) {
 		t.Errorf("the row's searchable text is %q", got)
 	}
 }
+
+// A session list holds titles and headlines side by side as summaries arrive, and only
+// one of the two is what the session said. The headline carries the mark and color that
+// generated text has everywhere else, and a title keeps neither.
+func TestASessionRowMarksOnlyAHeadlineAsGenerated(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	yellow := lipgloss.NewStyle().Foreground(roleColor("meta")).Render("x")
+	yellow = yellow[:strings.Index(yellow, "x")]
+
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "with", Title: "最初のプロンプト", Fingerprint: "fp"}
+	none := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "without", Title: "別のプロンプト"}
+	m := Model{width: 120, headlines: map[domain.SessionKey]cache.Summary{
+		s.Key(): {Headline: "要約の見出し", Fingerprint: "fp"},
+	}}
+
+	row := m.sessionRow(s, false, 0, "")
+	if !strings.Contains(ansi.Strip(row), summaryMark+" 要約の見出し") {
+		t.Errorf("the headline is not marked: %q", ansi.Strip(row))
+	}
+	if !strings.Contains(row, yellow+summaryMark+" 要約の見出し") {
+		t.Errorf("the headline is not in the color of generated text: %q", row)
+	}
+
+	// A session with none yet keeps its title, as written.
+	if row := m.sessionRow(none, false, 0, ""); strings.Contains(row, summaryMark) || strings.Contains(row, yellow+"別のプロンプト") {
+		t.Errorf("a title reads as generated: %q", row)
+	}
+
+	// `s` shows the titles of them all.
+	m.listTitles = true
+	if row := m.sessionRow(s, false, 0, ""); strings.Contains(row, summaryMark) || !strings.Contains(ansi.Strip(row), "最初のプロンプト") {
+		t.Errorf("a title reads as generated: %q", row)
+	}
+
+	// Out of date, it still says so first, as the detail header does.
+	m.listTitles = false
+	moved := s
+	moved.Fingerprint = "fp2"
+	moved.UpdatedAt = time.Now()
+	if h := m.headlines[s.Key()]; h.Stale(moved, m.summaryGrace()) {
+		m.headlines = map[domain.SessionKey]cache.Summary{moved.Key(): h}
+		if row := ansi.Strip(m.sessionRow(moved, false, 0, "")); !strings.Contains(row, summaryMark+" (stale) 要約の見出し") {
+			t.Errorf("row=%q", row)
+		}
+	}
+}

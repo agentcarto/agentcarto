@@ -1807,22 +1807,23 @@ func (m Model) sessionRow(s domain.Session, selected bool, maxN int, prefix stri
 	// of the whole session. `s` swaps between them, and a session with no headline
 	// yet keeps its title rather than an empty column.
 	//
-	// The column is not colored to say which it is: the header names the mode, and
-	// the color that would mark generated text here (meta) is the one the session
-	// id already uses two columns over.
-	lead := s.Title
+	// The mark as well as the color, because a list holds both side by side while
+	// summaries arrive, and the color alone is the one the session id uses two columns
+	// over. The header's mode cannot tell a title from a headline row by row.
+	lead, leadColor := s.Title, lipgloss.Color("")
 	if !m.listTitles {
 		if h := m.headlines[s.Key()]; strings.TrimSpace(h.Headline) != "" {
-			lead = strings.TrimSpace(h.Headline)
+			lead, leadColor = strings.TrimSpace(h.Headline), summaryStatusColor(false)
 			if h.Stale(s, m.summaryGrace()) {
 				// The same mark the detail header uses, for the same reason: this is
 				// the screen where a session is chosen, and one described as it was
 				// this morning must not read as current.
 				lead = "(stale) " + lead
 			}
+			lead = summaryMark + " " + lead
 		}
 	}
-	b.WriteString(styled(clip(lead, remain), "", selected, false))
+	b.WriteString(styled(clip(lead, remain), leadColor, selected, false))
 	line := b.String()
 	plainW := lipgloss.Width(line)
 	if selected && plainW < m.width-1 {
