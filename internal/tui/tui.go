@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 	"math"
@@ -47,6 +48,9 @@ type convMsg struct {
 type tickMsg time.Time
 type blinkMsg time.Time
 
+// summaryStatusMsg is where summarizing stood when it was last read.
+type summaryStatusMsg summary.Status
+
 // flashExpireMsg is the expiry timer for a flash message (armed each time a flash
 // is set, and delivered flashTTL later).
 type flashExpireMsg struct{}
@@ -70,6 +74,14 @@ type Model struct {
 	// generating costs money and talks to another program, neither of which
 	// belongs in a view. Nil when the host has nothing to do there.
 	afterScan func([]domain.Session)
+	// readSummaryStatus says where summarizing stands. It is read on the tick rather
+	// than after a scan: a scan and the hook after it can take many seconds, while a
+	// worker in another process moves on regardless. Nil when the host has nothing
+	// to say.
+	readSummaryStatus func() summary.Status
+	// summaryStatus is what readSummaryStatus last said. The zero value says nothing,
+	// which is what a run with summarizing off keeps for good.
+	summaryStatus summary.Status
 	// summaries are the generated descriptions of the session on screen, keyed by
 	// the turn number the detail view shows; key 0 is the session's own summary,
 	// the paragraph the head row carries. Stored whole rather than as text alone,
@@ -84,6 +96,10 @@ type Model struct {
 	// which only the session summary can be: a turn's is withheld unless it
 	// belongs to the turn shown.
 	summaryStale bool
+	// summaryTurns is how many turns the summaries could describe: those of the
+	// branch they were read for, which is not always the one on screen. Zero for a
+	// fork, where the count would mean nothing (see handleConvMsg).
+	summaryTurns int
 	// headlines are the one-line summaries of every session that has one, keyed by
 	// session. The list draws one line per session, so they are read in one query
 	// and refreshed with each scan (the worker writes new ones as it goes). Whole
@@ -236,7 +252,16 @@ func New(a *app.App, cached []domain.Session, db *cache.DB) Model {
 	return m
 }
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.scan(), tick(time.Duration(m.app.Config.UI.RescanInterval)), blinkTick())
+	return tea.Batch(m.scan(), tick(time.Duration(m.app.Config.UI.RescanInterval)), blinkTick(), m.summaryStatusCmd())
+}
+
+// summaryStatusCmd reads the summary status off the update loop.
+func (m Model) summaryStatusCmd() tea.Cmd {
+	if m.readSummaryStatus == nil {
+		return nil
+	}
+	read := m.readSummaryStatus
+	return func() tea.Msg { return summaryStatusMsg(read()) }
 }
 
 // scan returns the command that runs one background scan and reports it as a scanMsg.
@@ -586,12 +611,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case scanMsg:
 		return m.handleScanMsg(x)
+	case summaryStatusMsg:
+		m.summaryStatus = summary.Status(x)
+		return m, nil
 	case tickMsg:
 		if !m.scanning {
 			m.scanning = true
-			return m, tea.Batch(m.scan(), tick(time.Duration(m.app.Config.UI.RescanInterval)))
+			return m, tea.Batch(m.scan(), tick(time.Duration(m.app.Config.UI.RescanInterval)), m.summaryStatusCmd())
 		}
-		return m, tick(time.Duration(m.app.Config.UI.RescanInterval))
+		return m, tea.Batch(tick(time.Duration(m.app.Config.UI.RescanInterval)), m.summaryStatusCmd())
 	case blinkMsg:
 		m.blinkOn = !m.blinkOn
 		return m, blinkTick()
@@ -685,9 +713,15 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 	if m.detailSession != nil {
 		m.detail = x.c
 		m.detailOrigins = x.origins
-		m.summaries, m.summaryStale, m.summaryAt = nil, false, time.Time{}
+		m.summaries, m.summaryStale, m.summaryAt, m.summaryTurns = nil, false, time.Time{}, 0
 		if m.cache != nil && x.c != nil {
 			turns := transcript.Turns(*x.c, x.c.ActivePath())
+			// Not for a fork: this tree starts at its root, while its summaries were made
+			// from its own conversation in its own numbering, so the count would not be
+			// of anything it has.
+			if m.detailSession.ParentSessionID == "" {
+				m.summaryTurns = len(turns)
+			}
 			m.summaries = m.cache.Summaries(context.Background(), *m.detailSession, summary.NodesByTurn(turns))
 			// Turn 0 alone can describe a session that has since gone on; what makes
 			// it so is the store's business, not the view's (cache.Summary.Stale).
@@ -1419,6 +1453,7 @@ func (m *Model) openSessionDetail(s domain.Session, query string) tea.Cmd {
 	m.summaries = nil
 	m.summaryStale = false
 	m.summaryAt = time.Time{}
+	m.summaryTurns = 0
 	m.turnOpen = false
 	m.turnBlocks = nil
 	m.turnExpanded = nil
@@ -1486,6 +1521,16 @@ func fit(s string, n int) string {
 	return runewidth.Truncate(s, n, "…")
 }
 func clip(s string, n int) string { return runewidth.Truncate(s, n, "") }
+
+// clipColored is clip for a line with color in it, which clip would measure by its
+// escape sequences as well as its text. ansi.Truncate skips those, but counts an
+// ambiguous-width character as one column even where RUNEWIDTH_EASTASIAN says the
+// terminal draws it as two, so that difference comes off the limit: a line past the
+// edge wraps, and moves everything under it.
+func clipColored(s string, n int) string {
+	plain := ansi.Strip(s)
+	return ansi.Truncate(s, n-max(0, runewidth.StringWidth(plain)-ansi.StringWidth(plain)), "")
+}
 
 // wrapWidth hard-wraps s to display width n, splitting it so each segment's display
 // width is at most n. Wide (full-width) characters are counted by their runewidth, so
@@ -1753,6 +1798,7 @@ func (m Model) sessionRow(s domain.Session, selected bool, maxN int, prefix stri
 	if s.LogDeleted {
 		b.WriteString(styled("⌫ ", lipgloss.Color("8"), selected, false))
 	}
+	b.WriteString(summaryRowMark(m.summaryStatus.Sessions[s.Key()].State, selected))
 	remain := max(1, m.width-1-lipgloss.Width(b.String()))
 	// The title is the session's first prompt; the headline is what an agent made
 	// of the whole session. `s` swaps between them, and a session with no headline
@@ -2014,15 +2060,16 @@ func (m Model) View() string {
 		head += " [title]"
 	}
 	var b strings.Builder
-	b.WriteString(clip(head, max(20, m.width-1)) + "\n")
+	b.WriteString(m.listHeadLine(head, max(20, m.width-1)) + "\n")
 	// Row 1 (the search/status line) is always reserved as one full-width line. While
-	// searching or filtering it holds the input field; otherwise a full-width blank line.
+	// searching or filtering it holds the input field; otherwise the selected session's
+	// summary status, or a full-width blank line when it has none.
 	// Using a real full-width line rather than an empty string keeps the start row and row
 	// count from jittering as search is toggled, so rendering stays stable.
 	if m.searching || m.query.Value() != "" {
 		b.WriteString(m.query.View() + "\n")
 	} else {
-		b.WriteString(strings.Repeat(" ", max(1, m.width-1)) + "\n")
+		b.WriteString(m.listStatusLine(time.Now()) + "\n")
 	}
 	bodyRows := m.listBodyRows()
 	// Recompute offset every frame so the selected row is always inside the visible
@@ -2107,7 +2154,7 @@ func (m Model) detailView() string {
 	end := min(len(m.detailRows), offset+bodyRows)
 	colW := m.detailColWidths(s, offset, end)
 	modelW := m.detailModelWidth(s, offset, end)
-	b.WriteString(clip(m.detailLead(s), max(20, m.width-1)) + "\n")
+	b.WriteString(clipColored(m.detailLead(s), max(20, m.width-1)) + "\n")
 	b.WriteString(m.detailCWDLine(s) + "\n")
 	// turnHits is ascending over all rows; only the visible ones are rendered.
 	hit := map[int]bool{}
@@ -2232,7 +2279,7 @@ func (m Model) detailLead(s *domain.Session) string {
 	if nbranch > 0 {
 		lead += fmt.Sprintf("  branches:%d", nbranch)
 	}
-	return lead
+	return lead + m.detailSummaryNote(m.summaryStatus.Sessions[s.Key()])
 }
 
 // detailCWDLine builds the second header line: the working directory on a line of its
@@ -3874,7 +3921,7 @@ func oneLine(text string) string {
 // A command chosen via resume / fork is not started inside the TUI; instead bubbletea
 // fully restores the terminal here and the caller execs it afterwards, avoiding a broken
 // terminal handoff.
-func Run(a *app.App, cached []domain.Session, db *cache.DB, afterScan func([]domain.Session)) (*domain.Command, error) {
+func Run(a *app.App, cached []domain.Session, db *cache.DB, readSummaryStatus func() summary.Status, afterScan func([]domain.Session)) (*domain.Command, error) {
 	if term := os.Getenv("TERM"); term != "" && term != "dumb" {
 		if strings.Contains(term, "256color") {
 			lipgloss.SetColorProfile(termenv.ANSI256)
@@ -3883,7 +3930,7 @@ func Run(a *app.App, cached []domain.Session, db *cache.DB, afterScan func([]dom
 		}
 	}
 	m := New(a, cached, db)
-	m.afterScan = afterScan
+	m.readSummaryStatus, m.afterScan = readSummaryStatus, afterScan
 	final, e := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if e != nil {
 		return nil, e

@@ -423,7 +423,7 @@ func runTUI(ctx context.Context, a *app.App, c config.Config, host *pluginhost.H
 		_ = db.Save(ctx, snap.Sessions)
 		cached = snap.Sessions
 	}
-	launch, e := tui.Run(a, cached, db, func(sessions []domain.Session) {
+	launch, e := tui.Run(a, cached, db, summaryStatusFunc(c, db), func(sessions []domain.Session) {
 		QueueSummaries(ctx, a, c, db, sessions)
 	})
 	if e != nil {

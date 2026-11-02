@@ -134,6 +134,24 @@ func QueueSummaries(ctx context.Context, a *app.App, cfg config.Config, db *cach
 	StartSummaryWorker(cfg, db)
 }
 
+// summaryStatusFunc returns what reads where summarizing stands, for a program that
+// keeps asking. Where summarizing cannot be happening it reads as the zero status,
+// which says nothing: a run with no cache starts no worker, and what is queued or
+// running on behalf of other runs is not this run's to report.
+func summaryStatusFunc(cfg config.Config, db *cache.DB) func() summary.Status {
+	nothing := func() summary.Status { return summary.Status{} }
+	if cfg.Summary.Agent == "" || db == nil {
+		return nothing
+	}
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		// The same failure stops QueueSummaries, so there is nothing to report on.
+		return nothing
+	}
+	reader := summary.NewStatusReader(q, lockPath())
+	return func() summary.Status { return reader.Read(time.Now()) }
+}
+
 // anyReady reports whether the queue holds work a worker would act on now.
 // Requests waiting out a failure do not count: starting a worker for those
 // would spawn a process that looks at them and exits, every few seconds.

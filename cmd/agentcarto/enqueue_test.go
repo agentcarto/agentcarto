@@ -1230,3 +1230,33 @@ func TestTheSplitTurnsOnAnOpenNotACandidate(t *testing.T) {
 		t.Fatalf("queued %v, want [s0 s5] — one end each, with the skips costing neither", ids)
 	}
 }
+
+// With summarizing off, or a run that may not touch the store, the screen has
+// nothing to report. Reading the queue anyway would show work this run did not
+// start and has no part in.
+func TestSummaryStatusSaysNothingWhereSummarizingIsNotHappening(t *testing.T) {
+	_, _ = summaryFixture(t)
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Add(summary.Request{PluginID: "claude", SessionID: "waiting", Queued: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	on := config.Config{Summary: config.Summary{Agent: "claude"}}
+
+	if st := summaryStatusFunc(config.Config{}, d)(); st.Enabled || st.Queued != 0 {
+		t.Errorf("summarizing off: %+v", st)
+	}
+	if st := summaryStatusFunc(on, nil)(); st.Enabled || st.Queued != 0 {
+		t.Errorf("no cache: %+v", st)
+	}
+	if st := summaryStatusFunc(on, d)(); !st.Enabled || st.Queued != 1 {
+		t.Errorf("summarizing on: %+v", st)
+	}
+}
