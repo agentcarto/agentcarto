@@ -251,6 +251,8 @@ func New(a *app.App, cached []domain.Session, db *cache.DB) Model {
 	m.filter()
 	return m
 }
+
+// Init starts the first scan, the timers and the first read of the summary status.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.scan(), tick(time.Duration(m.app.Config.UI.RescanInterval)), blinkTick(), m.summaryStatusCmd())
 }
@@ -588,6 +590,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return mm, cmd
 }
 
+// update handles one message.
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch x := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -2023,6 +2026,7 @@ func (m Model) relocGridLines() []string {
 	return lines
 }
 
+// View renders the screen for the mode the model is in.
 func (m Model) View() string {
 	if m.action == "confirm-fork" {
 		return "Fork from selected turn? y/n"
@@ -2125,6 +2129,7 @@ func (m Model) View() string {
 	return b.String()
 }
 
+// detailView renders a session's detail screen, or its opened turn when there is one.
 func (m Model) detailView() string {
 	// openCurrentTurn keeps turnOpen and the cursor in step, so the row is a turn
 	// whenever the turn view is open. Check it here anyway: a render that finds

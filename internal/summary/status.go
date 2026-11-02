@@ -132,8 +132,8 @@ type Status struct {
 // with the longest backlog, to learn what has barely changed. A request is decoded
 // once, and again only when its file changes.
 //
-// It is safe to use from several goroutines: the TUI reads on the back of a scan,
-// and a scan can finish while the previous one's read is still going.
+// It is safe to use from several goroutines: the TUI reads on every tick, and a tick
+// can come while the previous one's read is still going.
 type StatusReader struct {
 	q        *Queue
 	lockPath string
