@@ -304,6 +304,10 @@ func (q *Queue) header(name string, info os.FileInfo) (seenRequest, bool) {
 	if s, known := q.seen[name]; known && os.SameFile(s.info, info) && s.info.Size() == info.Size() && s.info.ModTime().Equal(info.ModTime()) {
 		return s, true
 	}
+	// On Windows a FileInfo finds out which file it is only when it is first compared, by
+	// opening the path, and by then the path can name the file that replaced this one.
+	// Comparing it now makes it remember the file it came from.
+	_ = os.SameFile(info, info)
 	b, err := os.ReadFile(filepath.Join(q.dir, name))
 	if err != nil {
 		return seenRequest{}, false
