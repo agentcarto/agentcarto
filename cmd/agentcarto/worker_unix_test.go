@@ -158,3 +158,67 @@ func TestASignalStopsTheCallShowIsMaking(t *testing.T) {
 		t.Errorf("being stopped was recorded as a failure: attempts=%d reason=%q", back.Attempts, back.LastError)
 	}
 }
+
+// A worker reads the queue once and then works for minutes. A request that failed in
+// the meantime, under show, is waiting out its backoff by the time the worker reaches
+// it, and a call then would be paying for what was just found not to work.
+func TestAWorkerLeavesARequestThatFailedSinceItReadTheQueue(t *testing.T) {
+	first := summary.Request{
+		PluginID: "claude", SessionID: "first", Queued: time.Now().Add(-time.Hour), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"}, Batches: [][]int{{1}}, Prompts: []string{"a"},
+	}
+	d, q := stoppedFixture(t, first)
+	second := summary.Request{
+		PluginID: "claude", SessionID: "second", Queued: time.Now(), Fingerprint: "fp2",
+		Nodes: map[int]string{1: "n1"}, Batches: [][]int{{1}}, Prompts: []string{"b"},
+	}
+	if err := q.Add(second); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	started, proceed, calls := filepath.Join(bin, "started"), filepath.Join(bin, "proceed"), filepath.Join(bin, "calls")
+	stub := "#!/bin/sh\ncat >/dev/null\necho call >> " + calls + "\ntouch " + started + "\n" +
+		"while [ ! -f " + proceed + " ]; do sleep 0.02; done\n" +
+		`printf '%s' '{"is_error":false,"result":"@@SESSION\ns\n@@TURN 1\nt"}'` + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := config.Config{Summary: config.Summary{Agent: "claude", Model: "m", MaxPerRun: 5}}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		summarizeWorkerCmd(context.Background(), cfg, d, nil)
+	}()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the worker never made its call")
+		}
+	}
+	if err := q.Retry(second, time.Now(), errors.New("failed under show")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proceed, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the worker did not finish")
+	}
+
+	made, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(made), "call"); n != 1 {
+		t.Errorf("the worker made %d calls, the last for a request waiting out its backoff", n)
+	}
+	if back, still := q.Find("claude", "second"); !still || back.Attempts != 1 {
+		t.Errorf("still=%v attempts=%d, want the failure left as recorded", still, back.Attempts)
+	}
+}

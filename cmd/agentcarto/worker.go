@@ -110,8 +110,9 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		}
 		// The queue was read once, minutes ago for a long run. `show` takes a
 		// request out before generating that session itself, so one that is gone
-		// is one somebody else is paying for right now.
-		if _, still := q.Peek(r.PluginID, r.SessionID); !still {
+		// is one somebody else is paying for right now, and one that came back has
+		// failed there and is waiting out what that earned it.
+		if now, still := q.Peek(r.PluginID, r.SessionID); !still || !now.Ready(time.Now()) {
 			continue
 		}
 		if runRequest(ctx, log, q, db, gen, r, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language) {
