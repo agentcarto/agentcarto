@@ -1298,6 +1298,44 @@ func TestAGaveUpRecordHoldsTheSessionBackUntilItIsSuperseded(t *testing.T) {
 	}
 }
 
+// A record of giving up starts no worker, so a worker's sweep cannot be what takes it.
+// A session that can no longer be opened would otherwise read as "retrying soon" for
+// good, about a retry that will never happen.
+func TestARecordWhoseWaitIsOverGoesWithoutAWorker(t *testing.T) {
+	_, started := summaryFixture(t)
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, r := range []summary.Request{
+		{PluginID: "claude", SessionID: "over", Queued: now, Attempts: summary.MaxAttempts, LastTried: now.Add(-summary.GiveUpFor)},
+		{PluginID: "claude", SessionID: "waiting", Queued: now, Attempts: summary.MaxAttempts, LastTried: now},
+	} {
+		if err := q.Add(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Config{Summary: config.Summary{Agent: "claude", Model: "m"}}
+
+	StartSummaryWorker(cfg, d)
+
+	if _, ok := q.Peek("claude", "over"); ok {
+		t.Error("a record past its wait is still there")
+	}
+	if _, ok := q.Peek("claude", "waiting"); !ok {
+		t.Error("a record inside its wait was taken")
+	}
+	if *started != 0 {
+		t.Errorf("%d workers were started for records", *started)
+	}
+}
+
 // What is left is what a message counts. Calls already answered are paid for and stored.
 func TestTurnsInCountsWhatIsLeft(t *testing.T) {
 	r := summary.Request{Batches: [][]int{{1, 2}, {3}, {4, 5, 6}}}

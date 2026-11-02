@@ -110,6 +110,7 @@ func StartSummaryWorker(cfg config.Config, db *cache.DB) {
 	if err != nil {
 		return
 	}
+	q.ForgetExpired(time.Now())
 	// Start a worker whenever anything is waiting, not only when this run added
 	// to it. A worker takes max_per_run sessions and stops, so the queue is
 	// normally left with more than it drained — and the sessions still in it are

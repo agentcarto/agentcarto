@@ -393,6 +393,19 @@ func (q *Queue) Sweep(maxAge time.Duration, now time.Time) int {
 	return n
 }
 
+// ForgetExpired removes the records of giving up whose wait is over. Sweep does too,
+// but only a worker sweeps, and no worker starts for a record: one about a session that
+// can no longer be opened would otherwise stay, saying a retry is about to happen. It
+// reads no prompts, so it can be asked on every scan.
+func (q *Queue) ForgetExpired(now time.Time) {
+	reqs, _ := q.Headers()
+	for _, r := range reqs {
+		if r.GaveUp() && now.Sub(r.LastTried) >= GiveUpFor {
+			_ = q.Done(r)
+		}
+	}
+}
+
 // requestName keys a request by its session, so queueing the same session twice
 // replaces rather than duplicates. The id is used as-is except for separators:
 // every agent here names sessions with hex and dashes, and anything else would
