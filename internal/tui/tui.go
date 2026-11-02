@@ -25,6 +25,7 @@ import (
 
 type scanMsg struct {
 	snap domain.Snapshot
+	full bool // the scan reparsed everything rather than reusing earlier results
 	// sessions is what the list shows: the scan's own sessions plus the ones the
 	// cache remembers and the scan could not find. snap.Sessions stays as it came
 	// back, because that is what the cache is told it has seen — recording a
@@ -142,7 +143,7 @@ type Model struct {
 	flash             string
 	flashAt           time.Time // time the flash was last set; cleared automatically once flashTTL elapses.
 	scanning          bool
-	scanned           bool // whether the first scan has completed. The single startup scan reparses fully instead of using the cache.
+	scanned           bool // whether a full scan has completed since startup or the last reload. Until one has, the next scan reparses fully instead of using the cache.
 	view              string
 	activeOnly        bool
 	cache             *cache.DB
@@ -237,12 +238,15 @@ func New(a *app.App, cached []domain.Session, db *cache.DB) Model {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.scan(), tick(time.Duration(m.app.Config.UI.RescanInterval)), blinkTick())
 }
+
+// scan returns the command that runs one background scan and reports it as a scanMsg.
 func (m Model) scan() tea.Cmd {
 	// The first scan after startup reparses everything instead of using the warm
 	// cache. This guarantees that each launch follows the latest parse results even
 	// if a parser change shipped without bumping ParserVersion (render cached rows
 	// immediately, refetch fully in the background, then swap). Later periodic
-	// rescans are incremental and cheap.
+	// rescans are incremental and cheap. A reload (the "r" key) asks for the same
+	// full scan.
 	full := !m.scanned
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -274,7 +278,7 @@ func (m Model) scan() tea.Cmd {
 			parents = m.app.LogicalSessionParents(ctx, sessions)
 		}
 		idx, fp := m.app.BuildIndex(ctx, sessions, store, m.index, m.indexFP)
-		return scanMsg{snap: snap, sessions: sessions, parents: parents, index: idx, indexFP: fp}
+		return scanMsg{snap: snap, full: full, sessions: sessions, parents: parents, index: idx, indexFP: fp}
 	}
 }
 
@@ -617,7 +621,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // search index, and dead-set, persists and prunes the cache, refilters, and — if a
 // detail view is open — reloads the conversation so it follows any growth.
 func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
-	m.scanned = true
+	// Only a full scan settles this: a periodic scan that was already running when
+	// a reload was asked for must not cancel the reload by landing.
+	m.scanned = m.scanned || x.full
 	m.sessions = x.sessions
 	m.sessionParents = x.parents
 	m.dead = x.snap.Dead
@@ -1252,9 +1258,16 @@ func (m Model) updateList(x tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.offset = 0
 		m.filter()
 	case "r":
-		// Ignore while a scan is in flight: a second concurrent scan could land
-		// out of order and overwrite newer results with older ones (and would
-		// hit the cache DB concurrently).
+		// A reload reparses everything, as startup does. The tick already picks up
+		// what changed every few seconds, so this key is for what it cannot see: a
+		// cached verdict that is wrong, such as a log excluded because it could not
+		// be read when it was scanned.
+		//
+		// Clearing scanned comes first so that a reload pressed during a scan is
+		// not lost: the next scan is the full one. Nothing starts here in that case,
+		// because a second concurrent scan could land out of order and overwrite
+		// newer results with older ones (and would hit the cache DB concurrently).
+		m.scanned = false
 		if m.scanning {
 			return m, nil
 		}

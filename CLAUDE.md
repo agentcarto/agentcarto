@@ -88,7 +88,9 @@ old cache when the parser changes — **bump it when you change how a plugin par
 `Dead` lives in the SQLite cache (`scan_dead`) alongside the sessions, because each CLI command is a
 process of its own and would otherwise reparse every excluded log, such as every Claude subagent log
 that is not a fork. The host passes its values along without reading them: they are stamps of
-`ParserVersion` and fingerprint that only `core/scan` compares.
+`ParserVersion` and fingerprint that only `core/scan` compares. An excluded log stays excluded until
+it changes, even if the exclusion was a read that failed once. The way back is the TUI: startup and
+the `r` key reparse everything and replace what is stored (`cache clear` would also take the summaries).
 
 ### Domain model (`core/domain/model.go`)
 `Session` (one conversation, with fork lineage via `ParentSessionID`/`ForkAt`) and a normalized
