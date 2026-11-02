@@ -1151,6 +1151,33 @@ func TestASessionSummaryNotDueIsNotAFailure(t *testing.T) {
 	}
 }
 
+// A signal to the whole group reaches the CLI as well as the worker, and the CLI's
+// exit can be seen before the worker's context ends. That is still a stop.
+func TestACLIThatDiesOfTheSameSignalFirstIsNotAFailure(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "stopped", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"}, Batches: [][]int{{1}}, Prompts: []string{"a"},
+	}
+	d, q := stoppedFixture(t, r)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	g := &scriptedGenerator{steps: []func() (string, error){func() (string, error) {
+		time.AfterFunc(20*time.Millisecond, stop)
+		return "", errors.New("claude: signal: terminated")
+	}}}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, 0, "")
+
+	back, still := q.Find("claude", "stopped")
+	if !still {
+		t.Fatalf("the request was dropped:\n%s", log.String())
+	}
+	if back.Attempts != 0 || back.LastError != "" {
+		t.Errorf("being stopped was recorded as a failure: attempts=%d reason=%q", back.Attempts, back.LastError)
+	}
+}
+
 // With no turn summary to build from, no call is made. That says nothing about spending,
 // and counting it would have a session give up for what cost nothing.
 func TestASessionSummaryWithNothingToBuildFromIsNotCounted(t *testing.T) {

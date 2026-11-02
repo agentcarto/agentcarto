@@ -122,6 +122,24 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 	}
 }
 
+// stopGrace is how long a failed call waits to learn whether it failed because the
+// worker is being stopped. Delivering a signal to this process takes far less, and
+// only a failure ever waits.
+const stopGrace = 250 * time.Millisecond
+
+// beingStopped reports whether the worker is being stopped, given that a call has
+// just failed. Going by ctx alone would be a race: a signal sent to the whole group,
+// as a machine going down does, reaches the CLI too, and its exit can be seen first.
+// That would record the session as having failed for something it had no part in.
+func beingStopped(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(stopGrace):
+		return false
+	}
+}
+
 // runRequest summarizes one queued session, and reports whether it spent a call
 // on it — which is what the run's budget counts. A failed call counts: it was
 // made, and may well have been billed.
@@ -171,7 +189,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		_ = q.MarkWorking(r, i+1, len(r.Prompts), time.Now())
 		out, err := gen.Generate(ctx, summary.System(language), prompt)
 		calls++
-		if err != nil && ctx.Err() != nil {
+		if err != nil && beingStopped(ctx) {
 			// Being stopped says nothing about the session. As a failure it would wait
 			// out the backoff, and three stops would have it give up.
 			fmt.Fprintf(log, "%s %s/%s: call %d of %d stopped with the worker\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts))
@@ -242,8 +260,9 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	}
 	// Stopped with the session's summary still owed, so the request stays, and the
 	// next worker has only that call to make. Once it is written the stop changes
-	// nothing: the request has been answered.
-	if unwritten != nil && ctx.Err() != nil {
+	// nothing: the request has been answered. Not being due is the ordinary outcome
+	// of a run, and not a failure to wait on.
+	if unwritten != nil && !errors.Is(unwritten, errSessionSummaryNotDue) && beingStopped(ctx) {
 		return calls > 0
 	}
 	// A request with no turn prompts existed only to remake a session summary that
