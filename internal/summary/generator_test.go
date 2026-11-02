@@ -3,6 +3,7 @@ package summary
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -161,6 +162,63 @@ func TestRunReportsWhatWentWrong(t *testing.T) {
 			t.Errorf("run=%v want a cancellation", e)
 		}
 	})
+
+	// codex is a launcher in front of the binary doing the work. It passes a signal
+	// on and cannot pass on a kill, so killing it leaves the call running and billed.
+	t.Run("a stopped CLI gets the chance to stop what it started", func(t *testing.T) {
+		dir := t.TempDir()
+		ready, heard := filepath.Join(dir, "ready"), filepath.Join(dir, "heard")
+		script := `trap 'echo yes > ` + heard + `; kill $!; exit 0' TERM; sleep 30 & echo yes > ` + ready + `; wait`
+		c, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			waitForFile(c, ready)
+			cancel()
+		}()
+
+		_, e := run(c, time.Minute, "", "sh", "-c", script)
+
+		if e == nil || !strings.Contains(e.Error(), "cancelled") {
+			t.Errorf("run=%v want a cancellation", e)
+		}
+		if _, err := os.Stat(heard); err != nil {
+			t.Errorf("the CLI was given no chance to pass the stop on: %v", err)
+		}
+	})
+
+	t.Run("a CLI that ignores being stopped does not hold the call open", func(t *testing.T) {
+		ready := filepath.Join(t.TempDir(), "ready")
+		script := `trap '' TERM; echo yes > ` + ready + `; sleep 6`
+		c, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			waitForFile(c, ready)
+			cancel()
+		}()
+
+		start := time.Now()
+		_, e := run(c, time.Minute, "", "sh", "-c", script)
+
+		if e == nil || !strings.Contains(e.Error(), "cancelled") {
+			t.Errorf("run=%v want a cancellation", e)
+		}
+		if took := time.Since(start); took > 5*time.Second {
+			t.Errorf("run took %s after being cancelled — it waited for the process", took)
+		}
+	})
+}
+
+// waitForFile returns once path exists, ctx ends or ten seconds have passed. It
+// reports nothing: a script that never got as far as writing the file fails the
+// assertions of the test that runs it.
+func waitForFile(ctx context.Context, path string) {
+	deadline := time.Now().Add(10 * time.Second)
+	for ctx.Err() == nil && time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // A session's text is far past any platform's argument-length limit, so the

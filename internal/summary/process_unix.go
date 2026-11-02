@@ -23,3 +23,6 @@ func processAlive(pid int) bool {
 	err = p.Signal(syscall.Signal(0))
 	return err == nil || errors.Is(err, os.ErrPermission)
 }
+
+// terminate asks a process to stop.
+func terminate(p *os.Process) error { return p.Signal(syscall.SIGTERM) }

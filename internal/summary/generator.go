@@ -186,16 +186,22 @@ func run(ctx context.Context, timeout time.Duration, stdin, name string, args ..
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
+	// Asked to stop rather than killed, which is CommandContext's default: codex is
+	// a launcher in front of the binary doing the work, and it passes on a signal but
+	// has no way to pass on a kill. Killed, it leaves that binary running and the
+	// call being paid for.
+	cmd.Cancel = func() error { return terminate(cmd.Process) }
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
-	// Killing the process on timeout is not enough to get Run to return: it
+	// Stopping the process on timeout is not enough to get Run to return: it
 	// waits for the output pipes to close, and a CLI that spawned a child leaves
 	// them open for as long as the child lives. Without this, a timeout that was
 	// supposed to bound the run does not bound it at all — measured at five
 	// seconds for a 50ms timeout over `sh -c 'sleep 5'`. WaitDelay gives the
-	// pipes a moment to drain and then stops waiting.
+	// process a moment to stop and the pipes a moment to drain, then kills it and
+	// stops waiting.
 	cmd.WaitDelay = 2 * time.Second
 	switch e := cmd.Run(); {
 	case e == nil:

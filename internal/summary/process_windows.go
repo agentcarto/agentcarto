@@ -4,6 +4,7 @@ package summary
 
 import (
 	"errors"
+	"os"
 
 	"golang.org/x/sys/windows"
 )
@@ -32,3 +33,6 @@ func processAlive(pid int) bool {
 	const stillActive = 259 // STILL_ACTIVE
 	return code == stillActive
 }
+
+// terminate ends a process. Windows has no signal to ask one to stop with.
+func terminate(p *os.Process) error { return p.Kill() }
