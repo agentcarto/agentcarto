@@ -818,3 +818,155 @@ func TestDoctorDoesNotReportASessionBeingRetriedAsFailed(t *testing.T) {
 		t.Errorf("doctor said:\n%s", out.String())
 	}
 }
+
+// stoppingGenerator is a worker stopped in the middle of a call: the context ends,
+// and the call comes back with whatever it has by then.
+type stoppingGenerator struct {
+	stop  context.CancelFunc
+	out   string
+	err   error
+	calls int
+}
+
+// Generate ends the context, then answers as configured.
+func (g *stoppingGenerator) Generate(context.Context, string, string) (string, error) {
+	g.calls++
+	g.stop()
+	return g.out, g.err
+}
+
+// Name is what the summaries are stored as written by.
+func (g *stoppingGenerator) Name() string { return "fake m" }
+
+// stoppedFixture opens a store and a queue holding r.
+func stoppedFixture(t *testing.T, r summary.Request) (*cache.DB, *summary.Queue) {
+	t.Helper()
+	_, _ = summaryFixture(t)
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	return d, q
+}
+
+// Being stopped says nothing about the session. Counted as a failure it would show
+// as one, wait out the backoff, and after three stops never be tried again.
+func TestAStoppedCallIsNotAFailure(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "stopped", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"}, Batches: [][]int{{1}}, Prompts: []string{"a"},
+	}
+	d, q := stoppedFixture(t, r)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	g := &stoppingGenerator{stop: stop, err: errors.New("claude: cancelled")}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, 0, "")
+
+	back, still := q.Find("claude", "stopped")
+	if !still {
+		t.Fatalf("the request was dropped, so nothing will ask for this summary again: %s", log.String())
+	}
+	if back.Attempts != 0 || back.LastError != "" {
+		t.Errorf("being stopped was recorded as a failure: attempts=%d reason=%q", back.Attempts, back.LastError)
+	}
+}
+
+// The same for the call that makes the session's own summary, which reports its
+// failure a different way.
+func TestAStoppedSessionSummaryIsNotAFailure(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "stopped", Queued: time.Now().Add(time.Minute), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"},
+	}
+	d, q := stoppedFixture(t, r)
+	s := domain.Session{PluginID: "claude", SessionID: "stopped", Fingerprint: "fp1"}
+	if err := d.PutSummaries(context.Background(), s, []cache.Summary{{Turn: 1, NodeID: "n1", Text: "ターン1の要約", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	g := &stoppingGenerator{stop: stop, err: errors.New("claude: cancelled")}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, 0, "")
+
+	if g.calls != 1 {
+		t.Fatalf("the session summary was not asked for: %d calls\n%s", g.calls, log.String())
+	}
+	if strings.Contains(log.String(), "could not be made") {
+		t.Errorf("the log calls being stopped a failure:\n%s", log.String())
+	}
+	back, still := q.Find("claude", "stopped")
+	if !still {
+		t.Fatalf("the request was dropped, so nothing will ask for this summary again: %s", log.String())
+	}
+	if back.Attempts != 0 || back.LastError != "" {
+		t.Errorf("being stopped was recorded as a failure: attempts=%d reason=%q", back.Attempts, back.LastError)
+	}
+}
+
+// A stopped worker is one that was told to stop spending.
+func TestAStoppedWorkerMakesNoFurtherCall(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "stopped", Queued: time.Now().Add(-time.Hour), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1", 2: "n2"}, Batches: [][]int{{1}, {2}}, Prompts: []string{"a", "b"},
+	}
+	d, q := stoppedFixture(t, r)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	g := &stoppingGenerator{stop: stop, out: "@@TURN 1\nいち"}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, 0, "")
+
+	if g.calls != 1 {
+		t.Errorf("the worker went on to make %d calls\n%s", g.calls, log.String())
+	}
+}
+
+// An answer that came back before the stop was paid for. It is stored, and the next
+// worker has nothing left to ask.
+func TestAnAnswerThatBeatTheStopIsKept(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "stopped", Queued: time.Now().Add(-time.Hour), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"}, Batches: [][]int{{1}}, Prompts: []string{"a"},
+	}
+	d, q := stoppedFixture(t, r)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	g := &stoppingGenerator{stop: stop, out: "@@SESSION\nまとめ\n@@TURN 1\nいち"}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, 0, "")
+
+	s := domain.Session{PluginID: "claude", SessionID: "stopped", Fingerprint: "fp1"}
+	stored := d.Summaries(context.Background(), s, r.Nodes)
+	if stored[1].Text != "いち" || stored[0].Text != "まとめ" {
+		t.Fatalf("the paid-for answer was lost: %+v\n%s", stored, log.String())
+	}
+	back, still := q.Find("claude", "stopped")
+	if still && back.Attempts != 0 {
+		t.Errorf("being stopped was recorded as a failure: attempts=%d reason=%q", back.Attempts, back.LastError)
+	}
+
+	next := &fakeGenerator{out: "@@SESSION\nまとめ\n@@TURN 1\nいち"}
+	if still {
+		runRequest(context.Background(), &log, q, d, next, back, 0, "")
+	}
+	if next.calls != 0 {
+		t.Errorf("the next worker paid for the same answer again: %d calls\n%s", next.calls, log.String())
+	}
+	if _, left := q.Find("claude", "stopped"); left {
+		t.Errorf("the answered request stayed in the queue:\n%s", log.String())
+	}
+}

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/agentcarto/agentcarto/internal/cache"
@@ -36,6 +38,12 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 
 	log, closeLog := openWorkerLog(*front)
 	defer closeLog()
+
+	// Kill is how `doctor` says to end a run, and a machine going down sends the same
+	// signal. Left to the default, the process ends on the spot: the lock and the call
+	// it is making both outlive it, and the call goes on being paid for.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	if cfg.Summary.Agent == "" {
 		// Not an error: the host only queues work when this is set, so reaching
@@ -93,7 +101,7 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 			break
 		}
 		if ctx.Err() != nil {
-			return
+			break
 		}
 		// The queue was read once, minutes ago for a long run. `show` takes a
 		// request out before generating that session itself, so one that is gone
@@ -104,6 +112,10 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		if runRequest(ctx, log, q, db, gen, r, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language) {
 			done++
 		}
+	}
+	if ctx.Err() != nil {
+		fmt.Fprintf(log, "%s worker: stopped by a signal; what it had not finished is asked for again\n", stamp())
+		return
 	}
 	if done > 0 {
 		fmt.Fprintf(log, "%s worker: finished %d sessions\n", stamp(), done)
@@ -155,6 +167,12 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		// call the queue is waiting on.
 		_ = q.MarkWorking(r, i+1, len(r.Prompts), time.Now())
 		out, err := gen.Generate(ctx, summary.System(language), prompt)
+		if err != nil && ctx.Err() != nil {
+			// Being stopped says nothing about the session. As a failure it would wait
+			// out the backoff, and three stops would end its summaries for good.
+			fmt.Fprintf(log, "%s %s/%s: call %d of %d stopped with the worker\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts))
+			return true
+		}
 		if err != nil {
 			// Keep what earlier calls stored, and put the request back with the
 			// failure recorded. Dropping it would mean the next scan queues the
@@ -208,6 +226,11 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	if spent {
 		calls++
 	}
+	// Stopped, so the request stays. What this run stored makes the next worker's
+	// check at the top answer it without a call.
+	if ctx.Err() != nil {
+		return true
+	}
 	// A request with no turn prompts existed only to remake a session summary that
 	// had been left behind (sessionSummaryOverdue). Finishing it unwritten would
 	// have the next scan ask for the same thing within seconds, and a call that
@@ -224,7 +247,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	// above writes a row. Without this the turn is still wanted, the request is
 	// written again, and a scan every few seconds pays for that call every few
 	// seconds.
-	_ = db.MarkExamined(ctx, s)
+	_ = db.MarkExamined(context.WithoutCancel(ctx), s)
 
 	fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s\n", stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), calls, gen.Name())
 	_ = q.Done(r)

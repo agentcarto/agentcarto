@@ -256,7 +256,10 @@ func sessionSummary(ctx context.Context, gen summary.Generator, s domain.Session
 			return summary.Result{Session: res.Session, Headline: res.Headline}, nil
 		}
 	}
-	fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be made: %v\n", err)
+	// A worker being stopped is not this call failing, and says so itself.
+	if ctx.Err() == nil {
+		fmt.Fprintf(w, "  the turn summaries are stored, but the session summary could not be made: %v\n", err)
+	}
 	return summary.Result{}, err
 }
 
@@ -328,6 +331,8 @@ func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generato
 // ones come in, so a failure anywhere leaves the stored set intact rather than
 // empty.
 func storeSummaries(ctx context.Context, db *cache.DB, s domain.Session, res summary.Result, nodes map[int]string, model string, replace bool) error {
+	// By here the answer has been paid for, so a worker being stopped still keeps it.
+	ctx = context.WithoutCancel(ctx)
 	sums := make([]cache.Summary, 0, len(res.Turns)+1)
 	if res.Session != "" {
 		// Turn 0 is rewritten whenever any turn is, since adding turns is what
