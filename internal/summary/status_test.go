@@ -318,7 +318,7 @@ func benchmarkQueue(b *testing.B, requests, promptBytes int) *StatusReader {
 func BenchmarkStatusFirstRead(b *testing.B) {
 	sr := benchmarkQueue(b, 500, 200<<10)
 	for b.Loop() {
-		sr.seen = nil
+		sr.q.seen = nil
 		sr.Read(time.Now())
 	}
 }

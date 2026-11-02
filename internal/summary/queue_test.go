@@ -448,3 +448,124 @@ func TestAdvancingARequestThatWasTakenOutLeavesItOut(t *testing.T) {
 		t.Error("the request came back")
 	}
 }
+
+// One queue for one directory. What it remembers has to outlive a scan to be worth
+// anything, and every scan opens the queue again.
+func TestOpeningADirectoryTwiceIsTheSameQueue(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "q")
+	a, err := OpenQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := OpenQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Error("the second open returned another queue")
+	}
+}
+
+// A request holds a session's text, and the scan that asks about the queue comes every
+// few seconds. So a file is read once, and again only when it changes. Proved by what
+// is on disk no longer being readable: an answer can then only have been remembered.
+func TestAQueuedRequestIsReadOnceUntilItChanges(t *testing.T) {
+	q := tempQueue(t)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: now, Fingerprint: "fp", Prompts: []string{"text of the session"}}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := q.Peek("claude", "s1"); !ok || got.Fingerprint != "fp" {
+		t.Fatalf("Peek=%+v %v", got, ok)
+	}
+	path := filepath.Join(q.dir, requestName("claude", "s1"))
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, info.Size()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, ok := q.Peek("claude", "s1"); !ok || got.Fingerprint != "fp" {
+		t.Errorf("Peek read the file again: %+v %v", got, ok)
+	}
+	if got, bad := q.Headers(); len(got) != 1 || bad != 0 || got[0].Fingerprint != "fp" {
+		t.Errorf("Headers read the file again: %+v unreadable=%d", got, bad)
+	}
+
+	// Changed, it is read again.
+	r.Fingerprint = "fp2"
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := q.Peek("claude", "s1"); !ok || got.Fingerprint != "fp2" {
+		t.Errorf("Peek=%+v %v, want the new version", got, ok)
+	}
+	// Gone, it is gone.
+	if err := q.Done(r); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := q.Peek("claude", "s1"); ok {
+		t.Error("Peek found a request that was taken out")
+	}
+	if got, _ := q.Headers(); len(got) != 0 {
+		t.Errorf("Headers=%+v after the request was taken out", got)
+	}
+}
+
+// What is remembered is what the question needs. A session's text kept in memory for
+// every queued request would be its own cost.
+func TestHeadersHoldNoPrompts(t *testing.T) {
+	q := tempQueue(t)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: time.Now(), Prompts: []string{"text"}, Batches: [][]int{{1}}, Nodes: map[int]string{1: "n"}}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := q.Headers()
+	if len(got) != 1 || got[0].Prompts != nil || got[0].Batches != nil || got[0].Nodes != nil {
+		t.Errorf("Headers=%+v", got)
+	}
+	peeked, _ := q.Peek("claude", "s1")
+	if peeked.Prompts != nil {
+		t.Errorf("Peek=%+v", peeked)
+	}
+	if full, _ := q.Find("claude", "s1"); len(full.Prompts) != 1 {
+		t.Errorf("Find=%+v, which has to read the prompts", full)
+	}
+}
+
+// A file's time moves in steps of milliseconds, so a request written twice in the same
+// step, at the same size, looks unchanged by those two alone. Every write here replaces
+// the file, and that is what gives it away.
+func TestARequestRewrittenAtTheSameSizeAndTimeIsReadAgain(t *testing.T) {
+	q := tempQueue(t)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: time.Now(), Fingerprint: "aaa"}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := q.Peek("claude", "s1"); got.Fingerprint != "aaa" {
+		t.Fatalf("Peek=%+v", got)
+	}
+	path := filepath.Join(q.dir, requestName("claude", "s1"))
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r.Fingerprint = "bbb"
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, _ := q.Peek("claude", "s1"); got.Fingerprint != "bbb" {
+		t.Errorf("Peek=%q, the version the file no longer holds", got.Fingerprint)
+	}
+}

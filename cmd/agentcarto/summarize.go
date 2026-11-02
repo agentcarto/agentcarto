@@ -391,7 +391,7 @@ func clearGaveUp(s domain.Session) bool {
 	if err != nil {
 		return false
 	}
-	r, ok := q.Find(s.PluginID, s.SessionID)
+	r, ok := q.Peek(s.PluginID, s.SessionID)
 	if !ok || !r.GaveUp() {
 		return false
 	}

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/agentcarto/core/domain"
@@ -127,27 +125,13 @@ type Status struct {
 }
 
 // StatusReader reads the status again and again without paying for the queue each
-// time. A request holds a session's text, so decoding all of them on every look —
-// every few seconds, for as long as the TUI is open — costs the most on the machine
-// with the longest backlog, to learn what has barely changed. A request is decoded
-// once, and again only when its file changes.
+// time: Queue.Headers reads a request only when its file has changed.
 //
 // It is safe to use from several goroutines: the TUI reads on every tick, and a tick
 // can come while the previous one's read is still going.
 type StatusReader struct {
 	q        *Queue
 	lockPath string
-	mu       sync.Mutex
-	seen     map[string]seenRequest
-}
-
-// seenRequest is a request file as it last looked. The request has no prompts in
-// it, which is the point of keeping it.
-type seenRequest struct {
-	mod      time.Time
-	size     int64
-	request  Request
-	readable bool
 }
 
 // NewStatusReader returns a reader over a queue and the worker lock at lockPath.
@@ -157,15 +141,12 @@ func NewStatusReader(q *Queue, lockPath string) *StatusReader {
 
 // Read returns the status as of now.
 func (sr *StatusReader) Read(now time.Time) Status {
-	sr.mu.Lock()
-	defer sr.mu.Unlock()
-
 	st := Status{Enabled: true, Sessions: map[domain.SessionKey]SessionStatus{}}
 	if pid, since, err := LockHolder(sr.lockPath); err == nil {
 		st.Running, st.PID, st.Since = true, pid, since
 	}
 	var requests []Request
-	requests, st.Unreadable = sr.requests()
+	requests, st.Unreadable = sr.q.Headers()
 	for _, r := range requests {
 		ss := SessionStatus{State: SessionQueued, Attempts: r.Attempts, LastTried: r.LastTried, LastError: r.LastError}
 		if r.Ready(now) {
@@ -199,45 +180,4 @@ func (sr *StatusReader) Read(now time.Time) Status {
 	ss.RetryAt = time.Time{}
 	st.Sessions[st.Current] = ss
 	return st
-}
-
-// requests returns the queue's requests, in no particular order, and how many
-// files there do not read as one. Only the files that changed since the last look
-// are read.
-func (sr *StatusReader) requests() (requests []Request, unreadable int) {
-	entries, err := os.ReadDir(sr.q.dir)
-	if err != nil {
-		sr.seen = nil
-		return nil, 0
-	}
-	seen := make(map[string]seenRequest, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue // taken by a worker since the directory was read
-		}
-		s, known := sr.seen[e.Name()]
-		if !known || s.size != info.Size() || !s.mod.Equal(info.ModTime()) {
-			b, err := os.ReadFile(filepath.Join(sr.q.dir, e.Name()))
-			if err != nil {
-				continue
-			}
-			s = seenRequest{mod: info.ModTime(), size: info.Size()}
-			if json.Unmarshal(b, &s.request) == nil && s.request.SessionID != "" {
-				s.readable = true
-				s.request.Nodes, s.request.Batches, s.request.Prompts = nil, nil, nil
-			}
-		}
-		seen[e.Name()] = s
-		if s.readable {
-			requests = append(requests, s.request)
-		} else {
-			unreadable++
-		}
-	}
-	sr.seen = seen
-	return requests, unreadable
 }

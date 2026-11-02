@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -25,7 +26,27 @@ import (
 // would silently drop work that was queued and never run. A directory in the
 // cache survives both, and doubles as the worker's to-do list: whatever is
 // there is what is left to do.
-type Queue struct{ dir string }
+type Queue struct {
+	dir string
+	// seen is every request file as it last looked (see Headers).
+	mu   sync.Mutex
+	seen map[string]seenRequest
+}
+
+// seenRequest is a request file as it last looked. The request has no prompts in it,
+// which is the point of keeping it.
+type seenRequest struct {
+	info     os.FileInfo
+	request  Request
+	readable bool
+}
+
+// queues holds the one Queue of each directory. What a Queue remembers is only worth
+// anything if it outlasts a scan, and every scan opens the queue again.
+var (
+	queuesMu sync.Mutex
+	queues   = map[string]*Queue{}
+)
 
 // Request is one session waiting to be summarized. The prompt travels with it
 // rather than being rebuilt by the worker: the host has already parsed the
@@ -128,7 +149,14 @@ func OpenQueue(dir string) (*Queue, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	return &Queue{dir: dir}, nil
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	q, ok := queues[dir]
+	if !ok {
+		q = &Queue{dir: dir}
+		queues[dir] = q
+	}
+	return q, nil
 }
 
 // Add writes a request, replacing any earlier one for the same session. The
@@ -205,6 +233,87 @@ func (q *Queue) Advance(r Request) error {
 		return nil
 	}
 	return q.Add(r)
+}
+
+// Headers returns the queued requests without their prompts, in no particular order,
+// and how many files there do not read as one. A request holds a session's text, and
+// this is asked every few seconds for as long as a TUI is open, at its most expensive
+// on the machine with the longest backlog and to learn what has barely changed. So
+// only the files that changed since the last look are read.
+func (q *Queue) Headers() (requests []Request, unreadable int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	entries, err := os.ReadDir(q.dir)
+	if err != nil {
+		q.seen = nil
+		return nil, 0
+	}
+	seen := make(map[string]seenRequest, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // taken by a worker since the directory was read
+		}
+		s, ok := q.header(e.Name(), info)
+		if !ok {
+			continue
+		}
+		seen[e.Name()] = s
+		if s.readable {
+			requests = append(requests, s.request)
+		} else {
+			unreadable++
+		}
+	}
+	q.seen = seen
+	return requests, unreadable
+}
+
+// Peek returns the queued request for a session without its prompts, as Find does
+// with them. It is for the callers that only need to know what is queued, which a scan
+// asks of every session it has.
+func (q *Queue) Peek(plugin, session string) (Request, bool) {
+	name := requestName(plugin, session)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	info, err := os.Stat(filepath.Join(q.dir, name))
+	if err != nil {
+		delete(q.seen, name)
+		return Request{}, false
+	}
+	s, ok := q.header(name, info)
+	if !ok {
+		return Request{}, false
+	}
+	if q.seen == nil {
+		q.seen = map[string]seenRequest{}
+	}
+	q.seen[name] = s
+	return s.request, s.readable
+}
+
+// header returns a request file as remembered, reading it if it has changed. It
+// reports false for a file that went away first. The caller holds mu.
+func (q *Queue) header(name string, info os.FileInfo) (seenRequest, bool) {
+	// SameFile as well as the size and the time, because a file's time moves in steps
+	// of milliseconds. Every write here replaces the file, so a request rewritten
+	// within a step at the same size is still a different file.
+	if s, known := q.seen[name]; known && os.SameFile(s.info, info) && s.info.Size() == info.Size() && s.info.ModTime().Equal(info.ModTime()) {
+		return s, true
+	}
+	b, err := os.ReadFile(filepath.Join(q.dir, name))
+	if err != nil {
+		return seenRequest{}, false
+	}
+	s := seenRequest{info: info}
+	if json.Unmarshal(b, &s.request) == nil && s.request.SessionID != "" {
+		s.readable = true
+		s.request.Nodes, s.request.Batches, s.request.Prompts = nil, nil, nil
+	}
+	return s, true
 }
 
 // Retry records that a request failed, and why, and puts it back, so the worker

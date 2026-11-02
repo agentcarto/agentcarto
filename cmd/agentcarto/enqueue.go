@@ -159,7 +159,7 @@ func summaryStatusFunc(cfg config.Config, db *cache.DB) func() summary.Status {
 // Requests waiting out a failure do not count: starting a worker for those
 // would spawn a process that looks at them and exits, every few seconds.
 func anyReady(q *summary.Queue) bool {
-	reqs, _ := q.List()
+	reqs, _ := q.Headers()
 	now := time.Now()
 	for _, r := range reqs {
 		if r.Ready(now) {
@@ -226,7 +226,7 @@ func pickForSummary(sessions []domain.Session) []domain.Session {
 // have to be recognized without a parse, or that answer costs a parse of
 // everything on the machine every time.
 func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.Session, sessionEvery time.Duration) bool {
-	if r, queued := q.Find(s.PluginID, s.SessionID); queued && !r.Superseded(s.Fingerprint, time.Now()) {
+	if r, queued := q.Peek(s.PluginID, s.SessionID); queued && !r.Superseded(s.Fingerprint, time.Now()) {
 		return false // already waiting; the request holds the prompt already
 	}
 	// The log is gone, so the cached conversation is the only thing left to read.
@@ -293,7 +293,7 @@ func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s
 	// Only a record of giving up can be there by now, and it has just been found to
 	// stand for nothing. It goes whether or not a new request takes its place: left
 	// behind, a session with nothing to ask about would go on reading as failed.
-	if old, ok := q.Find(s.PluginID, s.SessionID); ok {
+	if old, ok := q.Peek(s.PluginID, s.SessionID); ok {
 		_ = q.Done(old)
 	}
 	conv, err := a.Conversation(ctx, s)
