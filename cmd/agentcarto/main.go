@@ -540,9 +540,9 @@ func doctor(a *app.App) {
 }
 
 // summaryDoctor reports the state of summarizing. A worker runs detached with
-// no interface, so this is the only place that says whether one is running,
-// what it is costing, and how to stop it — a run that has gone wrong otherwise
-// shows up as nothing but an unexplained bill.
+// no interface, so this is where a person running commands learns whether one is
+// running, what it is costing, and how to stop it — a run that has gone wrong
+// otherwise shows up as nothing but an unexplained bill.
 func summaryDoctor(cfg config.Config) {
 	fmt.Println()
 	if cfg.Summary.Agent == "" {
@@ -552,28 +552,10 @@ func summaryDoctor(cfg config.Config) {
 	fmt.Printf("summary      %s %s, up to %d sessions per run, session summary every %s\n",
 		cfg.Summary.Agent, cfg.Summary.Model, cfg.Summary.MaxPerRun, time.Duration(cfg.Summary.SessionInterval))
 
-	if pid, taken, err := summary.LockHolder(lockPath()); err == nil {
-		fmt.Printf("  worker     running as pid %d since %s — stop it with: kill %d\n", pid, taken.Format("15:04:05"), pid)
-	} else {
-		fmt.Println("  worker     not running")
-	}
-
 	if q, err := summary.OpenQueue(queueDir()); err == nil {
-		reqs, bad := q.List()
-		failing := 0
-		for _, r := range reqs {
-			if r.Attempts > 0 {
-				failing++
-			}
-		}
-		note := ""
-		if failing > 0 {
-			note = fmt.Sprintf(" (%d waiting after a failure)", failing)
-		}
-		if len(bad) > 0 {
-			note += fmt.Sprintf(" (%d unreadable)", len(bad))
-		}
-		fmt.Printf("  queue      %d waiting%s — %s\n", len(reqs), note, queueDir())
+		writeSummaryStatus(os.Stdout, summary.NewStatusReader(q, lockPath()).Read(time.Now()), queueDir())
+	} else {
+		fmt.Printf("  queue      %v\n", err)
 	}
 
 	if fi, err := os.Stat(logPath()); err == nil {
@@ -581,6 +563,69 @@ func summaryDoctor(cfg config.Config) {
 	} else {
 		fmt.Printf("  log        %s (nothing written yet)\n", logPath())
 	}
+}
+
+// writeSummaryStatus prints the worker and queue lines of doctor.
+func writeSummaryStatus(w io.Writer, st summary.Status, queue string) {
+	if st.Running {
+		fmt.Fprintf(w, "  worker     running as pid %d since %s — stop it with: kill %d\n", st.PID, st.Since.Local().Format("15:04:05"), st.PID)
+	} else {
+		fmt.Fprintln(w, "  worker     not running")
+	}
+	if st.Current != (domain.SessionKey{}) {
+		now := st.Sessions[st.Current]
+		fmt.Fprintf(w, "  now        %s/%s, %s, started %s\n", st.Current.PluginID, short8(st.Current.SessionID), now.CallLabel(), now.CallStarted.Local().Format("15:04:05"))
+	}
+	note := ""
+	if n := failedRequests(st); n > 0 {
+		note = fmt.Sprintf(" (%d waiting after a failure)", n)
+	}
+	if st.Unreadable > 0 {
+		note += fmt.Sprintf(" (%d unreadable)", st.Unreadable)
+	}
+	fmt.Fprintf(w, "  queue      %d waiting%s — %s\n", st.Queued+st.Failed, note, queue)
+	if key, failed, ok := latestFailure(st); ok {
+		reason := ""
+		if failed.LastError != "" {
+			reason = ": " + failed.LastError
+		}
+		fmt.Fprintf(w, "  failure    %s/%s at %s%s\n", key.PluginID, short8(key.SessionID), failed.LastTried.Local().Format("01-02 15:04"), reason)
+	}
+}
+
+// reportsFailure says whether a session's request has failed and is not being tried
+// again right now. A backoff being over does not count as an answer: doctor starts no
+// worker, so whoever asks why last night's run left nothing finds exactly those.
+func reportsFailure(s summary.SessionStatus) bool {
+	return s.Attempts > 0 && s.State != summary.SessionWorking
+}
+
+// failedRequests counts the sessions reportsFailure is true of.
+func failedRequests(st summary.Status) int {
+	n := 0
+	for _, s := range st.Sessions {
+		if reportsFailure(s) {
+			n++
+		}
+	}
+	return n
+}
+
+// latestFailure returns the most recent of the failures reportsFailure is true of.
+// One is enough to say what is wrong: they nearly always share a cause.
+func latestFailure(st summary.Status) (domain.SessionKey, summary.SessionStatus, bool) {
+	var key domain.SessionKey
+	var latest summary.SessionStatus
+	for k, s := range st.Sessions {
+		if !reportsFailure(s) {
+			continue
+		}
+		// The id breaks a tie so the same queue always prints the same line.
+		if latest.State == 0 || s.LastTried.After(latest.LastTried) || (s.LastTried.Equal(latest.LastTried) && k.SessionID < key.SessionID) {
+			key, latest = k, s
+		}
+	}
+	return key, latest, latest.State != 0
 }
 
 // byteSize renders a file size the way the rest of the CLI does.

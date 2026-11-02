@@ -706,3 +706,115 @@ func TestAWorkerLeavesNoRecordOfWhatItHadInHand(t *testing.T) {
 		t.Errorf("the record outlived the worker: %+v", st.Current)
 	}
 }
+
+func TestDoctorSaysWhatTheWorkerIsDoing(t *testing.T) {
+	when := time.Date(2026, 8, 24, 12, 0, 0, 0, time.Local)
+	now := domain.SessionKey{PluginID: "claude", SessionID: "39bd4a6c-aaaa"}
+	st := summary.Status{
+		Enabled: true, Running: true, PID: 42, Since: when, Current: now, Queued: 12, Failed: 2, Unreadable: 1,
+		Sessions: map[domain.SessionKey]summary.SessionStatus{
+			now:                                     {State: summary.SessionWorking, Call: 2, Calls: 3, CallStarted: when},
+			{PluginID: "codex", SessionID: "older"}: {State: summary.SessionFailed, Attempts: 1, LastTried: when.Add(-2 * time.Hour), LastError: "an old reason"},
+			{PluginID: "claude", SessionID: "12fd10c9a"}: {State: summary.SessionFailed, Attempts: 1, LastTried: when.Add(-time.Hour), LastError: "the newest reason"},
+		},
+	}
+	var out bytes.Buffer
+	writeSummaryStatus(&out, st, "/queue")
+	for _, want := range []string{
+		"running as pid 42",
+		"now        claude/39bd4a6c, call 2 of 3, started 12:00:00",
+		"queue      14 waiting (2 waiting after a failure) (1 unreadable) — /queue",
+		"failure    claude/12fd10c9 at 08-24 11:00: the newest reason",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("doctor does not say %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "an old reason") {
+		t.Errorf("doctor printed more than the latest failure:\n%s", out.String())
+	}
+}
+
+func TestDoctorOfAnIdleQueueSaysSo(t *testing.T) {
+	var out bytes.Buffer
+	writeSummaryStatus(&out, summary.Status{Enabled: true}, "/queue")
+	if !strings.Contains(out.String(), "worker     not running") || !strings.Contains(out.String(), "queue      0 waiting — /queue") {
+		t.Errorf("doctor said:\n%s", out.String())
+	}
+	for _, unwanted := range []string{"now  ", "failure"} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Errorf("doctor mentions %q with nothing to say:\n%s", unwanted, out.String())
+		}
+	}
+}
+
+// A request that failed before reasons were kept has none until it fails again, and
+// the line must not read as if one had been cut off.
+func TestDoctorLeavesOutAReasonThatWasNotRecorded(t *testing.T) {
+	key := domain.SessionKey{PluginID: "claude", SessionID: "oldformat"}
+	st := summary.Status{Enabled: true, Failed: 1, Sessions: map[domain.SessionKey]summary.SessionStatus{
+		key: {State: summary.SessionFailed, Attempts: 1, LastTried: time.Date(2026, 8, 24, 11, 0, 0, 0, time.Local)},
+	}}
+	var out bytes.Buffer
+	writeSummaryStatus(&out, st, "/queue")
+	if want := "  failure    claude/oldforma at 08-24 11:00\n"; !strings.Contains(out.String(), want) {
+		t.Errorf("doctor said:\n%s\nwant the line %q", out.String(), want)
+	}
+}
+
+// Times travel in the files with the offset they were written under, and the
+// machine reading them may since have moved. What doctor prints is read against the
+// clock on the wall.
+func TestDoctorPrintsTimesInLocalTime(t *testing.T) {
+	when := time.Date(2026, 8, 24, 12, 0, 0, 0, time.Local)
+	_, offset := when.Zone()
+	elsewhere := time.FixedZone("elsewhere", offset+3*3600)
+	now := domain.SessionKey{PluginID: "claude", SessionID: "working"}
+	failed := domain.SessionKey{PluginID: "claude", SessionID: "failed"}
+	st := summary.Status{
+		Enabled: true, Running: true, PID: 42, Since: when.In(elsewhere), Current: now, Failed: 1,
+		Sessions: map[domain.SessionKey]summary.SessionStatus{
+			now:    {State: summary.SessionWorking, Call: 1, Calls: 1, CallStarted: when.In(elsewhere)},
+			failed: {State: summary.SessionFailed, Attempts: 1, LastTried: when.In(elsewhere), LastError: "limit"},
+		},
+	}
+	var out bytes.Buffer
+	writeSummaryStatus(&out, st, "/queue")
+	for _, want := range []string{"since 12:00:00", "started 12:00:00", "at 08-24 12:00: limit"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("doctor does not say %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// A failure's backoff ending is not the failure being resolved. doctor starts no
+// worker, so a person asking in the morning why last night's run left nothing finds
+// the requests ready and untried, and they are what the question is about.
+func TestDoctorStillReportsAFailureOnceItsBackoffIsOver(t *testing.T) {
+	when := time.Date(2026, 8, 24, 11, 0, 0, 0, time.Local)
+	st := summary.Status{Enabled: true, Queued: 2, Sessions: map[domain.SessionKey]summary.SessionStatus{
+		{PluginID: "claude", SessionID: "ready-again"}: {State: summary.SessionQueued, Attempts: 1, LastTried: when, LastError: "limit"},
+		{PluginID: "claude", SessionID: "never-tried"}: {State: summary.SessionQueued},
+	}}
+	var out bytes.Buffer
+	writeSummaryStatus(&out, st, "/queue")
+	for _, want := range []string{"queue      2 waiting (1 waiting after a failure)", "failure    claude/ready-ag at 08-24 11:00: limit"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("doctor does not say %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// The session in hand is being tried right now, so its last failure is not what is
+// wrong at the moment.
+func TestDoctorDoesNotReportASessionBeingRetriedAsFailed(t *testing.T) {
+	now := domain.SessionKey{PluginID: "claude", SessionID: "working"}
+	st := summary.Status{Enabled: true, Running: true, PID: 42, Current: now, Sessions: map[domain.SessionKey]summary.SessionStatus{
+		now: {State: summary.SessionWorking, Attempts: 1, LastError: "limit", Call: 1, Calls: 1},
+	}}
+	var out bytes.Buffer
+	writeSummaryStatus(&out, st, "/queue")
+	if strings.Contains(out.String(), "failure") {
+		t.Errorf("doctor said:\n%s", out.String())
+	}
+}
