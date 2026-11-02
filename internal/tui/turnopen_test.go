@@ -109,6 +109,48 @@ func TestTurnBlocksLeadWithTheSummary(t *testing.T) {
 	}
 }
 
+// A summary reads as generated text down to its last line, in the color the
+// session's own summary has. A bullet in one is not a line of a diff.
+func TestTurnSummaryIsColoredAsGeneratedTextThroughout(t *testing.T) {
+	ts := time.Unix(1, 0)
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: ts, Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: ts, Events: []domain.Event{{Kind: domain.EventAssistant, Text: "できた"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x"}
+	m := Model{width: 120, height: 30, detailSession: &s}
+	u, _ := m.Update(convMsg{c: &c, reset: true})
+	m = u.(Model)
+	m.summaries = map[int]cache.Summary{1: {Turn: 1, Text: "2 点を直した。\n- y キーを追加した\n+ OSC 52 でコピーする"}}
+
+	var ids []string
+	for _, r := range m.detailRows {
+		if r.Kind == "turn" {
+			ids = r.Turn
+			break
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("no turn row")
+	}
+	m.turnBlocks = m.turnBlocksOf(ids)
+	m.turnExpanded = map[int]bool{0: true}
+
+	seen := 0
+	for _, line := range m.turnFullLines() {
+		if line.block != 0 {
+			continue
+		}
+		seen++
+		if fg, _ := turnStyle(line.style); fg != roleColor("meta") {
+			t.Errorf("%q is in color %q, want %q", line.text, fg, roleColor("meta"))
+		}
+	}
+	if seen != 4 {
+		t.Errorf("the summary rendered as %d lines, want its label and 3 lines of body", seen)
+	}
+}
+
 // Summaries are keyed by the number the detail view shows, which a block does
 // not carry: a wrong lookup would put one turn's summary on another.
 func TestTurnNumberOf(t *testing.T) {
