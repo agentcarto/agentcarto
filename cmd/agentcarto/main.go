@@ -581,7 +581,7 @@ func writeQueueStatus(w io.Writer) {
 // writeWorkerLine prints whether a worker is running, and how to end it.
 func writeWorkerLine(w io.Writer, st summary.Status) {
 	if st.Running {
-		fmt.Fprintf(w, "  worker     running as pid %d since %s — stop it with: kill %d\n", st.PID, st.Since.Local().Format("15:04:05"), st.PID)
+		fmt.Fprintf(w, "  worker     running as pid %d since %s — kill %d ends this run; the next scan starts another (to stop for good: empty summary.agent, then kill it, then reopen the TUI)\n", st.PID, st.Since.Local().Format("15:04:05"), st.PID)
 	} else {
 		fmt.Fprintln(w, "  worker     not running")
 	}

@@ -723,6 +723,7 @@ func TestDoctorSaysWhatTheWorkerIsDoing(t *testing.T) {
 	writeSummaryStatus(&out, st, "/queue")
 	for _, want := range []string{
 		"running as pid 42",
+		"kill 42 ends this run",
 		"now        claude/39bd4a6c, call 2 of 3, started 12:00:00",
 		"queue      14 waiting (2 waiting after a failure) (1 unreadable) — /queue",
 		"failure    claude/12fd10c9 at 08-24 11:00: the newest reason",
