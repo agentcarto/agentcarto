@@ -105,11 +105,17 @@ func (q *Queue) Add(r Request) error {
 	if r.PluginID == "" || r.SessionID == "" {
 		return errors.New("summary: a queued request needs a plugin and a session")
 	}
-	b, err := json.Marshal(r)
+	return q.writeJSON(requestName(r.PluginID, r.SessionID), r)
+}
+
+// writeJSON puts a private file in the queue's directory in one step, replacing
+// what was under that name.
+func (q *Queue) writeJSON(name string, v any) error {
+	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	final := filepath.Join(q.dir, requestName(r.PluginID, r.SessionID))
+	final := filepath.Join(q.dir, name)
 	tmp, err := os.CreateTemp(q.dir, ".tmp-*")
 	if err != nil {
 		return err

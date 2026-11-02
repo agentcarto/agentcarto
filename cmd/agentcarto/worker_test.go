@@ -618,3 +618,91 @@ func TestASessionSummaryThatCouldNotBeMadeGoesBackInTheQueue(t *testing.T) {
 		t.Errorf("the stored session summary was lost: %q", got)
 	}
 }
+
+// observingGenerator records what the status says while each call is being made.
+type observingGenerator struct {
+	fakeGenerator
+	reader *summary.StatusReader
+	key    domain.SessionKey
+	seen   []string
+}
+
+func (g *observingGenerator) Generate(ctx context.Context, system, prompt string) (string, error) {
+	st := g.reader.Read(time.Now())
+	g.seen = append(g.seen, fmt.Sprintf("%v %s", st.Current == g.key, st.Sessions[g.key].CallLabel()))
+	return g.fakeGenerator.Generate(ctx, system, prompt)
+}
+
+// One call on a long session runs for minutes, and a queue cannot say which session
+// that is: a request leaves only when it is finished. So each call has to be
+// announced before it is made, the session's own summary included.
+func TestTheStatusFollowsAWorkerThroughItsCalls(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := summary.TakeLock(lockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	r := summary.Request{
+		PluginID: "claude", SessionID: "long", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1", 2: "n2"}, Batches: [][]int{{1}, {2}}, Prompts: []string{"a", "b"},
+	}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	g := &observingGenerator{
+		fakeGenerator: fakeGenerator{out: "@@SESSION\nまとめ\n@@TURN 1\nいち\n@@TURN 2\nに"},
+		reader:        summary.NewStatusReader(q, lockPath()),
+		key:           domain.SessionKey{PluginID: "claude", SessionID: "long"},
+	}
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, g, r, 0, "")
+
+	want := []string{"true call 1 of 2", "true call 2 of 2", "true the session's own summary"}
+	if fmt.Sprint(g.seen) != fmt.Sprint(want) {
+		t.Errorf("the status said %q while the calls ran, want %q\n%s", g.seen, want, log.String())
+	}
+}
+
+// A worker that was killed leaves its record, and a new one starts with the lock:
+// without clearing, the status names the dead worker's session as the new one's.
+func TestAWorkerLeavesNoRecordOfWhatItHadInHand(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.MarkWorking(summary.Request{PluginID: "claude", SessionID: "from-a-dead-worker"}, 1, 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Summary: config.Summary{Agent: "claude", Model: "claude-sonnet-5", MaxPerRun: 2}}
+
+	summarizeWorkerCmd(ctx, cfg, d, nil)
+
+	// The lock is what makes a record count, so this asks as a worker holding it.
+	lock, err := summary.TakeLock(lockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	if st := summary.NewStatusReader(q, lockPath()).Read(time.Now()); st.Current != (domain.SessionKey{}) {
+		t.Errorf("the record outlived the worker: %+v", st.Current)
+	}
+}

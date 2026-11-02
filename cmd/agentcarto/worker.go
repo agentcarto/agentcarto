@@ -60,6 +60,10 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 		return
 	}
 	defer lock.Release()
+	// A worker that was killed leaves its record behind, and it would be read as
+	// this worker's until the first call.
+	_ = q.ClearWorking()
+	defer func() { _ = q.ClearWorking() }()
 
 	if n := q.Sweep(staleRequest, time.Now()); n > 0 {
 		fmt.Fprintf(log, "%s worker: dropped %d stale or unreadable requests\n", stamp(), n)
@@ -147,6 +151,9 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		if ctx.Err() != nil {
 			return true // leave the request queued: this is not the session's fault
 		}
+		// Failing to say so costs a status line, which is no reason to give up a
+		// call the queue is waiting on.
+		_ = q.MarkWorking(r, i+1, len(r.Prompts), time.Now())
 		out, err := gen.Generate(ctx, summary.System(language), prompt)
 		if err != nil {
 			// Keep what earlier calls stored, and put the request back with the
@@ -196,6 +203,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		_ = q.Done(r)
 		return true
 	}
+	_ = q.MarkWorking(r, 0, 0, time.Now())
 	spent, unwritten := storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, language, log)
 	if spent {
 		calls++
