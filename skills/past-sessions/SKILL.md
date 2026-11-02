@@ -88,7 +88,8 @@ header, each turn's marked `↳` in the outline.
 
 **They are generated text, not what was said.** The header names the model that wrote them and
 says that the turns themselves are verbatim. Read a summary to decide which turn to open; quote
-the turn, never the summary. A summary that predates the newest turns is labelled `Stale`.
+the turn, never the summary. A session's summary that has fallen more than `summary.session_interval` (an hour by
+default) behind its newest turns is labelled `Stale`.
 
 A turn with no `↳` is one nothing has been written about yet — not one where nothing happened.
 

@@ -60,12 +60,12 @@ type Summary struct {
 // altogether when the node it was made from moves (see Summaries).
 //
 // Two things can say so, and either is enough. The fingerprint catches a log
-// the worker has not looked at since it changed — which is every session being
-// written to right now, whose newest turns nothing has been asked about yet. The
-// turn summaries catch what the fingerprint cannot: a worker run that summarized
-// the new turns but left the session summary alone (summary.session_interval had
-// not elapsed) and then called MarkExamined, which brings the fingerprint up to
-// date while the text stays behind.
+// the worker has not looked at since it changed, and is only asked about a log that
+// moved more than the interval after the text was written. The turn summaries catch
+// what the fingerprint cannot: a worker run that summarized the new turns but left
+// the session summary alone (summary.session_interval had not elapsed) and then
+// called MarkExamined, which brings the fingerprint up to date while the text stays
+// behind.
 //
 // What is deliberately not asked is whether the log is newer than the text. A
 // log grows for reasons that add no turn to describe — an agent appending its
@@ -78,10 +78,11 @@ type Summary struct {
 // within is how far behind the turns a session summary is allowed to be before
 // it is worth saying so, and callers pass summary.session_interval: a session
 // summary is deliberately made at most that often, so a turn described since the
-// last one is the design working rather than a summary going out of date. Without
-// it every session being worked in reads as stale from its second turn onward,
-// which says nothing a reader can act on. Zero asks the strict question, which is
-// what a caller with no interval to hand (a test, --no-cache) wants.
+// last one is the design working rather than a summary going out of date. It holds
+// for the log as well: every session being written to has a log the worker has not
+// looked at yet, so without it the mark would come and go on the one session whose
+// reader knows it has moved on. Zero asks the strict question, which is what a caller
+// with no interval to hand (a test, --no-cache) wants.
 func (s Summary) Stale(sess domain.Session, within time.Duration) bool {
 	// A row with neither text nor headline is MarkExamined's note that the
 	// session was looked at, not a summary. One that carries only a headline is
@@ -90,7 +91,7 @@ func (s Summary) Stale(sess domain.Session, within time.Duration) bool {
 		return false
 	}
 	if s.Fingerprint != sess.Fingerprint {
-		return true
+		return within == 0 || s.Created.IsZero() || s.Created.Add(within).Before(sess.UpdatedAt)
 	}
 	// Both times are stored to the second, and a session summary written in the
 	// same call as the turns under it shares theirs: only a turn described after

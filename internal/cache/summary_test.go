@@ -480,11 +480,33 @@ func TestSessionSummaryWithinTheIntervalIsNotStale(t *testing.T) {
 	if !sum.Stale(sess, time.Hour) {
 		t.Error("a turn described after the interval had elapsed should read as stale")
 	}
-	// The grace is no excuse for a log that moved: that is a different question.
-	grown := sess
-	grown.Fingerprint = "fp2"
-	if !sum.Stale(grown, 24*time.Hour) {
-		t.Error("a changed log is stale however long the grace")
+}
+
+// A log moving is what a session being worked in does, every few seconds until the
+// turn ends. If that alone read as stale, the mark would come and go on the one session
+// whose reader knows it has moved on, and say nothing about the ones left behind. So a
+// log that moved gets the same grace, and past it the summary is genuinely behind.
+func TestALogThatMovedIsStaleOnlyPastTheInterval(t *testing.T) {
+	written := time.Now().Add(-3 * time.Hour)
+	sum := Summary{Turn: 0, Text: "セッション全体の要約", Fingerprint: "fp", Created: written}
+	moved := func(after time.Duration) domain.Session {
+		return domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp2", UpdatedAt: written.Add(after)}
+	}
+	if sum.Stale(moved(30*time.Minute), time.Hour) {
+		t.Error("a log still moving within the interval reads as stale")
+	}
+	if !sum.Stale(moved(90*time.Minute), time.Hour) {
+		t.Error("a log that moved past the interval does not read as stale")
+	}
+	// Asked strictly, any move counts, whenever it was.
+	if !sum.Stale(moved(time.Minute), 0) {
+		t.Error("asked strictly, a log that moved at all is stale")
+	}
+	// With no time to go by, it cannot be said to be within anything.
+	unknown := sum
+	unknown.Created = time.Time{}
+	if !unknown.Stale(moved(time.Minute), time.Hour) {
+		t.Error("a summary with no time of writing passed as recent")
 	}
 }
 
