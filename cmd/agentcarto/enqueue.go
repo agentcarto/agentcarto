@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/agentcarto/agentcarto/internal/app"
@@ -387,13 +389,13 @@ func markNothingToSummarize(ctx context.Context, db *cache.DB, s domain.Session)
 // A session that needs several calls does go to the background. Those run for
 // minutes, which is past what a command should hold anyone for, so it says so
 // and names what can be read in the meantime.
-func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, s domain.Session, ref string) bool {
+func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, s domain.Session, ref string) (ready, stopped bool) {
 	if cfg.Summary.Agent == "" || db == nil {
-		return false
+		return false, false
 	}
 	q, err := summary.OpenQueue(queueDir())
 	if err != nil {
-		return false
+		return false, false
 	}
 	// queueOne answers false both for "nothing to do" and for "already queued",
 	// and those want opposite things here: a session waiting its turn behind
@@ -402,7 +404,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	_, _ = queueOne(ctx, a, db, q, s, time.Duration(cfg.Summary.SessionInterval))
 	r, ok := q.Find(s.PluginID, s.SessionID)
 	if !ok {
-		return false
+		return false, false
 	}
 	if !r.Ready(time.Now()) {
 		// Waiting out a failure. Trying again here would repeat it on every run —
@@ -417,7 +419,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		} else {
 			fmt.Fprintf(os.Stderr, "agentcarto: summarizing this session failed; it is tried again in %s, or now with `agentcarto summarize %s`\n", wait, ref)
 		}
-		return false
+		return false, false
 	}
 	// A request partly answered goes to the worker with the rest: below is for the
 	// one call that a session needing one call still has to make from the start.
@@ -425,7 +427,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		if _, _, err := summary.LockHolder(lockPath()); err == nil {
 			// Already being drained; this session is in the queue for it.
 			fmt.Fprintf(os.Stderr, "agentcarto: %s, queued behind a run already going — `agentcarto show %s --turns N` reads a turn now\n", leftToSummarize(r), ref)
-			return false
+			return false, false
 		}
 		// The worker is started on the way out of show, not here: showCmd defers
 		// one, and starting a second from inside would spawn a process that
@@ -433,12 +435,16 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		// nothing.
 		fmt.Fprintf(os.Stderr, "agentcarto: %s, running in the background — `agentcarto show %s --turns N` reads a turn now, and the summaries appear here on a later run\n",
 			leftToSummarize(r), ref)
-		return false
+		return false, false
 	}
 	gen, err := summary.New(cfg.Summary.Agent, cfg.Summary.Model, time.Duration(cfg.Summary.Timeout))
 	if err != nil {
-		return false
+		return false, false
 	}
+	// Only around the call. Over all of show, a Ctrl-C would have nothing to stop once
+	// the session is being printed.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	// The request leaves the queue before the call, not after. A worker started
 	// by an earlier command reads the queue once and then works through it for
 	// minutes; taking the request out now is what stops it from generating this
@@ -459,13 +465,18 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		}
 		fmt.Fprintln(os.Stderr, "agentcarto: bringing this session's own summary up to date…")
 		if _, err := storeSessionSummary(ctx, db, gen, answered, r.Nodes, summary.Result{}, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr, nil); err != nil {
-			if !errors.Is(err, errSessionSummaryNotDue) {
-				_ = q.Retry(r, time.Now(), err)
+			if errors.Is(err, errSessionSummaryNotDue) {
+				return false, false
 			}
-			return false
+			if beingStopped(ctx) {
+				_ = q.Add(r)
+				return false, true
+			}
+			_ = q.Retry(r, time.Now(), err)
+			return false, false
 		}
-		_ = db.MarkExamined(ctx, answered)
-		return true
+		_ = db.MarkExamined(context.WithoutCancel(ctx), answered)
+		return true, false
 	}
 	fmt.Fprintf(os.Stderr, "agentcarto: summarizing %d turns of this session (about half a minute)…\n", turnsIn(r))
 	out, err := gen.Generate(ctx, summary.System(cfg.Summary.Language), r.Prompts[0])
@@ -491,18 +502,23 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 					whole = summary.Result{Session: res.Session, Headline: res.Headline}
 				}
 				storeSessionSummary(ctx, db, gen, answered, r.Nodes, whole, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr, nil)
-				_ = db.MarkExamined(ctx, answered)
+				_ = db.MarkExamined(context.WithoutCancel(ctx), answered)
 			}
 		}
 	}
 	if err != nil {
+		// Being stopped is not this session failing, so it goes back as it was.
+		if beingStopped(ctx) {
+			_ = q.Add(r)
+			return false, true
+		}
 		// Back in the queue with the failure recorded, so a worker picks it up
 		// later rather than show trying again on every run.
 		_ = q.Retry(r, time.Now(), err)
 		fmt.Fprintf(os.Stderr, "agentcarto: could not summarize this session: %v\n", err)
-		return false
+		return false, false
 	}
-	return true
+	return true, ctx.Err() != nil
 }
 
 func turnsIn(r summary.Request) int {

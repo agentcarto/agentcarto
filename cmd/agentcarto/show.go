@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -102,8 +103,14 @@ func showCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.DB, a
 
 	// Summarizing comes before printing, not after: whoever ran this asked to
 	// read the session, and an outline of "done", "y" and "1" is not that.
-	if len(opts.Summaries) == 0 && summarizeForShow(ctx, a, cfg, db, s, ref) {
-		opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns, time.Duration(cfg.Summary.SessionInterval))
+	if len(opts.Summaries) == 0 {
+		ready, stopped := summarizeForShow(ctx, a, cfg, db, s, ref)
+		if stopped {
+			fail(errors.New("show: stopped while summarizing; what it had not finished is asked for again"))
+		}
+		if ready {
+			opts.Summaries, opts.SummaryModel, opts.SummaryStale = storedSummaries(ctx, db, s, turns, time.Duration(cfg.Summary.SessionInterval))
+		}
 	}
 	if selectors == 0 {
 		// An outline with no `↳` under any turn is the shape this feature exists to

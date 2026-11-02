@@ -720,7 +720,7 @@ func TestShowHandsOffWithoutStartingItsOwnWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Config{Summary: config.Summary{Agent: "claude", Model: "claude-sonnet-5"}}
-	if summarizeForShow(ctx, nil, cfg, d, s, "long") {
+	if ready, _ := summarizeForShow(ctx, nil, cfg, d, s, "long"); ready {
 		t.Error("a session needing several calls was reported as summarized")
 	}
 	if *started != 0 {

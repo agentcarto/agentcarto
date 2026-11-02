@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agentcarto/agentcarto/internal/app"
@@ -138,6 +140,11 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		fmt.Fprintf(w, "%s: %d turns, split across %d calls\n", s.SessionID, len(want), len(batches))
 	}
 
+	// From here on this process is paying for calls, and being killed would leave one
+	// running. Not any earlier: nothing would then stop a scan a person gave up on.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	all := summary.Result{Turns: map[int]string{}}
 	var asked []int
 	for i, batch := range batches {
@@ -207,6 +214,11 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		// it leaves the reader with.
 		if made, err := sessionSummary(ctx, gen, s, whole, cfg.Summary.Language, w); err == nil {
 			all.Session, all.Headline = made.Session, made.Headline
+		}
+		// Going on would store a summary of part of the session as the whole of it,
+		// and the deferred worker would go on spending after being told to stop.
+		if ctx.Err() != nil {
+			fail(fmt.Errorf("summarize %s: stopped; the turn summaries are stored", s.SessionID))
 		}
 	}
 	if *force {
