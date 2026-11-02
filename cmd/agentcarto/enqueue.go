@@ -429,7 +429,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		}
 		fmt.Fprintln(os.Stderr, "agentcarto: bringing this session's own summary up to date…")
 		if _, err := storeSessionSummary(ctx, db, gen, answered, r.Nodes, summary.Result{}, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr); err != nil {
-			_ = q.Retry(r, time.Now())
+			_ = q.Retry(r, time.Now(), err)
 			return false
 		}
 		_ = db.MarkExamined(ctx, answered)
@@ -466,7 +466,7 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 	if err != nil {
 		// Back in the queue with the failure recorded, so a worker picks it up
 		// later rather than show trying again on every run.
-		_ = q.Retry(r, time.Now())
+		_ = q.Retry(r, time.Now(), err)
 		fmt.Fprintf(os.Stderr, "agentcarto: could not summarize this session: %v\n", err)
 		return false
 	}

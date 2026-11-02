@@ -1,12 +1,14 @@
 package summary
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func tempQueue(t *testing.T) *Queue {
@@ -229,7 +231,7 @@ func TestQueueRetryRecordsTheFailure(t *testing.T) {
 	if !got[0].Ready(now) {
 		t.Fatal("a fresh request is not ready")
 	}
-	if err := q.Retry(got[0], now); err != nil {
+	if err := q.Retry(got[0], now, errors.New("claude: exit status 1:\n  limit reached")); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = q.List()
@@ -239,12 +241,57 @@ func TestQueueRetryRecordsTheFailure(t *testing.T) {
 	if got[0].Attempts != 1 || !got[0].LastTried.Equal(now) {
 		t.Errorf("the failure was not recorded: attempts=%d lastTried=%s", got[0].Attempts, got[0].LastTried)
 	}
+	if want := "claude: exit status 1: limit reached"; got[0].LastError != want {
+		t.Errorf("LastError=%q want %q: it is read on one line", got[0].LastError, want)
+	}
 	if got[0].Ready(now) {
 		t.Error("a request that just failed is ready again immediately")
 	}
 	// The prompt survives, so the retry does not have to rebuild it.
 	if len(got[0].Prompts) != 1 || got[0].Prompts[0] != "doc" {
 		t.Errorf("Retry lost the prompt: %+v", got[0].Prompts)
+	}
+}
+
+// A reason quoting a whole answer would otherwise travel with the request and be
+// read back on every look at the queue. The cut counts characters, so a reason
+// in Japanese is not split in the middle of one.
+func TestQueueRetryBoundsTheReason(t *testing.T) {
+	q := tempQueue(t)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: now}
+	if err := q.Retry(r, now, errors.New(strings.Repeat("要約", maxLastError))); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := q.Find("claude", "s1")
+	if !ok {
+		t.Fatal("Retry did not put the request back")
+	}
+	if !utf8.ValidString(got.LastError) {
+		t.Errorf("the cut split a character: %q", got.LastError)
+	}
+	if n := utf8.RuneCountInString(got.LastError); n > maxLastError+1 {
+		t.Errorf("LastError is %d runes, want at most %d and the mark", n, maxLastError)
+	}
+}
+
+// A reason ends up drawn on a terminal, and a CLI can color what it prints. Left
+// in, a color runs on into whatever is drawn after the reason, and a clear-screen
+// sequence takes the whole screen with it.
+func TestQueueRetryKeepsOnlyPrintableText(t *testing.T) {
+	q := tempQueue(t)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: now}
+	reason := errors.New("codex: \x1b[31mnot signed in\x1b[0m\x07\x1b[2J\r\nrun 要約\tagain")
+	if err := q.Retry(r, now, reason); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := q.Find("claude", "s1")
+	if !ok {
+		t.Fatal("Retry did not put the request back")
+	}
+	if want := "codex: not signed in run 要約 again"; got.LastError != want {
+		t.Errorf("LastError=%q want %q", got.LastError, want)
 	}
 }
 

@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +91,64 @@ func (g *fakeGenerator) Generate(context.Context, string, string) (string, error
 	return g.out, nil
 }
 func (g *fakeGenerator) Name() string { return "fake m" }
+
+// failingGenerator stands in for an agent CLI that fails every call.
+type failingGenerator struct{ err error }
+
+func (g failingGenerator) Generate(context.Context, string, string) (string, error) {
+	return "", g.err
+}
+func (g failingGenerator) Name() string { return "fake m" }
+
+// A request that failed keeps the reason, whichever call it was. The session's own
+// summary is the case easiest to lose: that call fails inside storeSessionSummary,
+// and a reason that stopped at the log there would leave the request saying
+// nothing about why it is waiting.
+func TestAFailedRequestKeepsTheReason(t *testing.T) {
+	const reason = "claude: exit status 1: You have hit your limit"
+	cases := []struct {
+		name    string
+		request summary.Request
+	}{
+		{"a turn call", summary.Request{Nodes: map[int]string{1: "n1"}, Batches: [][]int{{1}}, Prompts: []string{"doc"}}},
+		{"the session's own summary", summary.Request{Nodes: map[int]string{1: "n1"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _ = summaryFixture(t)
+			ctx := context.Background()
+			d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			q, err := summary.OpenQueue(queueDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := domain.Session{PluginID: "claude", SessionID: "failing", Fingerprint: "fp1"}
+			if err := d.PutSummaries(ctx, s, []cache.Summary{{Turn: 1, NodeID: "n1", Text: "ターン1の要約", Model: "m"}}); err != nil {
+				t.Fatal(err)
+			}
+			r := c.request
+			r.PluginID, r.SessionID, r.Queued, r.Fingerprint = s.PluginID, s.SessionID, time.Now(), s.Fingerprint
+			if err := q.Add(r); err != nil {
+				t.Fatal(err)
+			}
+
+			var log bytes.Buffer
+			runRequest(ctx, &log, q, d, failingGenerator{errors.New(reason)}, r, 0, "")
+
+			back, still := q.Find(s.PluginID, s.SessionID)
+			if !still {
+				t.Fatalf("the request was dropped: %s", log.String())
+			}
+			if !strings.Contains(back.LastError, reason) {
+				t.Errorf("LastError=%q want it to carry %q", back.LastError, reason)
+			}
+		})
+	}
+}
 
 // A request in the queue can be one somebody asked for by name: `show` hands a
 // session needing several calls to the worker and tells the reader the

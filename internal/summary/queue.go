@@ -9,6 +9,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Queue is the handoff between the program a person runs and the worker that
@@ -57,7 +60,17 @@ type Request struct {
 	// time.
 	Attempts  int       `json:"attempts,omitempty"`
 	LastTried time.Time `json:"last_tried,omitempty"`
+	// LastError is why the latest attempt failed, on one line. It is kept on the
+	// request because the log is written for reading afterwards and holds every
+	// session's history: asking why this session has no summary should not mean
+	// searching it.
+	LastError string `json:"last_error,omitempty"`
 }
+
+// maxLastError bounds the reason a request keeps, in runes. An answer that will
+// not parse quotes the model and a CLI's diagnostics can run long, and a reason is
+// read on a single line.
+const maxLastError = 300
 
 // RetryAfter is how long a failed request waits before the worker tries it
 // again, and MaxAttempts is where it gives up. A session that cannot be
@@ -145,13 +158,35 @@ func (q *Queue) List() ([]Request, []string) {
 	return out, bad
 }
 
-// Retry records that a request failed and puts it back, so the worker leaves it
-// alone for a while instead of doing it again on the next scan. Once it has
-// failed MaxAttempts times it stops being tried at all, and Sweep takes it.
-func (q *Queue) Retry(r Request, now time.Time) error {
+// Retry records that a request failed, and why, and puts it back, so the worker
+// leaves it alone for a while instead of doing it again on the next scan. Once it
+// has failed MaxAttempts times it stops being tried at all, and Sweep takes it.
+func (q *Queue) Retry(r Request, now time.Time, reason error) error {
 	r.Attempts++
 	r.LastTried = now
+	r.LastError = reasonLine(reason)
 	return q.Add(r)
+}
+
+// reasonLine renders a failure as the single bounded line LastError holds, with
+// nothing in it that would act on the terminal it is drawn on. Sequences go whole
+// before single control characters: dropping only the ESC would leave "[31m"
+// standing in the text.
+func reasonLine(reason error) string {
+	if reason == nil {
+		return ""
+	}
+	printable := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, ansi.Strip(reason.Error()))
+	line := strings.Join(strings.Fields(printable), " ")
+	if runes := []rune(line); len(runes) > maxLastError {
+		return string(runes[:maxLastError]) + "…"
+	}
+	return line
 }
 
 // Done removes a request. It is called for a request that was summarized and

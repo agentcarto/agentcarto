@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -854,7 +855,7 @@ func TestShowActsOnAQueuedSession(t *testing.T) {
 
 	// One waiting out a failure is not acted on: retrying here would repeat the
 	// failure on every run.
-	if err := q.Retry(r, time.Now()); err != nil {
+	if err := q.Retry(r, time.Now(), errors.New("the model returned nothing")); err != nil {
 		t.Fatal(err)
 	}
 	r2, _ := q.Find("claude", "s1")

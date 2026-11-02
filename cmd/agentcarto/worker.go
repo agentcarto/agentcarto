@@ -153,13 +153,13 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 			// failure recorded. Dropping it would mean the next scan queues the
 			// session again and the same call is paid for again, over and over.
 			fmt.Fprintf(log, "%s %s/%s: call %d of %d failed: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts), err)
-			_ = q.Retry(r, time.Now())
+			_ = q.Retry(r, time.Now(), err)
 			return true
 		}
 		res, err := summary.Parse(out, r.Batches[i])
 		if err != nil {
 			fmt.Fprintf(log, "%s %s/%s: call %d of %d: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts), err)
-			_ = q.Retry(r, time.Now())
+			_ = q.Retry(r, time.Now(), err)
 			return true
 		}
 		asked += len(r.Batches[i])
@@ -174,7 +174,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		// turns, not the session.
 		if err := storeSummaries(ctx, db, s, summary.Result{Turns: res.Turns}, r.Nodes, gen.Name(), false); err != nil {
 			fmt.Fprintf(log, "%s %s/%s: storing call %d failed: %v\n", stamp(), r.PluginID, short8(r.SessionID), i+1, err)
-			_ = q.Retry(r, time.Now())
+			_ = q.Retry(r, time.Now(), err)
 			return true
 		}
 	}
@@ -207,7 +207,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	// paces a retry.
 	if unwritten != nil && len(r.Prompts) == 0 {
 		fmt.Fprintf(log, "%s %s/%s: the session summary is still owed: %v\n", stamp(), r.PluginID, short8(r.SessionID), unwritten)
-		_ = q.Retry(r, time.Now())
+		_ = q.Retry(r, time.Now(), unwritten)
 		return true
 	}
 	// Recording the version matters most when the answer held nothing. Parse
