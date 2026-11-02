@@ -81,14 +81,40 @@ func New(agent, model string, timeout time.Duration) (Generator, error) {
 	return claudeCLI{model: model, timeout: timeout}, nil
 }
 
+// NewDetached returns a generator for a process with no terminal, whose calls each run
+// in a process group of their own. Stopping a call then reaches everything it started,
+// where otherwise it reaches only what was started directly and relies on that passing
+// the signal on.
+//
+// Only for a process with no terminal. In the foreground a group of its own would put
+// the call beyond the terminal's Ctrl-C, and into a background group the terminal can
+// stop for touching it.
+func NewDetached(agent, model string, timeout time.Duration) (Generator, error) {
+	g, err := New(agent, model, timeout)
+	if err != nil {
+		return nil, err
+	}
+	switch c := g.(type) {
+	case claudeCLI:
+		c.ownGroup = true
+		return c, nil
+	case codexCLI:
+		c.ownGroup = true
+		return c, nil
+	}
+	return g, nil
+}
+
 // claudeCLI drives `claude -p`.
 type claudeCLI struct {
-	model   string
-	timeout time.Duration
+	model    string
+	timeout  time.Duration
+	ownGroup bool
 }
 
 func (c claudeCLI) Name() string { return "claude " + c.model }
 
+// Generate asks claude about prompt under the system prompt, and returns its answer.
 func (c claudeCLI) Generate(ctx context.Context, system, prompt string) (string, error) {
 	// --no-session-persistence matters more than it looks: without it every
 	// summary run leaves a session log of its own on disk, which agentcarto then
@@ -98,7 +124,7 @@ func (c claudeCLI) Generate(ctx context.Context, system, prompt string) (string,
 	// --setting-sources '' keeps the user's CLAUDE.md and settings out of a run
 	// whose whole input is supposed to be the prompt, and --allowed-tools ''
 	// leaves it nothing to do but answer.
-	out, e := run(ctx, c.timeout, prompt, "claude",
+	out, e := runCLI(ctx, c.timeout, c.ownGroup, prompt, "claude",
 		"-p",
 		"--model", c.model,
 		"--system-prompt", system,
@@ -140,12 +166,14 @@ func claudeAnswer(out []byte) (string, error) {
 
 // codexCLI drives `codex exec`.
 type codexCLI struct {
-	model   string
-	timeout time.Duration
+	model    string
+	timeout  time.Duration
+	ownGroup bool
 }
 
 func (c codexCLI) Name() string { return "codex " + c.model }
 
+// Generate asks codex about prompt under the system prompt, and returns its answer.
 func (c codexCLI) Generate(ctx context.Context, system, prompt string) (string, error) {
 	// codex has no system-prompt option, so the instruction goes at the top of
 	// the prompt itself.
@@ -166,7 +194,7 @@ func (c codexCLI) Generate(ctx context.Context, system, prompt string) (string, 
 	defer os.RemoveAll(dir)
 	last := filepath.Join(dir, "last-message.txt")
 
-	if _, e := run(ctx, c.timeout, system+"\n\n---\n\n"+prompt, "codex", "exec",
+	if _, e := runCLI(ctx, c.timeout, c.ownGroup, system+"\n\n---\n\n"+prompt, "codex", "exec",
 		"-m", c.model,
 		"--ephemeral",
 		"--ignore-user-config",
@@ -211,11 +239,12 @@ func failureText(stdout []byte, stderr string) string {
 	return strings.TrimSpace(string(stdout))
 }
 
-// run executes one agent CLI with the prompt on stdin and returns its stdout.
+// runCLI executes one agent CLI with the prompt on stdin and returns its stdout,
+// optionally in a process group of its own (see NewDetached).
 //
 // The prompt goes through stdin rather than an argument because a session's
 // text is far past any platform's argument-length limit.
-func run(ctx context.Context, timeout time.Duration, stdin, name string, args ...string) ([]byte, error) {
+func runCLI(ctx context.Context, timeout time.Duration, ownGroup bool, stdin, name string, args ...string) ([]byte, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -227,6 +256,9 @@ func run(ctx context.Context, timeout time.Duration, stdin, name string, args ..
 	// has no way to pass on a kill. Killed, it leaves that binary running and the
 	// call being paid for.
 	cmd.Cancel = func() error { return terminate(cmd.Process) }
+	if ownGroup {
+		runInOwnGroup(cmd)
+	}
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
@@ -239,7 +271,13 @@ func run(ctx context.Context, timeout time.Duration, stdin, name string, args ..
 	// process a moment to stop and the pipes a moment to drain, then kills it and
 	// stops waiting.
 	cmd.WaitDelay = 2 * time.Second
-	switch e := cmd.Run(); {
+	e := cmd.Run()
+	// What ignored being asked. The kill WaitDelay ends in reaches only the process
+	// started directly, and what is left of the group goes on spending.
+	if ownGroup && ctx.Err() != nil && cmd.Process != nil {
+		killGroup(cmd)
+	}
+	switch {
 	case e == nil:
 		return out.Bytes(), nil
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):

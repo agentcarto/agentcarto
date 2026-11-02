@@ -77,7 +77,12 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 	if n := q.Sweep(staleRequest, time.Now()); n > 0 {
 		fmt.Fprintf(log, "%s worker: dropped %d stale or unreadable requests\n", stamp(), n)
 	}
-	gen, err := summary.New(cfg.Summary.Agent, cfg.Summary.Model, time.Duration(cfg.Summary.Timeout))
+	// --front runs under a terminal, so its calls stay where the terminal can reach them.
+	newGenerator := summary.NewDetached
+	if *front {
+		newGenerator = summary.New
+	}
+	gen, err := newGenerator(cfg.Summary.Agent, cfg.Summary.Model, time.Duration(cfg.Summary.Timeout))
 	if err != nil {
 		fmt.Fprintf(log, "%s worker: %v\n", stamp(), err)
 		return

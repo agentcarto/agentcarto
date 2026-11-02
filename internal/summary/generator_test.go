@@ -345,3 +345,8 @@ func TestGenerateAgainstTheRealCLIs(t *testing.T) {
 		})
 	}
 }
+
+// run is runCLI with the call left in this process's group, as in the foreground.
+func run(ctx context.Context, timeout time.Duration, stdin, name string, args ...string) ([]byte, error) {
+	return runCLI(ctx, timeout, false, stdin, name, args...)
+}
