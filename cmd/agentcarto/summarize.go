@@ -282,6 +282,11 @@ func sessionSummaryDue(ctx context.Context, db *cache.DB, s domain.Session, ever
 	return !ok || time.Since(when) >= every
 }
 
+// errSessionSummaryNotDue says the interval that paces a session's summary has not
+// passed. Nothing was tried, so it is not a failure to record: the scan that asked for
+// the summary asks again once it is due.
+var errSessionSummaryNotDue = errors.New("the session summary is not due yet")
+
 // storeSessionSummary writes the session's own summary when this run is the one
 // to write it. spent reports whether it made a call doing so, which is what a
 // run's budget counts. The error says why turn 0 did not come out of it, nil
@@ -309,7 +314,7 @@ func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generato
 		return false, nil
 	}
 	if !sessionSummaryDue(ctx, db, s, every) {
-		return false, errors.New("the session summary is not due yet")
+		return false, errSessionSummaryNotDue
 	}
 	turns := map[int]string{}
 	for n, sum := range db.Summaries(ctx, s, nodes) {
@@ -318,7 +323,7 @@ func storeSessionSummary(ctx context.Context, db *cache.DB, gen summary.Generato
 		}
 	}
 	if len(turns) == 0 {
-		return false, errors.New("no turn summaries to build a session summary from")
+		return false, summary.NotBilled(errors.New("no turn summaries to build a session summary from"))
 	}
 	made, err := sessionSummary(ctx, gen, s, turns, language, w)
 	if err != nil {

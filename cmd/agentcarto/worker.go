@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -231,6 +232,13 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	spent, unwritten := storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, language, log)
 	if spent {
 		calls++
+	}
+	// A request that held nothing else has nothing left to wait for. The scan asks
+	// again once the summary is due, and not before: sessionSummaryOverdue goes by the
+	// same interval.
+	if errors.Is(unwritten, errSessionSummaryNotDue) && len(r.Prompts) == 0 {
+		_ = q.Done(r)
+		return calls > 0
 	}
 	// Stopped with the session's summary still owed, so the request stays, and the
 	// next worker has only that call to make. Once it is written the stop changes

@@ -1122,3 +1122,56 @@ func TestDoctorReportsAFailureThatWasNotCounted(t *testing.T) {
 		t.Errorf("doctor does not report it:\n%s", out.String())
 	}
 }
+
+// A session summary that is not due has not failed. Nothing was tried, and the request
+// has nothing left to wait for: the scan that asked for it asks again once it is due.
+func TestASessionSummaryNotDueIsNotAFailure(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "paced", Queued: time.Now().Add(time.Minute), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"},
+	}
+	d, q := stoppedFixture(t, r)
+	s := domain.Session{PluginID: "claude", SessionID: "paced", Fingerprint: "fp1"}
+	if err := d.PutSummaries(context.Background(), s, []cache.Summary{
+		{Turn: 0, Text: "まとめ", Model: "m"},
+		{Turn: 1, NodeID: "n1", Text: "いち", Model: "m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	g := &scriptedGenerator{}
+	var log bytes.Buffer
+
+	runRequest(context.Background(), &log, q, d, g, r, time.Hour, "")
+
+	if len(g.prompts) != 0 {
+		t.Errorf("it made a call: %q", g.prompts)
+	}
+	if back, left := q.Find("claude", "paced"); left {
+		t.Errorf("the request stayed, reading as attempts=%d reason=%q", back.Attempts, back.LastError)
+	}
+}
+
+// With no turn summary to build from, no call is made. That says nothing about spending,
+// and counting it would have a session give up for what cost nothing.
+func TestASessionSummaryWithNothingToBuildFromIsNotCounted(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "empty", Queued: time.Now(), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1"},
+	}
+	d, q := stoppedFixture(t, r)
+	g := &scriptedGenerator{}
+	var log bytes.Buffer
+
+	runRequest(context.Background(), &log, q, d, g, r, 0, "")
+
+	if len(g.prompts) != 0 {
+		t.Errorf("it made a call: %q", g.prompts)
+	}
+	back, still := q.Find("claude", "empty")
+	if !still {
+		t.Fatalf("the request was dropped:\n%s", log.String())
+	}
+	if back.Attempts != 0 || back.LastTried.IsZero() {
+		t.Errorf("attempts=%d lastTried=%v, want a failure recorded and not counted", back.Attempts, back.LastTried)
+	}
+}

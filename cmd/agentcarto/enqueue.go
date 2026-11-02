@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -458,7 +459,9 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		}
 		fmt.Fprintln(os.Stderr, "agentcarto: bringing this session's own summary up to date…")
 		if _, err := storeSessionSummary(ctx, db, gen, answered, r.Nodes, summary.Result{}, time.Duration(cfg.Summary.SessionInterval), cfg.Summary.Language, os.Stderr); err != nil {
-			_ = q.Retry(r, time.Now(), err)
+			if !errors.Is(err, errSessionSummaryNotDue) {
+				_ = q.Retry(r, time.Now(), err)
+			}
 			return false
 		}
 		_ = db.MarkExamined(ctx, answered)

@@ -14,7 +14,8 @@ import (
 )
 
 // ErrNotBilled marks a failure that cost nothing: the CLI fell over before asking the
-// API, or was not there to ask. It is not what MaxAttempts is there to bound.
+// API, was not there to ask, or there was nothing to ask it. It is not what MaxAttempts
+// is there to bound.
 var ErrNotBilled = errors.New("summary: the call was not billed")
 
 // notBilled is a failure that errors.Is reports as ErrNotBilled, and that otherwise
@@ -26,6 +27,9 @@ func (notBilled) Is(target error) bool { return target == ErrNotBilled }
 
 // Unwrap returns the failure itself.
 func (e notBilled) Unwrap() error { return e.error }
+
+// NotBilled marks err as a failure that cost nothing.
+func NotBilled(err error) error { return notBilled{err} }
 
 // neverReachedAPI reports whether a CLI's envelope says no call was made. Both fields
 // have to say so, and be there to say it: codex prints no envelope, and a failure
