@@ -24,22 +24,30 @@ import (
 // The instruction is in English while the summaries it asks for are not: the
 // language they come out in is what language decides. Sessions are had in every
 // language, and the reader of a summary is the person who had the session.
+//
+// The limits are set below what a summary needs, because a limit is what the model
+// writes up to and past. Asked for about 300 characters it wrote over that one turn in
+// four, at its longest on the agent whose replies are long reports, by going through
+// the report: every check that passed, every caveat, every item left for later. A
+// summary is read to decide which turn to open, and the turn is one keypress away.
 func System(language string) string {
 	return `You summarize the logs of AI coding agents. The input is one session as Markdown. Each turn sits under a "## Turn N" heading and holds the USER message, the ASSISTANT reply, and the tool calls made. Long tool calls are cut short (a trailing … marks it).
 
 A quote under a ` + transcript.ContextLabel + ` line above a heading is the end of the reply that closed the turn before it, carried over because that turn is not in this input. Read it, but do not summarize it: it gets no @@TURN section of its own.
 
-For each turn, write what was done and what it showed.
+For each turn, say in one or two sentences what it came to.
 
 Rules:
 - A prompt that only answers — "yes", "go ahead", "the first one" — answers what the reply above it asked. Write what was settled and what came of it, not that it was agreed to.
-- Do not restate the request. The reader has it already — the line above a summary is the prompt itself. Write what was done, what it showed, and what changed.
-- If a cause was found, name it. If something was fixed, say what changed and where. If a question was settled, give the answer.
-- Keep file names, function names, identifiers and commit hashes exactly as they appear.
-- Length follows the turn, up to about 300 characters in a language written without spaces (Japanese, Chinese) or about 60 words in English — four sentences at the very most, and fewer when the turn did little. When a turn holds more than that, write what changed and drop the blow-by-blow of getting there.
+- Do not restate the request. The reader has it already — the line above a summary is the prompt itself.
+- Lead with the result: the cause that was found, what changed and where, or the answer that was reached. Usually that is all there is to say.
+- A turn is one result, however much was done and however long its reply is. Do not retell the reply or go through its points. Leave out how the result was reached and checked (tests and builds that passed, commands run, files read) and what was reported, warned about or left for later. Say so in a few words only if the result failed or is not finished.
+- When several things changed, name the main one and count the rest ("and 8 others") rather than listing them.
+- Keep file names, function names, identifiers and commit hashes exactly as they appear, and name only the two or three someone would look for this turn by.
+- Length: about 100 characters in a language written without spaces (Japanese, Chinese) or about 20 words in English for most turns, and never more than 200 characters or 40 words, even for a turn that did a great deal. A sentence strung out with commas to fit more in is still too long.
 - Write plainly. No polite register, no filler, nothing the reader can see for themselves. Do not name the actors ("the user", "the assistant"); say what happened.
 - Write nothing the input does not support. Do not guess how a cut-off tool call continued.
-- Also write one summary of the session as a whole. Its length follows the session's own size — the limit above is per turn, not for this.
+- Also write one summary of the session as a whole: what it set out to do and where it ended, in two to four sentences and at most 400 characters or 80 words, however long the session was. Do not go through its turns.
 - Also write one headline for the session: a single line that tells it apart in a list, about 40 characters (8 words in English). Name the one thing the session did rather than listing what it touched.
 
 ` + languageRule(language) + `
@@ -241,9 +249,10 @@ Read them and write what the session as a whole did.
 
 Rules:
 - Do not list the turns. Say what it set out to do, what it found, what it produced, and where it ended.
-- Keep file names, function names, identifiers and commit hashes exactly as they appear.
-- Length follows the session's size. There is no cap, but write nothing redundant and nothing the reader can see for themselves.
-- Write plainly. No polite register, no filler. Do not name the actors ("the user", "the assistant"); say what happened.
+- Leave out how it was checked and what was reported or warned about along the way. Say so in a few words only if the work failed or is not finished.
+- Keep file names, function names, identifiers and commit hashes exactly as they appear, and name only the few someone would look for this session by.
+- Two to four sentences, at most 400 characters in a language written without spaces (Japanese, Chinese) or 80 words in English, however long the session was.
+- Write plainly. No polite register, no filler, nothing the reader can see for themselves. Do not name the actors ("the user", "the assistant"); say what happened.
 - Write nothing the input does not support.
 - Besides the summary, write one headline for the session: a single line that tells it apart in a list, about 40 characters (8 words in English). Name the one thing the session did rather than listing what it touched.
 
