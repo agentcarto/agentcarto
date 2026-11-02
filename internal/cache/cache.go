@@ -58,7 +58,8 @@ func Open(path string) (*DB, error) {
 	// derived data (e.g. parsed conversations) per (plugin_id, session_id, kind), keyed also
 	// by the session fingerprint and parser_version so stale entries are ignored on read.
 	// summaries holds generated turn summaries, one row per turn — see summary.go for why
-	// they are not artifacts.
+	// they are not artifacts. scan_dead holds the logs the last scan excluded, which are
+	// not sessions and so have no row in any of the others.
 	for _, q := range []string{
 		// Patience first: switching the journal mode and creating the schema both
 		// take the write lock, so a timeout set after them would come too late.
@@ -72,6 +73,7 @@ func Open(path string) (*DB, error) {
 		"CREATE TABLE IF NOT EXISTS sessions (plugin_id TEXT, session_id TEXT, data BLOB NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id))",
 		"CREATE TABLE IF NOT EXISTS artifacts (plugin_id TEXT, session_id TEXT, fingerprint TEXT, parser_version TEXT, kind TEXT, data BLOB NOT NULL, accessed INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id,kind))",
 		"CREATE TABLE IF NOT EXISTS summaries (plugin_id TEXT, session_id TEXT, turn_index INTEGER, node_id TEXT NOT NULL, summary TEXT NOT NULL, model TEXT NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, headline TEXT NOT NULL DEFAULT '', PRIMARY KEY(plugin_id,session_id,turn_index))",
+		"CREATE TABLE IF NOT EXISTS scan_dead (path TEXT PRIMARY KEY, stamp TEXT NOT NULL)",
 	} {
 		if _, e = d.Exec(q); e != nil {
 			d.Close()
@@ -289,6 +291,48 @@ func (d *DB) Save(ctx context.Context, s []domain.Session) error {
 	for _, x := range s {
 		b, _ := json.Marshal(x)
 		if _, e = tx.ExecContext(ctx, "INSERT INTO sessions VALUES(?,?,?,?) ON CONFLICT(plugin_id,session_id) DO UPDATE SET data=excluded.data,seen=excluded.seen", x.PluginID, x.SessionID, b, now); e != nil {
+			return e
+		}
+	}
+	return tx.Commit()
+}
+
+// LoadDead returns the negative cache the last scan left behind (path -> stamp).
+// The stamps belong to the plugins and are not interpreted here.
+func (d *DB) LoadDead(ctx context.Context) (map[string]string, error) {
+	rows, e := d.db.QueryContext(ctx, "SELECT path,stamp FROM scan_dead")
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var path, stamp string
+		if e = rows.Scan(&path, &stamp); e != nil {
+			return nil, e
+		}
+		out[path] = stamp
+	}
+	return out, rows.Err()
+}
+
+// SaveDead replaces the stored negative cache with dead. Replacing rather than
+// merging is what removes the entry of a log that no longer exists: a scan only
+// carries forward the paths it still finds. It also means a plugin that failed
+// this scan loses its entries, which costs that plugin one reparse. Keeping them
+// by skipping the save would let one failing plugin stop every other plugin's
+// exclusions from ever being stored.
+func (d *DB) SaveDead(ctx context.Context, dead map[string]string) error {
+	tx, e := d.db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, "DELETE FROM scan_dead"); e != nil {
+		return e
+	}
+	for path, stamp := range dead {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO scan_dead VALUES(?,?)", path, stamp); e != nil {
 			return e
 		}
 	}

@@ -2,7 +2,9 @@ package cache
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,6 +45,107 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		if s.Status != "" || s.PermissionWait {
 			t.Fatalf("volatile fields leaked through the cache: %+v", s)
 		}
+	}
+}
+
+// The next command is another process, so the exclusions have to outlive this one.
+func TestDeadSurvivesReopeningTheCache(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	want := map[string]string{"/logs/a.jsonl": "13:aaa", "/logs/b.jsonl": "14:bbb"}
+	d, e := Open(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := d.SaveDead(ctx, want); e != nil {
+		t.Fatal(e)
+	}
+	if e := d.Close(); e != nil {
+		t.Fatal(e)
+	}
+
+	d, e = Open(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	got, e := d.LoadDead(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("LoadDead = %v, want %v", got, want)
+	}
+}
+
+func TestSaveDeadReplacesWhatWasStored(t *testing.T) {
+	ctx := context.Background()
+	d := openTemp(t)
+	if e := d.SaveDead(ctx, map[string]string{"/logs/gone.jsonl": "old", "/logs/kept.jsonl": "old"}); e != nil {
+		t.Fatal(e)
+	}
+
+	want := map[string]string{"/logs/kept.jsonl": "new", "/logs/added.jsonl": "new"}
+	if e := d.SaveDead(ctx, want); e != nil {
+		t.Fatal(e)
+	}
+	got, e := d.LoadDead(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("after a second save LoadDead = %v, want %v", got, want)
+	}
+
+	if e := d.SaveDead(ctx, nil); e != nil {
+		t.Fatal(e)
+	}
+	got, e = d.LoadDead(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(got) != 0 {
+		t.Errorf("after saving nothing LoadDead = %v, want it empty", got)
+	}
+}
+
+// A cache written before exclusions were kept has no table for them. Opening it
+// has to add one and leave what it already holds alone.
+func TestOpenAddsTheDeadTableToAnOlderCache(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	old, e := sql.Open("sqlite", path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e := old.Exec("CREATE TABLE sessions (plugin_id TEXT, session_id TEXT, data BLOB NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(plugin_id,session_id))"); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := old.Exec(`INSERT INTO sessions VALUES('p','s','{"PluginID":"p","SessionID":"s"}',1)`); e != nil {
+		t.Fatal(e)
+	}
+	if e := old.Close(); e != nil {
+		t.Fatal(e)
+	}
+
+	d, e := Open(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	dead, e := d.LoadDead(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(dead) != 0 {
+		t.Errorf("LoadDead = %v, want it empty", dead)
+	}
+	sessions, e := d.Load(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(sessions) != 1 {
+		t.Errorf("Load = %+v, want the session the old cache held", sessions)
 	}
 }
 
