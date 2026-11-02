@@ -368,10 +368,15 @@ func artifactStore(db *cache.DB) app.ArtifactStore {
 // marked (not dropped) so each caller decides whether they belong in its answer.
 func scanSessions(ctx context.Context, a *app.App, c config.Config, db *cache.DB) []domain.Session {
 	var warm []domain.Session
+	var dead map[string]string
 	if db != nil {
 		warm, _ = db.Load(ctx)
+		// Each command is a process of its own, so without this every one of them
+		// reparses every log the last one excluded. A cache that cannot be read costs
+		// that reparse and nothing else, so it is not an error.
+		dead, _ = db.LoadDead(ctx)
 	}
-	snap := a.Scan(ctx, warm, nil)
+	snap := a.Scan(ctx, warm, dead)
 	for _, x := range snap.Errors {
 		fmt.Fprintf(os.Stderr, "%s: %s: %v\n", x.PluginID, x.Reason, x.Err)
 	}
@@ -385,6 +390,7 @@ func scanSessions(ctx context.Context, a *app.App, c config.Config, db *cache.DB
 	}
 	if db != nil {
 		_ = db.Save(ctx, snap.Sessions)
+		_ = db.SaveDead(ctx, snap.Dead)
 		// The same housekeeping the TUI does after a scan. Without it, a machine
 		// where agentcarto is only ever called from the command line keeps every
 		// session it has ever seen and honours neither cache.max_age nor max_size.

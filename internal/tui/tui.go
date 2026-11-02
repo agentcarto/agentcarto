@@ -628,6 +628,7 @@ func (m Model) handleScanMsg(x scanMsg) (tea.Model, tea.Cmd) {
 		// again with each scan rather than only at startup.
 		m.headlines = m.cache.Headlines(context.Background())
 		_ = m.cache.Save(context.Background(), x.snap.Sessions)
+		_ = m.cache.SaveDead(context.Background(), x.snap.Dead)
 		successful := scanSucceeded(m.app, x.snap)
 		_ = m.cache.Prune(context.Background(), x.snap.Sessions, successful, time.Duration(m.app.Config.Cache.MaxAge))
 		_ = m.cache.Enforce(context.Background(), int64(m.app.Config.Cache.MaxSize))

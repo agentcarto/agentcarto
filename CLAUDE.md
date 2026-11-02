@@ -85,6 +85,11 @@ itself decides reuse/skip/re-parse using `core/scan.Cache`, keyed by a fingerpri
 `path:size:mtime` (reproducible in both processes). `ParserVersion` in the `Descriptor` invalidates
 old cache when the parser changes — **bump it when you change how a plugin parses sessions.**
 
+`Dead` lives in the SQLite cache (`scan_dead`) alongside the sessions, because each CLI command is a
+process of its own and would otherwise reparse every excluded log, such as every Claude subagent log
+that is not a fork. The host passes its values along without reading them: they are stamps of
+`ParserVersion` and fingerprint that only `core/scan` compares.
+
 ### Domain model (`core/domain/model.go`)
 `Session` (one conversation, with fork lineage via `ParentSessionID`/`ForkAt`) and a normalized
 event stream (`EventKind`: user/assistant/reasoning/tool_call/tool_result/file_change/…). Note the

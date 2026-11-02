@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -84,6 +85,56 @@ func TestScanSessionsExcludesPreviouslyCachedLog(t *testing.T) {
 		if got := scanSessions(ctx, a, a.Config, db); len(got) != 0 {
 			t.Fatalf("scan %d restored excluded log: %+v", i, got)
 		}
+	}
+}
+
+// deadRecorder reports the negative cache it was handed and leaves its own.
+type deadRecorder struct {
+	handed *map[string]string
+	dead   map[string]string
+}
+
+// Scan implements plugin.Scanner.
+func (s deadRecorder) Scan(_ context.Context, in plugin.ScanInput) (plugin.ScanOutput, error) {
+	*s.handed = in.Dead
+	return plugin.ScanOutput{Dead: s.dead}, nil
+}
+
+// Each command is a process of its own, so what spares the next one from reparsing
+// the logs this one excluded is that they reach it through the cache.
+func TestScanSessionsHandsTheNextCommandWhatThisOneExcluded(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	excluded := map[string]string{"/logs/subagent.jsonl": "stamp"}
+	command := func() map[string]string {
+		db, err := cache.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var handed map[string]string
+		a := app.Build(config.Config{}, []plugin.Instance{{ID: "claude",
+			Impl: deadRecorder{handed: &handed, dead: excluded}}})
+		scanSessions(ctx, a, a.Config, db)
+		return handed
+	}
+
+	if got := command(); len(got) != 0 {
+		t.Errorf("first command was handed %v, want nothing", got)
+	}
+	if got := command(); !maps.Equal(got, excluded) {
+		t.Errorf("second command was handed %v, want %v", got, excluded)
+	}
+}
+
+// --no-cache says not to touch the store, so there is nothing to carry over.
+func TestScanSessionsWithoutACacheStartsFromNothing(t *testing.T) {
+	handed := map[string]string{"sentinel": ""}
+	a := app.Build(config.Config{}, []plugin.Instance{{ID: "claude",
+		Impl: deadRecorder{handed: &handed, dead: map[string]string{"/logs/subagent.jsonl": "stamp"}}}})
+	scanSessions(context.Background(), a, a.Config, nil)
+	if len(handed) != 0 {
+		t.Errorf("handed %v, want nothing", handed)
 	}
 }
 

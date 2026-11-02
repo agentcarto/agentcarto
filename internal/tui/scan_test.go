@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,28 @@ func TestScanDoesNotRestoreExcludedCachedLog(t *testing.T) {
 			t.Fatalf("incremental=%v restored excluded log: %+v", incremental, sm.sessions)
 		}
 		m.sessions, m.dead = sm.sessions, sm.snap.Dead
+	}
+}
+
+// A command run after the TUI closes reads what the TUI's scans excluded, rather
+// than reparsing those logs.
+func TestScanStoresWhatItExcluded(t *testing.T) {
+	db, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	excluded := map[string]string{"/logs/subagent.jsonl": "stamp"}
+	m := Model{width: 120, height: 20, view: "time", cache: db, app: &app.App{}}
+
+	m.Update(scanMsg{snap: domain.Snapshot{Dead: excluded}})
+
+	got, err := db.LoadDead(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(got, excluded) {
+		t.Errorf("LoadDead = %v, want %v", got, excluded)
 	}
 }
 
