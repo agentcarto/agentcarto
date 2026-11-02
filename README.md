@@ -91,7 +91,9 @@ line ends with the whole picture:
 ```
 
 The line under it speaks for the selected session: which call it is on, that it is queued, or why
-its last attempt failed and when it is tried again. That reason is usually what the agent's CLI
+its last attempt failed and when it is tried again. A failure is tried again every six hours. After
+three that may have cost money it waits a week, or until the session changes; one where the CLI never
+reached the API costs nothing and is not counted. That reason is usually what the agent's CLI
 printed, and `doctor` prints it too, so read it before pasting it anywhere. Rows are marked `⟳` while being
 summarized and `!` when a failure is holding them back. A session's detail header adds how many of
 its turns are described and, when something is happening, what (`§12/15  summarizing 2/3`). A turn

@@ -404,3 +404,21 @@ func TestListStatusLineIsBlankOnAFolderRow(t *testing.T) {
 		t.Errorf("line=%q", line)
 	}
 }
+
+// A failure that cost nothing is not counted, so there is no count to give. It is
+// still a failure, and "failed 0×" would say the opposite.
+func TestAFailureWithNoCountSaysItFailed(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	waiting := summary.SessionStatus{State: summary.SessionFailed, LastTried: now, RetryAt: now.Add(time.Hour), LastError: "limit"}
+	if got, want := sessionSummaryLine(waiting, now), "§ failed, retry in 1h00m: limit"; got != want {
+		t.Errorf("line=%q want %q", got, want)
+	}
+	ready := summary.SessionStatus{State: summary.SessionQueued, LastTried: now, LastError: "limit"}
+	if got, want := sessionSummaryLine(ready, now), "§ queued to retry, failed: limit"; got != want {
+		t.Errorf("line=%q want %q", got, want)
+	}
+	m := Model{summaryStatus: summary.Status{Enabled: true}}
+	if note := m.detailSummaryNote(waiting); !strings.Contains(note, "failed") || strings.Contains(note, "×") {
+		t.Errorf("note=%q", note)
+	}
+}

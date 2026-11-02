@@ -283,3 +283,35 @@ func TestForceReplacesTheHeadlineAlongWithTheSummary(t *testing.T) {
 		t.Errorf("--force did not replace what it remade: %+v", got)
 	}
 }
+
+// Summaries made by hand answer what the record of giving up says could not be had.
+// A request still being tried is left alone: the worker's own check deals with it.
+func TestSummarizingByHandClearsARecordOfGivingUp(t *testing.T) {
+	_, _ = summaryFixture(t)
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []summary.Request{
+		{PluginID: "claude", SessionID: "gave-up", Queued: time.Now(), Attempts: summary.MaxAttempts},
+		{PluginID: "claude", SessionID: "trying", Queued: time.Now(), Attempts: 1},
+	} {
+		if err := q.Add(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !clearGaveUp(domain.Session{PluginID: "claude", SessionID: "gave-up"}) {
+		t.Error("it does not report clearing the record")
+	}
+	if clearGaveUp(domain.Session{PluginID: "claude", SessionID: "trying"}) {
+		t.Error("it reports clearing a request still being tried")
+	}
+
+	if _, ok := q.Find("claude", "gave-up"); ok {
+		t.Error("the record is still there")
+	}
+	if _, ok := q.Find("claude", "trying"); !ok {
+		t.Error("a request still being tried was taken out")
+	}
+}

@@ -771,7 +771,7 @@ func TestShowSaysWhyASessionIsWaitingOutAFailure(t *testing.T) {
 	}
 	s := domain.Session{PluginID: "claude", SessionID: "failing", Fingerprint: "fp1"}
 	cfg := config.Config{Summary: config.Summary{Agent: "claude", Model: "claude-sonnet-5"}}
-	base := summary.Request{PluginID: "claude", SessionID: "failing", Queued: time.Now(), Batches: [][]int{{1}}, Prompts: []string{"doc"}}
+	base := summary.Request{PluginID: "claude", SessionID: "failing", Queued: time.Now(), Fingerprint: "fp1", Batches: [][]int{{1}}, Prompts: []string{"doc"}}
 
 	// Failed once, inside the backoff: it comes back on its own.
 	base.Attempts, base.LastTried = 1, time.Now()
@@ -783,15 +783,15 @@ func TestShowSaysWhyASessionIsWaitingOutAFailure(t *testing.T) {
 		t.Errorf("a session inside its backoff explains neither the wait nor the way past it: %q", out)
 	}
 
-	// Failed often enough to stop: nothing will pick it up, so saying "later"
-	// would be a lie.
+	// Failed often enough to stop for a while: "in five hours" would be a lie, and
+	// so would "never".
 	base.Attempts = summary.MaxAttempts
 	if err := q.Add(base); err != nil {
 		t.Fatal(err)
 	}
 	out = capturingStderr(t, func() { summarizeForShow(ctx, nil, cfg, d, s, "failing") })
-	if !strings.Contains(out, "no longer retried") {
-		t.Errorf("a session that is done being tried is reported as waiting: %q", out)
+	if !strings.Contains(out, "not tried again until") || !strings.Contains(out, "agentcarto summarize failing") {
+		t.Errorf("a session that has given up does not say until when, or the way past it: %q", out)
 	}
 }
 
@@ -1258,5 +1258,42 @@ func TestSummaryStatusSaysNothingWhereSummarizingIsNotHappening(t *testing.T) {
 	}
 	if st := summaryStatusFunc(on, d)(); !st.Enabled || st.Queued != 1 {
 		t.Errorf("summarizing on: %+v", st)
+	}
+}
+
+// A record of giving up holds its session back from being queued again, which is the
+// whole of what it does, until the wait is over or the log has moved.
+func TestAGaveUpRecordHoldsTheSessionBackUntilItIsSuperseded(t *testing.T) {
+	_, _ = summaryFixture(t)
+	ctx := context.Background()
+	d, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gaveUp := summary.Request{PluginID: "claude", SessionID: "s1", Queued: time.Now(), Fingerprint: "fp1", Attempts: summary.MaxAttempts, LastTried: time.Now()}
+	if err := q.Add(gaveUp); err != nil {
+		t.Fatal(err)
+	}
+	s := domain.Session{PluginID: "claude", SessionID: "s1", Fingerprint: "fp1"}
+
+	if worthOpening(ctx, d, q, s, time.Hour) {
+		t.Error("a session that gave up was opened again inside its wait")
+	}
+	moved := s
+	moved.Fingerprint = "fp2"
+	if !worthOpening(ctx, d, q, moved, time.Hour) {
+		t.Error("a session whose log moved stays held back")
+	}
+	gaveUp.LastTried = time.Now().Add(-summary.GiveUpFor)
+	if err := q.Add(gaveUp); err != nil {
+		t.Fatal(err)
+	}
+	if !worthOpening(ctx, d, q, s, time.Hour) {
+		t.Error("a session stays held back past the end of its wait")
 	}
 }

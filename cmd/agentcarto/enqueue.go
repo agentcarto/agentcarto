@@ -223,7 +223,7 @@ func pickForSummary(sessions []domain.Session) []domain.Session {
 // have to be recognized without a parse, or that answer costs a parse of
 // everything on the machine every time.
 func worthOpening(ctx context.Context, db *cache.DB, q *summary.Queue, s domain.Session, sessionEvery time.Duration) bool {
-	if _, queued := q.Find(s.PluginID, s.SessionID); queued {
+	if r, queued := q.Find(s.PluginID, s.SessionID); queued && !r.Superseded(s.Fingerprint, time.Now()) {
 		return false // already waiting; the request holds the prompt already
 	}
 	// The log is gone, so the cached conversation is the only thing left to read.
@@ -286,6 +286,12 @@ func sessionSummaryOverdue(ctx context.Context, db *cache.DB, s domain.Session, 
 func queueOne(ctx context.Context, a *app.App, db *cache.DB, q *summary.Queue, s domain.Session, sessionEvery time.Duration) (queued, opened bool) {
 	if !worthOpening(ctx, db, q, s, sessionEvery) {
 		return false, false
+	}
+	// Only a record of giving up can be there by now, and it has just been found to
+	// stand for nothing. It goes whether or not a new request takes its place: left
+	// behind, a session with nothing to ask about would go on reading as failed.
+	if old, ok := q.Find(s.PluginID, s.SessionID); ok {
+		_ = q.Done(old)
 	}
 	conv, err := a.Conversation(ctx, s)
 	if err != nil || conv == nil {
@@ -401,11 +407,14 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		// Waiting out a failure. Trying again here would repeat it on every run —
 		// but saying nothing leaves a reader to wonder why the session it just
 		// asked for is the one session without a summary.
-		if r.Attempts >= summary.MaxAttempts {
-			fmt.Fprintf(os.Stderr, "agentcarto: summarizing this session failed %d times and is no longer retried — `agentcarto summarize %s` reports why\n", r.Attempts, ref)
+		if r.GaveUp() {
+			fmt.Fprintf(os.Stderr, "agentcarto: summarizing this session failed %d times and is not tried again until %s or until it changes — `agentcarto summarize %s` puts it back\n",
+				r.Attempts, r.LastTried.Add(summary.GiveUpFor).Local().Format("01-02 15:04"), ref)
+		} else if wait := (summary.RetryAfter - time.Since(r.LastTried)).Round(time.Minute); len(r.Prompts) == 0 {
+			// Only the session's own summary is owed, and `summarize` asks about turns.
+			fmt.Fprintf(os.Stderr, "agentcarto: making this session's own summary failed; it is tried again in %s\n", wait)
 		} else {
-			fmt.Fprintf(os.Stderr, "agentcarto: summarizing this session failed; it is tried again in %s, or now with `agentcarto summarize %s`\n",
-				(summary.RetryAfter - time.Since(r.LastTried)).Round(time.Minute), ref)
+			fmt.Fprintf(os.Stderr, "agentcarto: summarizing this session failed; it is tried again in %s, or now with `agentcarto summarize %s`\n", wait, ref)
 		}
 		return false
 	}

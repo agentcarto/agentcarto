@@ -13,6 +13,34 @@ import (
 	"time"
 )
 
+// ErrNotBilled marks a failure that cost nothing: the CLI fell over before asking the
+// API, or was not there to ask. It is not what MaxAttempts is there to bound.
+var ErrNotBilled = errors.New("summary: the call was not billed")
+
+// notBilled is a failure that errors.Is reports as ErrNotBilled, and that otherwise
+// reads as what it wraps.
+type notBilled struct{ error }
+
+// Is reports the failure as ErrNotBilled.
+func (notBilled) Is(target error) bool { return target == ErrNotBilled }
+
+// Unwrap returns the failure itself.
+func (e notBilled) Unwrap() error { return e.error }
+
+// neverReachedAPI reports whether a CLI's envelope says no call was made. Both fields
+// have to say so, and be there to say it: codex prints no envelope, and a failure
+// that cannot be shown to be free has to be counted as one that may have cost money.
+func neverReachedAPI(stdout []byte) bool {
+	var envelope struct {
+		Cost *float64 `json:"total_cost_usd"`
+		API  *float64 `json:"duration_api_ms"`
+	}
+	if json.Unmarshal(stdout, &envelope) != nil || envelope.Cost == nil || envelope.API == nil {
+		return false
+	}
+	return *envelope.Cost == 0 && *envelope.API == 0
+}
+
 // Generator runs an agent over a prompt and returns what it said. The interface
 // exists so that the part of this package that decides what a summary says can
 // be tested without a subprocess, and so that a future direct API call can
@@ -94,7 +122,11 @@ func claudeAnswer(out []byte) (string, error) {
 		return "", fmt.Errorf("claude: unreadable output: %w (began %.120q)", e, out)
 	}
 	if env.IsError {
-		return "", fmt.Errorf("claude: the run failed (%s): %.200s", env.Subtype, env.Result)
+		failed := fmt.Errorf("claude: the run failed (%s): %.200s", env.Subtype, env.Result)
+		if neverReachedAPI(out) {
+			return "", notBilled{failed}
+		}
+		return "", failed
 	}
 	if strings.TrimSpace(env.Result) == "" {
 		return "", fmt.Errorf("claude: the run returned an empty answer")
@@ -211,10 +243,14 @@ func run(ctx context.Context, timeout time.Duration, stdin, name string, args ..
 	case errors.Is(ctx.Err(), context.Canceled):
 		return nil, fmt.Errorf("%s: cancelled", name)
 	case errors.Is(e, exec.ErrNotFound):
-		return nil, fmt.Errorf("%s: not on PATH — summaries need its CLI installed and signed in", name)
+		return nil, notBilled{fmt.Errorf("%s: not on PATH — summaries need its CLI installed and signed in", name)}
 	default:
 		// Passing on what the CLI said is what makes the failure diagnosable from a
 		// background worker's log.
-		return nil, fmt.Errorf("%s: %w: %.400s", name, e, failureText(out.Bytes(), errb.String()))
+		failed := fmt.Errorf("%s: %w: %.400s", name, e, failureText(out.Bytes(), errb.String()))
+		if neverReachedAPI(out.Bytes()) {
+			return nil, notBilled{failed}
+		}
+		return nil, failed
 	}
 }

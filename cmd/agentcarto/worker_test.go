@@ -996,3 +996,15 @@ func TestAnAnswerThatBeatTheStopIsKept(t *testing.T) {
 		t.Errorf("the answered request stayed in the queue:\n%s", log.String())
 	}
 }
+
+// A failure that cost nothing still answers the question doctor is asked.
+func TestDoctorReportsAFailureThatWasNotCounted(t *testing.T) {
+	st := summary.Status{Enabled: true, Failed: 1, Sessions: map[domain.SessionKey]summary.SessionStatus{
+		{PluginID: "claude", SessionID: "uncounted"}: {State: summary.SessionFailed, LastTried: time.Now(), LastError: "limit"},
+	}}
+	var out bytes.Buffer
+	writeSummaryStatus(&out, st, "/queue")
+	if !strings.Contains(out.String(), "1 waiting after a failure") || !strings.Contains(out.String(), ": limit") {
+		t.Errorf("doctor does not report it:\n%s", out.String())
+	}
+}

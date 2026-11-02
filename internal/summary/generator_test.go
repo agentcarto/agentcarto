@@ -2,6 +2,7 @@ package summary
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -218,6 +219,62 @@ func waitForFile(ctx context.Context, path string) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A CLI that fell over before asking the API cost nothing, and says so in its
+// envelope. What MaxAttempts bounds is spending, so the difference has to survive
+// as far as the queue.
+func TestAFailureThatNeverReachedTheAPIIsMarked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the cases below drive /bin/sh")
+	}
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		script string
+		want   bool
+	}{
+		{"no call was made", `printf '{"duration_api_ms":0,"total_cost_usd":0,"result":"limit"}'; exit 1`, true},
+		{"a call was made", `printf '{"duration_api_ms":900,"total_cost_usd":0.2,"result":"limit"}'; exit 1`, false},
+		{"it took time but cost nothing", `printf '{"duration_api_ms":900,"total_cost_usd":0}'; exit 1`, false},
+		{"the envelope says nothing about cost", `printf '{"is_error":true,"result":"limit"}'; exit 1`, false},
+		{"no envelope", `echo 'it broke' >&2; exit 1`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, e := run(ctx, time.Minute, "", "sh", "-c", c.script)
+			if e == nil {
+				t.Fatal("run succeeded on a failing command")
+			}
+			if got := errors.Is(e, ErrNotBilled); got != c.want {
+				t.Errorf("errors.Is(%v, ErrNotBilled)=%v want %v", e, got, c.want)
+			}
+		})
+	}
+	t.Run("the CLI is not there", func(t *testing.T) {
+		_, e := run(ctx, time.Minute, "", "agentcarto-no-such-binary-4f2a")
+		if !errors.Is(e, ErrNotBilled) {
+			t.Errorf("%v is not marked as costing nothing", e)
+		}
+	})
+	t.Run("a timeout may have been billed", func(t *testing.T) {
+		_, e := run(ctx, 50*time.Millisecond, "", "sh", "-c", "sleep 5")
+		if e == nil || errors.Is(e, ErrNotBilled) {
+			t.Errorf("run=%v, want a failure not marked as costing nothing", e)
+		}
+	})
+}
+
+// claude can also report a failed run with a clean exit.
+func TestAFailedRunWithACleanExitIsMarkedTheSameWay(t *testing.T) {
+	_, e := claudeAnswer([]byte(`{"is_error":true,"subtype":"x","result":"limit","duration_api_ms":0,"total_cost_usd":0}`))
+	if !errors.Is(e, ErrNotBilled) {
+		t.Errorf("%v is not marked as costing nothing", e)
+	}
+	_, e = claudeAnswer([]byte(`{"is_error":true,"subtype":"x","result":"limit","duration_api_ms":900,"total_cost_usd":0.2}`))
+	if e == nil || errors.Is(e, ErrNotBilled) {
+		t.Errorf("%v, want a failure not marked as costing nothing", e)
 	}
 }
 

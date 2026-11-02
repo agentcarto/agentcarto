@@ -91,8 +91,7 @@ func summarizeWorkerCmd(ctx context.Context, cfg config.Config, db *cache.DB, ar
 	done := 0
 	for i, r := range reqs {
 		if !r.Ready(time.Now()) {
-			// Failed recently, or failed often enough to stop. Sweep takes the
-			// ones that are done being tried.
+			// Failed recently, or a record of having given up.
 			continue
 		}
 		if done >= cfg.Summary.MaxPerRun {
@@ -169,7 +168,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		out, err := gen.Generate(ctx, summary.System(language), prompt)
 		if err != nil && ctx.Err() != nil {
 			// Being stopped says nothing about the session. As a failure it would wait
-			// out the backoff, and three stops would end its summaries for good.
+			// out the backoff, and three stops would have it give up.
 			fmt.Fprintf(log, "%s %s/%s: call %d of %d stopped with the worker\n", stamp(), r.PluginID, short8(r.SessionID), i+1, len(r.Prompts))
 			return true
 		}

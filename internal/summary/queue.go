@@ -58,6 +58,9 @@ type Request struct {
 	// this it would be retried on every scan, which for the kind of failure
 	// where the model answers but the answer will not parse means paying every
 	// time.
+	//
+	// LastTried is every failure and Attempts only those that may have cost
+	// something, since spending is what the ceiling bounds (see ErrNotBilled).
 	Attempts  int       `json:"attempts,omitempty"`
 	LastTried time.Time `json:"last_tried,omitempty"`
 	// LastError is why the latest attempt failed, on one line. It is kept on the
@@ -72,21 +75,37 @@ type Request struct {
 // read on a single line.
 const maxLastError = 300
 
-// RetryAfter is how long a failed request waits before the worker tries it
-// again, and MaxAttempts is where it gives up. A session that cannot be
-// summarized is usually one that will not be — an answer the model keeps
-// mangling, a conversation something in the pipeline cannot render — so the
-// backoff is generous and the ceiling is low.
+// RetryAfter is how long a failed request waits before the worker tries it again.
+// MaxAttempts is how many failures that may have cost something it takes to give up,
+// and GiveUpFor is how long giving up lasts.
+//
+// Giving up is not for good. A session that keeps costing money without producing a
+// summary should stop doing that, but the cause can be outside the session, and a
+// summary never made is lost once the agent rotates the log away. The wait is long
+// enough that the spending stops mattering and well short of that rotation.
 const (
 	RetryAfter  = 6 * time.Hour
 	MaxAttempts = 3
+	GiveUpFor   = 7 * 24 * time.Hour
 )
 
 // Ready reports whether a request should be tried now. A request that failed
-// recently waits; one that has failed too often is done being tried, and Sweep
-// removes it.
+// recently waits, and one that has given up is never tried again: it holds no prompts
+// to try, and what follows it is a new request (see Superseded).
 func (r Request) Ready(now time.Time) bool {
-	return r.Attempts < MaxAttempts && (r.LastTried.IsZero() || now.Sub(r.LastTried) >= RetryAfter)
+	return !r.GaveUp() && (r.LastTried.IsZero() || now.Sub(r.LastTried) >= RetryAfter)
+}
+
+// GaveUp reports whether a request is a record of having given up.
+func (r Request) GaveUp() bool { return r.Attempts >= MaxAttempts }
+
+// Superseded reports whether a record of having given up no longer holds its session
+// back, now that the log stands at fingerprint: its wait is over, or the session has
+// moved on to a conversation nobody has tried. A request still being tried is never
+// superseded. It has its prompts, and queueing the session again would throw away
+// what is known about its failures.
+func (r Request) Superseded(fingerprint string, now time.Time) bool {
+	return r.GaveUp() && (r.Fingerprint != fingerprint || now.Sub(r.LastTried) >= GiveUpFor)
 }
 
 // OpenQueue returns the queue rooted at dir, creating it if it is not there.
@@ -166,11 +185,18 @@ func (q *Queue) List() ([]Request, []string) {
 
 // Retry records that a request failed, and why, and puts it back, so the worker
 // leaves it alone for a while instead of doing it again on the next scan. Once it
-// has failed MaxAttempts times it stops being tried at all, and Sweep takes it.
+// has failed MaxAttempts times in ways that may have cost something it gives up, and
+// what goes back is only the record: the prompts hold a session's text, and nothing
+// will read them again.
 func (q *Queue) Retry(r Request, now time.Time, reason error) error {
-	r.Attempts++
+	if !errors.Is(reason, ErrNotBilled) {
+		r.Attempts++
+	}
 	r.LastTried = now
 	r.LastError = reasonLine(reason)
+	if r.GaveUp() {
+		r.Nodes, r.Batches, r.Prompts = nil, nil, nil
+	}
 	return q.Add(r)
 }
 
@@ -206,10 +232,14 @@ func (q *Queue) Done(r Request) error {
 	return err
 }
 
-// Sweep removes requests older than maxAge and files that are not requests, and
-// reports how many it took. A request that has sat unread for days describes a
-// session that has almost certainly changed since; summarizing it would pay for
-// a prompt built from a conversation that no longer looks like that.
+// Sweep removes requests older than maxAge, records of giving up whose wait is over,
+// and files that are neither, and reports how many it took. A request that has sat
+// unread for days describes a session that has almost certainly changed since;
+// summarizing it would pay for a prompt built from a conversation that no longer
+// looks like that.
+//
+// A record of giving up is not aged by when it was queued. It holds no prompt to go
+// stale, and taking it at maxAge would end its wait early.
 func (q *Queue) Sweep(maxAge time.Duration, now time.Time) int {
 	reqs, bad := q.List()
 	n := 0
@@ -219,11 +249,12 @@ func (q *Queue) Sweep(maxAge time.Duration, now time.Time) int {
 		}
 	}
 	for _, r := range reqs {
-		// Stale, or tried until there was no point trying again.
-		if now.Sub(r.Queued) > maxAge || r.Attempts >= MaxAttempts {
-			if q.Done(r) == nil {
-				n++
-			}
+		over := now.Sub(r.Queued) > maxAge
+		if r.GaveUp() {
+			over = now.Sub(r.LastTried) >= GiveUpFor
+		}
+		if over && q.Done(r) == nil {
+			n++
 		}
 	}
 	return n

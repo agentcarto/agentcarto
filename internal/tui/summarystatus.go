@@ -82,12 +82,12 @@ func sessionSummaryLine(ss summary.SessionStatus, now time.Time) string {
 		}
 		return summaryMark + " " + text
 	case summary.SessionQueued:
-		if ss.Attempts == 0 {
+		if ss.Attempts == 0 && ss.LastTried.IsZero() {
 			return summaryMark + " queued"
 		}
-		return summaryMark + fmt.Sprintf(" queued to retry, failed %d×", ss.Attempts) + failureReason(ss)
+		return summaryMark + " queued to retry, " + failedText(ss) + failureReason(ss)
 	case summary.SessionFailed:
-		text := fmt.Sprintf(" failed %d×", ss.Attempts)
+		text := " " + failedText(ss)
 		if !ss.RetryAt.IsZero() {
 			// A status is read every few seconds, so its backoff can be over by the
 			// time it is drawn. No time left reads as an empty duration otherwise.
@@ -100,6 +100,16 @@ func sessionSummaryLine(ss summary.SessionStatus, now time.Time) string {
 		return summaryMark + text + failureReason(ss)
 	}
 	return ""
+}
+
+// failedText says that a request failed, and how many times when that was counted.
+// Failures that cost nothing are not (summary.ErrNotBilled), and "failed 0×" would say
+// the opposite of what happened.
+func failedText(ss summary.SessionStatus) string {
+	if ss.Attempts == 0 {
+		return "failed"
+	}
+	return fmt.Sprintf("failed %d×", ss.Attempts)
 }
 
 // failureReason is the reason as the end of a line. A request written before reasons
@@ -169,7 +179,7 @@ func (m Model) detailSummaryNote(ss summary.SessionStatus) string {
 	case summary.SessionQueued:
 		note += styled("  queued", summaryStatusColor(false), false, false)
 	case summary.SessionFailed:
-		note += styled(fmt.Sprintf("  failed %d×", ss.Attempts), summaryStatusColor(true), false, false)
+		note += styled("  "+failedText(ss), summaryStatusColor(true), false, false)
 	}
 	return note
 }

@@ -2,6 +2,7 @@ package summary
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -295,23 +296,112 @@ func TestQueueRetryKeepsOnlyPrintableText(t *testing.T) {
 	}
 }
 
-// Sweep takes the requests that have failed too often, so they do not sit in
-// the queue forever being skipped.
-func TestQueueSweepsWhatGaveUp(t *testing.T) {
+// A request that failed for good sits out GiveUpFor, however long ago it was queued:
+// the ordinary age limit would have the next scan queue it again within two days,
+// which is the loop this exists to end. Only then does it go.
+func TestQueueSweepsWhatGaveUpOnceItsWaitIsOver(t *testing.T) {
 	q := tempQueue(t)
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	if err := q.Add(Request{PluginID: "claude", SessionID: "gave-up", Queued: now, Attempts: MaxAttempts, LastTried: now}); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Add(Request{PluginID: "claude", SessionID: "still-trying", Queued: now, Attempts: 1, LastTried: now}); err != nil {
-		t.Fatal(err)
+	old := now.Add(-30 * 24 * time.Hour)
+	for _, r := range []Request{
+		{SessionID: "wait-over", Queued: old, Attempts: MaxAttempts, LastTried: now.Add(-GiveUpFor)},
+		{SessionID: "still-waiting", Queued: old, Attempts: MaxAttempts, LastTried: now.Add(-GiveUpFor + time.Hour)},
+		{SessionID: "still-trying", Queued: now, Attempts: 1, LastTried: now},
+	} {
+		r.PluginID = "claude"
+		if err := q.Add(r); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if n := q.Sweep(48*time.Hour, now); n != 1 {
 		t.Errorf("Sweep removed %d, want 1", n)
 	}
-	got, _ := q.List()
-	if len(got) != 1 || got[0].SessionID != "still-trying" {
-		t.Errorf("after the sweep: %+v", got)
+	if _, ok := q.Find("claude", "wait-over"); ok {
+		t.Error("a request past its wait is still there")
+	}
+	for _, id := range []string{"still-waiting", "still-trying"} {
+		if _, ok := q.Find("claude", id); !ok {
+			t.Errorf("%s was swept", id)
+		}
+	}
+}
+
+// A failure that cost nothing says nothing about the session. All 452 failures in
+// one machine's log were of this kind, and every session they touched went on to
+// succeed, so counting them would stop what recovers on its own.
+func TestAFailureThatCostNothingIsNotCounted(t *testing.T) {
+	q := tempQueue(t)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: now, Prompts: []string{"p"}, Batches: [][]int{{1}}, Nodes: map[int]string{1: "n"}}
+	reason := fmt.Errorf("claude: %w", notBilled{errors.New("limit")})
+
+	for range MaxAttempts + 2 {
+		if err := q.Retry(r, now, reason); err != nil {
+			t.Fatal(err)
+		}
+		r, _ = q.Find("claude", "s1")
+	}
+
+	if r.Attempts != 0 || r.GaveUp() {
+		t.Errorf("attempts=%d gaveUp=%v, want it not counted", r.Attempts, r.GaveUp())
+	}
+	if !r.LastTried.Equal(now) || !strings.Contains(r.LastError, "limit") {
+		t.Errorf("the failure was not recorded: %+v", r)
+	}
+	if r.Ready(now) || !r.Ready(now.Add(RetryAfter)) {
+		t.Error("it does not wait out the backoff like any other failure")
+	}
+	if len(r.Prompts) != 1 {
+		t.Error("the prompts it will need were dropped")
+	}
+}
+
+// Giving up is on what has cost money. What is left is a record of why: the prompts
+// hold a session's text, and nothing will read them again.
+func TestARequestThatGivesUpKeepsOnlyTheRecord(t *testing.T) {
+	q := tempQueue(t)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: now, Fingerprint: "fp", Attempts: MaxAttempts - 1, Prompts: []string{"p"}, Batches: [][]int{{1}}, Nodes: map[int]string{1: "n"}}
+
+	if err := q.Retry(r, now, errors.New("the answer would not parse")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := q.Find("claude", "s1")
+	if !ok {
+		t.Fatal("the record of giving up is gone")
+	}
+	if !got.GaveUp() || got.Ready(now.Add(365*24*time.Hour)) {
+		t.Errorf("gaveUp=%v, and a record is never ready", got.GaveUp())
+	}
+	if got.LastError == "" || got.Fingerprint != "fp" {
+		t.Errorf("the record lost what it is for: %+v", got)
+	}
+	if got.Prompts != nil || got.Batches != nil || got.Nodes != nil {
+		t.Errorf("the session's text is still in the queue: %+v", got)
+	}
+}
+
+// What ends a wait: its time being over, or the session having moved on, which makes
+// it a different request about a different conversation.
+func TestAGaveUpRecordStandsUntilTheWaitOrTheSessionMoves(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	gaveUp := Request{Fingerprint: "fp1", Attempts: MaxAttempts, LastTried: now.Add(-time.Hour)}
+	cases := []struct {
+		name        string
+		r           Request
+		fingerprint string
+		want        bool
+	}{
+		{"same version, inside the wait", gaveUp, "fp1", false},
+		{"the session moved", gaveUp, "fp2", true},
+		{"the wait is over", Request{Fingerprint: "fp1", Attempts: MaxAttempts, LastTried: now.Add(-GiveUpFor)}, "fp1", true},
+		{"a request still being tried", Request{Fingerprint: "fp1", Attempts: 1, LastTried: now.Add(-time.Hour)}, "fp2", false},
+	}
+	for _, c := range cases {
+		if got := c.r.Superseded(c.fingerprint, now); got != c.want {
+			t.Errorf("%s: Superseded=%v want %v", c.name, got, c.want)
+		}
 	}
 }
 

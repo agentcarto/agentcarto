@@ -618,7 +618,7 @@ func writeSummaryStatus(w io.Writer, st summary.Status, queue string) {
 // again right now. A backoff being over does not count as an answer: doctor starts no
 // worker, so whoever asks why last night's run left nothing finds exactly those.
 func reportsFailure(s summary.SessionStatus) bool {
-	return s.Attempts > 0 && s.State != summary.SessionWorking
+	return (s.Attempts > 0 || !s.LastTried.IsZero()) && s.State != summary.SessionWorking
 }
 
 // failedRequests counts the sessions reportsFailure is true of.

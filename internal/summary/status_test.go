@@ -131,7 +131,7 @@ func TestStatusNamesWhatEachSessionIsWaitingFor(t *testing.T) {
 	if s := get("back-off-over"); s.State != SessionQueued || s.Attempts != 1 || s.LastError != "limit" {
 		t.Errorf("back-off-over=%+v", s)
 	}
-	if s := get("out-of-attempts"); s.State != SessionFailed || !s.RetryAt.IsZero() {
+	if s := get("out-of-attempts"); s.State != SessionFailed || !s.RetryAt.Equal(now.Add(GiveUpFor-30*24*time.Hour)) {
 		t.Errorf("out-of-attempts=%+v", s)
 	}
 }

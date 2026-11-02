@@ -85,8 +85,8 @@ type SessionStatus struct {
 	Attempts  int
 	LastTried time.Time
 	LastError string
-	// RetryAt is when a failed request becomes ready again. Zero when it has run
-	// out of attempts.
+	// RetryAt is when a failed request becomes ready again, or when a record of
+	// giving up stops holding its session back.
 	RetryAt time.Time
 	// Call, Calls and CallStarted are a working session's, as in Working.
 	Call        int
@@ -172,8 +172,9 @@ func (sr *StatusReader) Read(now time.Time) Status {
 			st.Queued++
 		} else {
 			ss.State = SessionFailed
-			if r.Attempts < MaxAttempts {
-				ss.RetryAt = r.LastTried.Add(RetryAfter)
+			ss.RetryAt = r.LastTried.Add(RetryAfter)
+			if r.GaveUp() {
+				ss.RetryAt = r.LastTried.Add(GiveUpFor)
 			}
 			st.Failed++
 		}

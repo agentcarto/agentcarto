@@ -96,6 +96,11 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		want = pendingTurns(turns, db.Summaries(ctx, s, nodes), open)
 	}
 	if len(want) == 0 {
+		// Every turn is described, so a record of giving up can only be about the
+		// session's own summary. Without the record the next scan asks for it again.
+		if clearGaveUp(s) {
+			fmt.Fprintf(w, "%s: its own summary had stopped being tried; the next run tries again\n", s.SessionID)
+		}
 		// The held-back turn is described differently depending on why it is held.
 		// A turn the log says is unfinished is being written; one the log says
 		// ended is only waiting out settleAfterComplete, and saying it is "still
@@ -223,6 +228,8 @@ func summarizeCmd(ctx context.Context, a *app.App, cfg config.Config, db *cache.
 		}
 	}
 
+	clearGaveUp(s)
+
 	fmt.Fprintf(w, "%s: summarized %d of %d turns with %s\n", s.SessionID, len(all.Turns), len(asked), gen.Name())
 	if missing := all.Missing(asked); len(missing) > 0 {
 		// Not an error: the turns that did come back are stored, and asking again
@@ -349,6 +356,22 @@ func storeSummaries(ctx context.Context, db *cache.DB, s domain.Session, res sum
 		return db.ReplaceSummaries(ctx, s, sums)
 	}
 	return db.PutSummaries(ctx, s, sums)
+}
+
+// clearGaveUp removes the record of a session having given up, once someone has asked
+// for its summaries by hand, and reports whether there was one. A summary is what the
+// record says could not be had, and it would go on reading as failed for the rest of
+// its wait.
+func clearGaveUp(s domain.Session) bool {
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		return false
+	}
+	r, ok := q.Find(s.PluginID, s.SessionID)
+	if !ok || !r.GaveUp() {
+		return false
+	}
+	return q.Done(r) == nil
 }
 
 // stopAfter reports how far a split run got before failing, then exits. What
