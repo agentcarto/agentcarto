@@ -960,8 +960,8 @@ func TestAStoppedWorkerMakesNoFurtherCall(t *testing.T) {
 	}
 }
 
-// An answer that came back before the stop was paid for. It is stored, and the next
-// worker has nothing left to ask.
+// An answer that came back before the stop was paid for. With it stored there is
+// nothing left of the request for another worker to pay for.
 func TestAnAnswerThatBeatTheStopIsKept(t *testing.T) {
 	r := summary.Request{
 		PluginID: "claude", SessionID: "stopped", Queued: time.Now().Add(-time.Hour), Fingerprint: "fp1",
@@ -980,19 +980,133 @@ func TestAnAnswerThatBeatTheStopIsKept(t *testing.T) {
 	if stored[1].Text != "いち" || stored[0].Text != "まとめ" {
 		t.Fatalf("the paid-for answer was lost: %+v\n%s", stored, log.String())
 	}
-	back, still := q.Find("claude", "stopped")
-	if still && back.Attempts != 0 {
-		t.Errorf("being stopped was recorded as a failure: attempts=%d reason=%q", back.Attempts, back.LastError)
+	if _, left := q.Find("claude", "stopped"); left {
+		t.Errorf("the answered request stayed in the queue:\n%s", log.String())
+	}
+}
+
+// scriptedGenerator answers each call with the next step, and records what it was
+// asked. Past the last step it fails, which a test reads as one call too many.
+type scriptedGenerator struct {
+	steps   []func() (string, error)
+	prompts []string
+}
+
+// Generate records the prompt and takes the next step.
+func (g *scriptedGenerator) Generate(_ context.Context, _, prompt string) (string, error) {
+	g.prompts = append(g.prompts, prompt)
+	if len(g.prompts) > len(g.steps) {
+		return "", errors.New("one call too many")
+	}
+	return g.steps[len(g.prompts)-1]()
+}
+
+// Name is what the summaries are stored as written by.
+func (g *scriptedGenerator) Name() string { return "fake m" }
+
+// answering is a step that returns out.
+func answering(out string) func() (string, error) {
+	return func() (string, error) { return out, nil }
+}
+
+// failing is a step that fails with err.
+func failing(err error) func() (string, error) {
+	return func() (string, error) { return "", err }
+}
+
+// A call that came back has been paid for, so a request that failed further on picks
+// up where it stopped: its later calls are what is left to ask, and its failures stay
+// on record. Asked to start again, it would pay twice. Dropped by the check for a
+// session summarized since it was queued, which its own first call satisfies, it
+// would lose its record of failing and, for a session whose log has gone, the turns
+// only its prompts can still describe.
+func TestAFailedRequestPicksUpAtTheCallThatFailed(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "long", Queued: time.Now().Add(-time.Hour), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1", 2: "n2"}, Batches: [][]int{{1}, {2}}, Prompts: []string{"first", "second"},
+	}
+	d, q := stoppedFixture(t, r)
+	var log bytes.Buffer
+
+	runRequest(context.Background(), &log, q, d, &scriptedGenerator{steps: []func() (string, error){
+		answering("@@TURN 1\nいち"), failing(errors.New("the answer was cut off")),
+	}}, r, 0, "")
+
+	back, still := q.Find("claude", "long")
+	if !still {
+		t.Fatalf("the request was dropped:\n%s", log.String())
+	}
+	if back.Answered != 1 || back.Attempts != 1 {
+		t.Fatalf("answered=%d attempts=%d, want 1 and 1", back.Answered, back.Attempts)
 	}
 
-	next := &fakeGenerator{out: "@@SESSION\nまとめ\n@@TURN 1\nいち"}
-	if still {
-		runRequest(context.Background(), &log, q, d, next, back, 0, "")
+	g := &scriptedGenerator{steps: []func() (string, error){
+		answering("@@TURN 2\nに"), answering("@@SESSION\nまとめ"),
+	}}
+	runRequest(context.Background(), &log, q, d, g, back, 0, "")
+
+	if len(g.prompts) == 0 || g.prompts[0] != "second" {
+		t.Errorf("the retry asked %q first, want the call that failed\n%s", g.prompts, log.String())
 	}
-	if next.calls != 0 {
-		t.Errorf("the next worker paid for the same answer again: %d calls\n%s", next.calls, log.String())
+	s := domain.Session{PluginID: "claude", SessionID: "long", Fingerprint: "fp1"}
+	stored := d.Summaries(context.Background(), s, r.Nodes)
+	if stored[1].Text != "いち" || stored[2].Text != "に" {
+		t.Errorf("stored=%+v\n%s", stored, log.String())
 	}
-	if _, left := q.Find("claude", "stopped"); left {
+	if _, left := q.Find("claude", "long"); left {
+		t.Errorf("the finished request stayed in the queue:\n%s", log.String())
+	}
+}
+
+// Stopped partway it picks up the same way, and costs only the call that was stopped.
+func TestAStoppedRequestPicksUpAtTheCallThatWasStopped(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "long", Queued: time.Now().Add(-time.Hour), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1", 2: "n2"}, Batches: [][]int{{1}, {2}}, Prompts: []string{"first", "second"},
+	}
+	d, q := stoppedFixture(t, r)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	var log bytes.Buffer
+
+	runRequest(ctx, &log, q, d, &scriptedGenerator{steps: []func() (string, error){
+		answering("@@TURN 1\nいち"),
+		func() (string, error) { stop(); return "", errors.New("claude: cancelled") },
+	}}, r, 0, "")
+
+	back, still := q.Find("claude", "long")
+	if !still || back.Answered != 1 || back.Attempts != 0 {
+		t.Fatalf("still=%v answered=%d attempts=%d, want the request there, 1 and 0\n%s", still, back.Answered, back.Attempts, log.String())
+	}
+	g := &scriptedGenerator{steps: []func() (string, error){answering("@@TURN 2\nに"), answering("@@SESSION\nまとめ")}}
+	runRequest(context.Background(), &log, q, d, g, back, 0, "")
+	if len(g.prompts) == 0 || g.prompts[0] != "second" {
+		t.Errorf("the next worker asked %q first, want the call that was stopped\n%s", g.prompts, log.String())
+	}
+}
+
+// What the check at the top is for still works on a request partly done: something
+// else answering the session after the last call this request knows about.
+func TestAPartlyDoneRequestIsStillAnsweredBySomethingElse(t *testing.T) {
+	r := summary.Request{
+		PluginID: "claude", SessionID: "long", Queued: time.Now().Add(-2 * time.Hour), Fingerprint: "fp1",
+		Nodes: map[int]string{1: "n1", 2: "n2"}, Batches: [][]int{{1}, {2}}, Prompts: []string{"first", "second"},
+		Answered: 1, AnsweredAt: time.Now().Add(-time.Hour),
+	}
+	d, q := stoppedFixture(t, r)
+	s := domain.Session{PluginID: "claude", SessionID: "long", Fingerprint: "fp1"}
+	if err := d.PutSummaries(context.Background(), s, []cache.Summary{{Turn: 2, NodeID: "n2", Text: "に", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	g := &scriptedGenerator{}
+	var log bytes.Buffer
+
+	runRequest(context.Background(), &log, q, d, g, r, 0, "")
+
+	if len(g.prompts) != 0 {
+		t.Errorf("it paid for %q, which something else had answered\n%s", g.prompts, log.String())
+	}
+	if _, left := q.Find("claude", "long"); left {
 		t.Errorf("the answered request stayed in the queue:\n%s", log.String())
 	}
 }

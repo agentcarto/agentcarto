@@ -418,18 +418,20 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 		}
 		return false
 	}
-	if len(r.Prompts) > 1 {
+	// A request partly answered goes to the worker with the rest: below is for the
+	// one call that a session needing one call still has to make from the start.
+	if len(r.Prompts) > 1 || r.Answered > 0 {
 		if _, _, err := summary.LockHolder(lockPath()); err == nil {
 			// Already being drained; this session is in the queue for it.
-			fmt.Fprintf(os.Stderr, "agentcarto: %d turns to summarize, queued behind a run already going — `agentcarto show %s --turns N` reads a turn now\n", turnsIn(r), ref)
+			fmt.Fprintf(os.Stderr, "agentcarto: %s, queued behind a run already going — `agentcarto show %s --turns N` reads a turn now\n", leftToSummarize(r), ref)
 			return false
 		}
 		// The worker is started on the way out of show, not here: showCmd defers
 		// one, and starting a second from inside would spawn a process that
 		// takes the lock's refusal and exits, writing a line to the log for
 		// nothing.
-		fmt.Fprintf(os.Stderr, "agentcarto: %d turns to summarize, running in the background — `agentcarto show %s --turns N` reads a turn now, and the summaries appear here on a later run\n",
-			turnsIn(r), ref)
+		fmt.Fprintf(os.Stderr, "agentcarto: %s, running in the background — `agentcarto show %s --turns N` reads a turn now, and the summaries appear here on a later run\n",
+			leftToSummarize(r), ref)
 		return false
 	}
 	gen, err := summary.New(cfg.Summary.Agent, cfg.Summary.Model, time.Duration(cfg.Summary.Timeout))
@@ -502,8 +504,18 @@ func summarizeForShow(ctx context.Context, a *app.App, cfg config.Config, db *ca
 
 func turnsIn(r summary.Request) int {
 	n := 0
-	for _, b := range r.Batches {
-		n += len(b)
+	for i, b := range r.Batches {
+		if i >= r.Answered {
+			n += len(b)
+		}
 	}
 	return n
+}
+
+// leftToSummarize says what a request still has to ask, for a message about it.
+func leftToSummarize(r summary.Request) string {
+	if n := turnsIn(r); n > 0 {
+		return fmt.Sprintf("%d turns to summarize", n)
+	}
+	return "this session's own summary to make"
 }

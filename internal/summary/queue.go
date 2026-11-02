@@ -52,6 +52,11 @@ type Request struct {
 	Nodes   map[int]string `json:"nodes"`
 	Batches [][]int        `json:"batches"`
 	Prompts []string       `json:"prompts"`
+	// Answered is how many of Prompts have come back and been stored, and AnsweredAt
+	// when the last of them was. Those calls are paid for, so a request that failed
+	// or was stopped further on is taken up at the next one.
+	Answered   int       `json:"answered,omitempty"`
+	AnsweredAt time.Time `json:"answered_at,omitzero"`
 	// Attempts and LastTried record failures. Nothing else can: the guard
 	// against regenerating asks the store when a session was last summarized,
 	// and a session that has never succeeded has nothing there — so without
@@ -94,6 +99,15 @@ const (
 // to try, and what follows it is a new request (see Superseded).
 func (r Request) Ready(now time.Time) bool {
 	return !r.GaveUp() && (r.LastTried.IsZero() || now.Sub(r.LastTried) >= RetryAfter)
+}
+
+// Accounted is the time up to which this request knows what has been stored for its
+// session. Anything newer is something else answering it.
+func (r Request) Accounted() time.Time {
+	if r.AnsweredAt.After(r.Queued) {
+		return r.AnsweredAt
+	}
+	return r.Queued
 }
 
 // GaveUp reports whether a request is a record of having given up.
@@ -181,6 +195,16 @@ func (q *Queue) List() ([]Request, []string) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Queued.Before(out[j].Queued) })
 	return out, bad
+}
+
+// Advance records how far a request has got. A request no longer in the queue stays
+// out: `show` takes one out before generating that session itself, and a worker that
+// started on it earlier must not bring it back by reporting its progress.
+func (q *Queue) Advance(r Request) error {
+	if _, err := os.Stat(filepath.Join(q.dir, requestName(r.PluginID, r.SessionID))); err != nil {
+		return nil
+	}
+	return q.Add(r)
 }
 
 // Retry records that a request failed, and why, and puts it back, so the worker

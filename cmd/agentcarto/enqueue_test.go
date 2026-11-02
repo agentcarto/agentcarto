@@ -1297,3 +1297,22 @@ func TestAGaveUpRecordHoldsTheSessionBackUntilItIsSuperseded(t *testing.T) {
 		t.Error("a session stays held back past the end of its wait")
 	}
 }
+
+// What is left is what a message counts. Calls already answered are paid for and stored.
+func TestTurnsInCountsWhatIsLeft(t *testing.T) {
+	r := summary.Request{Batches: [][]int{{1, 2}, {3}, {4, 5, 6}}}
+	if got := turnsIn(r); got != 6 {
+		t.Errorf("turnsIn=%d want 6", got)
+	}
+	r.Answered = 2
+	if got := turnsIn(r); got != 3 {
+		t.Errorf("turnsIn=%d want 3", got)
+	}
+	if got := leftToSummarize(r); got != "3 turns to summarize" {
+		t.Errorf("leftToSummarize=%q", got)
+	}
+	r.Answered = 3
+	if got := leftToSummarize(r); got != "this session's own summary to make" {
+		t.Errorf("leftToSummarize=%q", got)
+	}
+}

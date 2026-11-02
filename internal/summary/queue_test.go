@@ -421,3 +421,30 @@ func TestQueueFindCarriesFailuresForward(t *testing.T) {
 		t.Error("Find reported a request for a session that was never queued")
 	}
 }
+
+// show takes a request out of the queue before generating that session itself. A
+// worker that started on it earlier must not put it back by saying how far it got.
+func TestAdvancingARequestThatWasTakenOutLeavesItOut(t *testing.T) {
+	q := tempQueue(t)
+	r := Request{PluginID: "claude", SessionID: "s1", Queued: time.Now()}
+	if err := q.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	r.Answered = 1
+	if err := q.Advance(r); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := q.Find("claude", "s1"); got.Answered != 1 {
+		t.Errorf("answered=%d, want it recorded", got.Answered)
+	}
+	if err := q.Done(r); err != nil {
+		t.Fatal(err)
+	}
+	r.Answered = 2
+	if err := q.Advance(r); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := q.Find("claude", "s1"); ok {
+		t.Error("the request came back")
+	}
+}

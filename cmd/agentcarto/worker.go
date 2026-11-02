@@ -146,8 +146,8 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	// request unsummarized and make that a lie. Nothing else needs a window:
 	// queueOne writes a request only for a turn that has no summary, so a session
 	// with nothing new to describe is never queued in the first place.
-	if when, ok := db.SummarizedAt(ctx, s); ok && when.After(r.Queued) {
-		fmt.Fprintf(log, "%s %s/%s: summarized %s after this was queued, skipping\n", stamp(), r.PluginID, short8(r.SessionID), when.Sub(r.Queued).Round(time.Second))
+	if when, ok := db.SummarizedAt(ctx, s); ok && when.After(r.Accounted()) {
+		fmt.Fprintf(log, "%s %s/%s: summarized %s after this was queued, skipping\n", stamp(), r.PluginID, short8(r.SessionID), when.Sub(r.Accounted()).Round(time.Second))
 		_ = q.Done(r)
 		return false
 	}
@@ -157,8 +157,11 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	// call that saw every turn there is. Only such a call can describe the
 	// session; see storeSessionSummary.
 	var whole summary.Result
-	asked := 0
+	asked, calls := 0, 0
 	for i, prompt := range r.Prompts {
+		if i < r.Answered {
+			continue
+		}
 		if ctx.Err() != nil {
 			return true // leave the request queued: this is not the session's fault
 		}
@@ -166,6 +169,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		// call the queue is waiting on.
 		_ = q.MarkWorking(r, i+1, len(r.Prompts), time.Now())
 		out, err := gen.Generate(ctx, summary.System(language), prompt)
+		calls++
 		if err != nil && ctx.Err() != nil {
 			// Being stopped says nothing about the session. As a failure it would wait
 			// out the backoff, and three stops would have it give up.
@@ -201,9 +205,12 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 			_ = q.Retry(r, time.Now(), err)
 			return true
 		}
+		// After the store: an answer recorded as in hand and then lost would never
+		// be asked for again.
+		r.Answered, r.AnsweredAt = i+1, time.Now()
+		_ = q.Advance(r)
 	}
 
-	calls := len(r.Prompts)
 	// Turn 0 is where a session records the version it has answered, and
 	// worthOpening reads exactly that: a session recorded as answered is not
 	// opened again until its log moves. Both writes below land on turn 0 — the
@@ -218,17 +225,18 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 		fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s (a turn is still settling)\n",
 			stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), calls, gen.Name())
 		_ = q.Done(r)
-		return true
+		return calls > 0
 	}
 	_ = q.MarkWorking(r, 0, 0, time.Now())
 	spent, unwritten := storeSessionSummary(ctx, db, gen, s, r.Nodes, whole, sessionEvery, language, log)
 	if spent {
 		calls++
 	}
-	// Stopped, so the request stays. What this run stored makes the next worker's
-	// check at the top answer it without a call.
-	if ctx.Err() != nil {
-		return true
+	// Stopped with the session's summary still owed, so the request stays, and the
+	// next worker has only that call to make. Once it is written the stop changes
+	// nothing: the request has been answered.
+	if unwritten != nil && ctx.Err() != nil {
+		return calls > 0
 	}
 	// A request with no turn prompts existed only to remake a session summary that
 	// had been left behind (sessionSummaryOverdue). Finishing it unwritten would
@@ -238,7 +246,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 	if unwritten != nil && len(r.Prompts) == 0 {
 		fmt.Fprintf(log, "%s %s/%s: the session summary is still owed: %v\n", stamp(), r.PluginID, short8(r.SessionID), unwritten)
 		_ = q.Retry(r, time.Now(), unwritten)
-		return true
+		return calls > 0
 	}
 	// Recording the version matters most when the answer held nothing. Parse
 	// drops a turn the model declined to describe rather than failing — an answer
@@ -250,7 +258,7 @@ func runRequest(ctx context.Context, log io.Writer, q *summary.Queue, db *cache.
 
 	fmt.Fprintf(log, "%s %s/%s: %d turns in %d calls with %s\n", stamp(), r.PluginID, short8(r.SessionID), len(all.Turns), calls, gen.Name())
 	_ = q.Done(r)
-	return true
+	return calls > 0
 }
 
 // openWorkerLog appends to the worker's log, which is the only place its
