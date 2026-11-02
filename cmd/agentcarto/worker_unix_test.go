@@ -70,8 +70,8 @@ func TestASignalStopsTheWorkerAndItsCall(t *testing.T) {
 	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Errorf("the call outlived the worker: signal 0 to %d gave %v", pid, err)
 	}
-	if _, err := os.Stat(lockPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the lock outlived the worker: %v", err)
+	if pid, _, err := summary.LockHolder(lockPath()); err == nil {
+		t.Errorf("the lock outlived the worker: held by %d", pid)
 	}
 	if _, err := os.Stat(filepath.Join(queueDir(), ".working")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the record of its call outlived the worker: %v", err)

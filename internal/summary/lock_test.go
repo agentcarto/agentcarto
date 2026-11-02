@@ -1,8 +1,10 @@
 package summary
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -34,10 +36,9 @@ func TestLockAdmitsOne(t *testing.T) {
 	if err := second.Release(); err != nil {
 		t.Fatal(err)
 	}
-	// Releasing twice is not an error: a worker that crashed after removing the
-	// file must not turn its own cleanup into a failure.
+	// Releasing twice is not an error, so cleanup need not know what ran before it.
 	if err := second.Release(); err != nil {
-		t.Errorf("Release on a missing lock: %v", err)
+		t.Errorf("Release of a released lock: %v", err)
 	}
 }
 
@@ -65,18 +66,104 @@ func TestLockIsTakenOverFromADeadHolder(t *testing.T) {
 	_ = l.Release()
 }
 
-// A lock file that cannot be read is left alone. It may be another worker
-// writing it right now, and stealing it would put two workers on one queue.
-func TestLockLeavesAnUnreadableFileAlone(t *testing.T) {
-	for _, content := range []string{"", "not-a-pid", "   \n"} {
+// What the file says has no bearing on who holds the lock: it is there for doctor to
+// name a holder, and the holding is the kernel's. Whatever was left in it is written
+// over.
+func TestLockIgnoresWhatTheFileSays(t *testing.T) {
+	for _, content := range []string{"", "not-a-pid", "   \n", "1 2026-08-24T12:00:00Z and more than a pid would ever need\n"} {
 		p := filepath.Join(t.TempDir(), "summarize.lock")
 		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := TakeLock(p); err == nil {
-			t.Errorf("a lock holding %q was taken", content)
+		l, err := TakeLock(p)
+		if err != nil {
+			t.Errorf("a lock file holding %q could not be taken: %v", content, err)
+			continue
+		}
+		if pid, _, err := LockHolder(p); err != nil || pid != os.Getpid() {
+			t.Errorf("after a file holding %q: LockHolder=%d, %v", content, pid, err)
+		}
+		_ = l.Release()
+	}
+}
+
+// A process id in the file proves nothing: pids are reused, and one that belonged to
+// a dead worker can come to name anything. Read as a holder, it would stop every
+// worker for as long as that other process ran.
+func TestALockNamingALiveProcessIsFreeUnlessHeld(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "summarize.lock")
+	if err := os.WriteFile(p, []byte(fmt.Sprintf("%d %s\n", os.Getpid(), time.Now().Format(time.RFC3339))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if pid, _, err := LockHolder(p); err == nil {
+		t.Errorf("LockHolder=%d for a lock nothing holds", pid)
+	}
+	l, err := TakeLock(p)
+	if err != nil {
+		t.Fatalf("a lock nothing holds could not be taken: %v", err)
+	}
+	_ = l.Release()
+}
+
+// TestHelperHoldLock is not a test: it is the process the next test kills. It holds the
+// lock named in the environment until it is killed.
+func TestHelperHoldLock(t *testing.T) {
+	path := os.Getenv("AGENTCARTO_TEST_HOLD_LOCK")
+	if path == "" {
+		t.Skip("run by TestALockEndsWithTheProcessHoldingIt")
+	}
+	if _, err := TakeLock(path); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("held")
+	time.Sleep(time.Minute)
+}
+
+// A worker can die in any way at all. Killed outright it runs none of its cleanup, and
+// here nothing has collected it either, which leaves a zombie on Unix: its parent may
+// be the agent's CLI after a resume, which knows nothing of it. None of that keeps the
+// lock.
+func TestALockEndsWithTheProcessHoldingIt(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "summarize.lock")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLock$")
+	cmd.Env = append(os.Environ(), "AGENTCARTO_TEST_HOLD_LOCK="+p)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Wait() }()
+	defer func() { _ = cmd.Process.Kill() }()
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil || strings.TrimSpace(line) != "held" {
+		t.Fatalf("the helper said %q, %v", line, err)
+	}
+
+	if pid, _, err := LockHolder(p); err != nil || pid != cmd.Process.Pid {
+		t.Fatalf("LockHolder=%d, %v, want the helper (%d)", pid, err, cmd.Process.Pid)
+	}
+	if _, err := TakeLock(p); err == nil {
+		t.Fatal("the lock was taken while the helper held it")
+	}
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, _, err := LockHolder(p); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the lock outlived the process holding it")
 		}
 	}
+	l, err := TakeLock(p)
+	if err != nil {
+		t.Fatalf("the lock of a dead process could not be taken: %v", err)
+	}
+	_ = l.Release()
 }
 
 // The lock names its holder and when it was taken, so `doctor` can say what is
@@ -127,17 +214,6 @@ func TestTakeLockCreatesItsDirectory(t *testing.T) {
 	}
 }
 
-func TestProcessAlive(t *testing.T) {
-	if !processAlive(os.Getpid()) {
-		t.Error("this process is reported as not running")
-	}
-	for _, pid := range []int{0, -1, 4_000_000} {
-		if processAlive(pid) {
-			t.Errorf("pid %d is reported as running", pid)
-		}
-	}
-}
-
 // doctor is the only place that says whether a worker is running, since the
 // worker itself is detached and has no interface.
 func TestLockHolder(t *testing.T) {
@@ -171,5 +247,30 @@ func TestLockHolder(t *testing.T) {
 	}
 	if _, _, err := LockHolder(p); err == nil {
 		t.Error("a lock held by a dead process was reported as a running worker")
+	}
+}
+
+// A version from before the kernel held this lock goes by the pid in the file, and a
+// worker it started that has exited stays a zombie it reads as running. It can still be
+// open when the program is replaced under it, and it starts the new program's workers.
+// A released lock must name nothing it would mistake for one.
+func TestAReleasedLockNamesNoProcess(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "summarize.lock")
+	l, err := TakeLock(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Release(); err != nil {
+		t.Fatal(err)
+	}
+	pid, _, err := readLock(p)
+	if err != nil {
+		t.Fatalf("the file no longer reads as a lock, which those versions refuse to take over: %v", err)
+	}
+	if pid > 0 {
+		t.Errorf("the file names pid %d", pid)
+	}
+	if pid == 0 {
+		t.Error("the file names pid 0, which those versions refuse to take over")
 	}
 }
