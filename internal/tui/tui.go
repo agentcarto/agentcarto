@@ -2590,7 +2590,8 @@ func (m Model) detailForkParentLine(selected bool) string {
 }
 
 // detailTurnLine renders a turn row: the leading marker, turn number, timestamp, the
-// turn-mark columns (reply/tool/edit counts), and the headline.
+// turn-mark columns (reply/tool/edit counts), the headline, and as much of the turn's
+// summary as fits after it.
 func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected bool, colW [9]int, modelW int, hit bool) string {
 	turn := rowData.Turn
 	chronIndex := rowData.TurnIndex
@@ -2653,7 +2654,9 @@ func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected boo
 	if !selected && hit {
 		headColor = roleColor("meta") // emphasize the headline of a search hit
 	}
-	row.WriteString(styled(clip(convlogic.TurnHeadline(*m.detail, turn), remain), headColor, selected, false))
+	head := clip(convlogic.TurnHeadline(*m.detail, turn), remain)
+	row.WriteString(styled(head, headColor, selected, false))
+	row.WriteString(m.turnSummaryTail(rowData, remain-runewidth.StringWidth(head), selected))
 	line := row.String()
 	if selected && lipgloss.Width(line) < m.width-1 {
 		line += styled(strings.Repeat(" ", m.width-1-lipgloss.Width(line)), "", true, false)
@@ -3085,6 +3088,10 @@ func (m Model) detailRowText(r detailRow) string {
 	}
 	var b strings.Builder
 	b.WriteString(convlogic.TurnHeadline(*m.detail, r.Turn))
+	// On the row, so it has to be found: a word on screen that finds nothing reads as
+	// a broken search.
+	b.WriteByte(' ')
+	b.WriteString(m.turnSummaryText(r))
 	for _, e := range m.turnEvents(r.Turn) {
 		b.WriteByte(' ')
 		b.WriteString(e.Text)

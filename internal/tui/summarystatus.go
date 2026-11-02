@@ -151,6 +151,34 @@ func summaryRowMark(state summary.SessionState, selected bool) string {
 	return ""
 }
 
+// turnSummaryMinWidth is the least room a turn row shows a summary in, not counting the
+// gap before it. Less than this is a few words cut off, which reads as a mistake.
+const turnSummaryMinWidth = 20
+
+// turnSummaryText is the summary of the turn a row stands for, on one line. A row with no
+// turn number has none: key 0 is the session's own, and would read as this turn's.
+func (m Model) turnSummaryText(r detailRow) string {
+	if r.TurnIndex < 0 {
+		return ""
+	}
+	return strings.Join(strings.Fields(m.summaries[r.TurnIndex+1].Text), " ")
+}
+
+// turnSummaryTail is what a turn row shows of its summary in the room its prompt left.
+//
+// After the prompt rather than in its place or on a line of its own. The prompt is the
+// session verbatim and how a person recognizes the turn, and a line per summary would
+// halve how many turns fit. This way the rows that say least, such as "コミットして", get
+// the most of what came of them, and the mark and color keep generated text apart.
+func (m Model) turnSummaryTail(r detailRow, room int, selected bool) string {
+	const gap = "  "
+	text := m.turnSummaryText(r)
+	if text == "" || room-len(gap) < turnSummaryMinWidth {
+		return ""
+	}
+	return styled(clip(gap+summaryMark+" "+text, room), summaryStatusColor(false), selected, false)
+}
+
 // detailSummaryNote is what the detail header says about this session's summaries:
 // how many of its turns are described, then what is happening about the rest. The
 // reason a request failed is left to the list's status line: this line already holds

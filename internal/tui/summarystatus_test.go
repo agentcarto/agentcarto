@@ -422,3 +422,98 @@ func TestAFailureWithNoCountSaysItFailed(t *testing.T) {
 		t.Errorf("note=%q", note)
 	}
 }
+
+// turnRowFixture is a session of one turn asking "やって", on a screen w columns wide,
+// holding the given summaries.
+func turnRowFixture(t *testing.T, w int, summaries map[int]cache.Summary) (Model, *domain.Session, detailRow) {
+	t.Helper()
+	ts := time.Unix(1, 0)
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: ts, Events: []domain.Event{{Kind: domain.EventUser, Text: "やって", Prompt: "やって"}}},
+		{ID: "a1", Parent: "u1", Timestamp: ts, Events: []domain.Event{{Kind: domain.EventAssistant, Text: "できた"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "x"}
+	m := Model{width: w, height: 30, detailSession: &s}
+	u, _ := m.Update(convMsg{c: &c, reset: true})
+	m = u.(Model)
+	m.summaries = summaries
+	for _, r := range m.detailRows {
+		if r.Kind == "turn" {
+			return m, &s, r
+		}
+	}
+	t.Fatal("no turn row")
+	return m, &s, detailRow{}
+}
+
+// A prompt says what was asked, and often little: "コミットして", "進めて". What came of it
+// follows in whatever room the row has left, marked as generated, so a list can be read
+// without opening each turn and without losing a row to do it.
+func TestATurnRowContinuesIntoItsSummary(t *testing.T) {
+	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加した"}})
+	line := ansi.Strip(m.detailTurnLine(s, row, false, [9]int{}, 0, false))
+	if !strings.Contains(line, "やって") {
+		t.Errorf("the prompt is gone: %q", line)
+	}
+	if !strings.Contains(line, "やって  § yキーを追加した") {
+		t.Errorf("the summary does not follow the prompt: %q", line)
+	}
+}
+
+// One row is one line, however the summary was written and however long it is.
+func TestATurnRowStaysOneLineOfTheScreen(t *testing.T) {
+	long := strings.Repeat("長い要約の一文。", 40) + "\n\n" + strings.Repeat("次の段落。", 40)
+	m, s, row := turnRowFixture(t, 80, map[int]cache.Summary{1: {Turn: 1, Text: long}})
+	for _, selected := range []bool{false, true} {
+		line := m.detailTurnLine(s, row, selected, [9]int{}, 0, false)
+		if strings.Contains(line, "\n") {
+			t.Errorf("selected=%v: the row spans lines: %q", selected, line)
+		}
+		if got := lipgloss.Width(line); got > 79 {
+			t.Errorf("selected=%v: the row is %d columns wide on a screen of 80", selected, got)
+		}
+	}
+	if line := m.detailTurnLine(s, row, true, [9]int{}, 0, false); lipgloss.Width(line) != 79 {
+		t.Errorf("the selected row is %d columns wide, want the highlight across the line", lipgloss.Width(line))
+	}
+}
+
+// A few columns of a summary say nothing and read as a mistake, so a row without the
+// room for it shows the prompt as it always did.
+func TestATurnRowLeavesOutASummaryItHasNoRoomFor(t *testing.T) {
+	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加した"}})
+	wide := ansi.Strip(m.detailTurnLine(s, row, false, [9]int{}, 0, false))
+	before := runewidth.StringWidth(wide[:strings.Index(wide, summaryMark)])
+	room := func(w int) string {
+		m.width = w
+		return ansi.Strip(m.detailTurnLine(s, row, false, [9]int{}, 0, false))
+	}
+	// 1 for the last column every row leaves free, and the gap before the mark.
+	if line := room(before + turnSummaryMinWidth + 1); !strings.Contains(line, summaryMark) {
+		t.Errorf("a row with room for it left the summary out: %q", line)
+	}
+	if line := room(before + turnSummaryMinWidth); strings.Contains(line, summaryMark) {
+		t.Errorf("a row with too little room showed a piece of the summary: %q", line)
+	}
+}
+
+// Only that turn's own summary. Key 0 is the session's, which reads as this turn's if it
+// is shown here, and a row with none shows what it always did.
+func TestATurnRowShowsOnlyItsOwnSummary(t *testing.T) {
+	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{0: {Text: "セッションの要約"}, 2: {Turn: 2, Text: "別のターンの要約"}})
+	if line := ansi.Strip(m.detailTurnLine(s, row, false, [9]int{}, 0, false)); strings.Contains(line, summaryMark) {
+		t.Errorf("a turn with no summary of its own shows one: %q", line)
+	}
+	row.TurnIndex = -1
+	if got := m.turnSummaryText(row); got != "" {
+		t.Errorf("a row with no turn number reads as %q", got)
+	}
+}
+
+// A word on screen that finds nothing reads as a broken search.
+func TestATurnRowsSummaryCanBeSearchedFor(t *testing.T) {
+	m, _, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加した"}})
+	if got := m.detailRowText(row); !strings.Contains(got, "yキーを追加") {
+		t.Errorf("the row's searchable text is %q", got)
+	}
+}
