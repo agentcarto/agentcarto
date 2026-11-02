@@ -152,6 +152,29 @@ func (c codexCLI) Generate(ctx context.Context, system, prompt string) (string, 
 	return string(b), nil
 }
 
+// failureText picks what a CLI that exited non-zero had to say for itself.
+//
+// The result of an envelope marked as an error goes first, ahead of stderr.
+// `claude -p` prints its envelope even when it exits non-zero, with the reason a
+// kilobyte in, behind the usage counters: cut to the length of a log line, the raw
+// output ends before the reason starts. What it puts on stderr in that case, when
+// anything, is an internal code rather than the sentence meant for a reader.
+func failureText(stdout []byte, stderr string) string {
+	var envelope struct {
+		Result  string `json:"result"`
+		IsError bool   `json:"is_error"`
+	}
+	if json.Unmarshal(stdout, &envelope) == nil && envelope.IsError {
+		if reason := strings.TrimSpace(envelope.Result); reason != "" {
+			return reason
+		}
+	}
+	if said := strings.TrimSpace(stderr); said != "" {
+		return said
+	}
+	return strings.TrimSpace(string(stdout))
+}
+
 // run executes one agent CLI with the prompt on stdin and returns its stdout.
 //
 // The prompt goes through stdin rather than an argument because a session's
@@ -184,13 +207,8 @@ func run(ctx context.Context, timeout time.Duration, stdin, name string, args ..
 	case errors.Is(e, exec.ErrNotFound):
 		return nil, fmt.Errorf("%s: not on PATH — summaries need its CLI installed and signed in", name)
 	default:
-		// The CLIs report an unusable state (not signed in, unknown model) on
-		// stderr and exit non-zero. Passing it through is what makes the failure
-		// diagnosable from a background worker's log.
-		msg := strings.TrimSpace(errb.String())
-		if msg == "" {
-			msg = strings.TrimSpace(out.String())
-		}
-		return nil, fmt.Errorf("%s: %w: %.400s", name, e, msg)
+		// Passing on what the CLI said is what makes the failure diagnosable from a
+		// background worker's log.
+		return nil, fmt.Errorf("%s: %w: %.400s", name, e, failureText(out.Bytes(), errb.String()))
 	}
 }

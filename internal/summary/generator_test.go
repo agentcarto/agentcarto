@@ -103,6 +103,41 @@ func TestRunReportsWhatWentWrong(t *testing.T) {
 		}
 	})
 
+	// claude exits non-zero with its envelope on stdout and the reason past the
+	// usage counters. Reporting the output as it comes is a log line that ends
+	// before the reason starts.
+	t.Run("non-zero exit reports the reason inside the envelope", func(t *testing.T) {
+		padding := strings.Repeat("0", 1000)
+		script := `printf '{"usage":"` + padding + `","is_error":true,"result":"You have hit your limit"}'; echo '[claude-code:limit]' >&2; exit 1`
+		_, e := run(ctx, time.Minute, "", "sh", "-c", script)
+		if e == nil {
+			t.Fatal("run succeeded on a failing command")
+		}
+		if !strings.Contains(e.Error(), "You have hit your limit") {
+			t.Errorf("run=%.200v want the envelope's result", e)
+		}
+		if strings.Contains(e.Error(), padding[:100]) {
+			t.Errorf("run=%.200v want the reason alone, not the whole envelope", e)
+		}
+	})
+
+	// The result of an envelope that does not call itself failed is the model's
+	// answer, not a reason, and taking it would hide what stderr says went wrong.
+	t.Run("non-zero exit with an envelope that reports no error passes stderr through", func(t *testing.T) {
+		script := `printf '{"is_error":false,"result":"an answer from the model"}'; echo 'real cause' >&2; exit 1`
+		_, e := run(ctx, time.Minute, "", "sh", "-c", script)
+		if e == nil || !strings.Contains(e.Error(), "real cause") {
+			t.Errorf("run=%v want what stderr said", e)
+		}
+	})
+
+	t.Run("non-zero exit with no envelope falls back to stdout", func(t *testing.T) {
+		_, e := run(ctx, time.Minute, "", "sh", "-c", "echo 'Usage: claude [options]'; exit 2")
+		if e == nil || !strings.Contains(e.Error(), "Usage: claude") {
+			t.Errorf("run=%v want it to carry what the command printed", e)
+		}
+	})
+
 	// The timeout has to actually bound the call. Killing the process leaves Run
 	// waiting on the output pipes, which a CLI that spawned a child holds open
 	// for as long as the child runs — the timeout would bound nothing.
