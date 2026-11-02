@@ -371,6 +371,25 @@ func TestDetailHeaderDoesNotCountTheTurnsOfAFork(t *testing.T) {
 	}
 }
 
+// The same cut as the detail header's, on the line the turn view leads with.
+func TestTurnViewHeaderIsCutByWhatIsVisible(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+	head := func(width int) string {
+		s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "a", Model: "claude-opus-5-5"}
+		c := twoTurns()
+		m := Model{width: width, height: 20, detailSession: &s}
+		updated, _ := m.Update(convMsg{c: &c, reset: true})
+		return strings.TrimRight(ansi.Strip(strings.Split(pressEnter(updated.(Model)).View(), "\n")[0]), " ")
+	}
+	whole := head(200)
+	width := runewidth.StringWidth(whole) + 1
+	if got := head(width); got != whole {
+		t.Errorf("at %d columns:\n got %q\nwant %q", width, got, whole)
+	}
+}
+
 // A folder row is not a session, so it has no status to speak for.
 func TestListStatusLineIsBlankOnAFolderRow(t *testing.T) {
 	s := claudeSession("a")

@@ -3560,7 +3560,7 @@ func (m Model) turnFullView(row detailRow) string {
 			head += "   " + styled(mdl, lipgloss.Color("3"), false, false)
 		}
 	}
-	b.WriteString(clip(head, max(20, m.width-1)) + "\n")
+	b.WriteString(clipColored(head, max(20, m.width-1)) + "\n")
 	for i := offset; i < end; i++ {
 		line := lines[i]
 		fg, bold := turnStyle(line.style)
