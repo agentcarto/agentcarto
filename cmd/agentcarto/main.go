@@ -552,11 +552,7 @@ func summaryDoctor(cfg config.Config) {
 	fmt.Printf("summary      %s %s, up to %d sessions per run, session summary every %s\n",
 		cfg.Summary.Agent, cfg.Summary.Model, cfg.Summary.MaxPerRun, time.Duration(cfg.Summary.SessionInterval))
 
-	if q, err := summary.OpenQueue(queueDir()); err == nil {
-		writeSummaryStatus(os.Stdout, summary.NewStatusReader(q, lockPath()).Read(time.Now()), queueDir())
-	} else {
-		fmt.Printf("  queue      %v\n", err)
-	}
+	writeQueueStatus(os.Stdout)
 
 	if fi, err := os.Stat(logPath()); err == nil {
 		fmt.Printf("  log        %s (%s, last written %s)\n", logPath(), byteSize(fi.Size()), fi.ModTime().Format("01-02 15:04"))
@@ -565,13 +561,35 @@ func summaryDoctor(cfg config.Config) {
 	}
 }
 
-// writeSummaryStatus prints the worker and queue lines of doctor.
-func writeSummaryStatus(w io.Writer, st summary.Status, queue string) {
+// writeQueueStatus prints the worker and queue lines of doctor from what is on disk.
+func writeQueueStatus(w io.Writer) {
+	q, err := summary.OpenQueue(queueDir())
+	if err != nil {
+		// The lock answers without the queue, and whether something is running is what
+		// someone looking into a bill came here to learn.
+		var st summary.Status
+		if pid, since, lockErr := summary.LockHolder(lockPath()); lockErr == nil {
+			st.Running, st.PID, st.Since = true, pid, since
+		}
+		writeWorkerLine(w, st)
+		fmt.Fprintf(w, "  queue      %v\n", err)
+		return
+	}
+	writeSummaryStatus(w, summary.NewStatusReader(q, lockPath()).Read(time.Now()), queueDir())
+}
+
+// writeWorkerLine prints whether a worker is running, and how to end it.
+func writeWorkerLine(w io.Writer, st summary.Status) {
 	if st.Running {
 		fmt.Fprintf(w, "  worker     running as pid %d since %s — stop it with: kill %d\n", st.PID, st.Since.Local().Format("15:04:05"), st.PID)
 	} else {
 		fmt.Fprintln(w, "  worker     not running")
 	}
+}
+
+// writeSummaryStatus prints the worker and queue lines of doctor.
+func writeSummaryStatus(w io.Writer, st summary.Status, queue string) {
+	writeWorkerLine(w, st)
 	if st.Current != (domain.SessionKey{}) {
 		now := st.Sessions[st.Current]
 		fmt.Fprintf(w, "  now        %s/%s, %s, started %s\n", st.Current.PluginID, short8(st.Current.SessionID), now.CallLabel(), now.CallStarted.Local().Format("15:04:05"))

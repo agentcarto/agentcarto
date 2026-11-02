@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -732,6 +733,30 @@ func TestDoctorSaysWhatTheWorkerIsDoing(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "an old reason") {
 		t.Errorf("doctor printed more than the latest failure:\n%s", out.String())
+	}
+}
+
+// A queue that cannot be opened says nothing about whether a worker is running, and
+// that is what someone looking into a bill came to doctor to learn.
+func TestDoctorSaysWhetherAWorkerIsRunningWithoutAQueue(t *testing.T) {
+	_, _ = summaryFixture(t)
+	if err := os.WriteFile(queueDir(), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := summary.TakeLock(lockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	var out bytes.Buffer
+
+	writeQueueStatus(&out)
+
+	if want := fmt.Sprintf("running as pid %d", os.Getpid()); !strings.Contains(out.String(), want) {
+		t.Errorf("doctor does not say %q:\n%s", want, out.String())
+	}
+	if !strings.Contains(out.String(), "  queue      ") {
+		t.Errorf("doctor does not say what is wrong with the queue:\n%s", out.String())
 	}
 }
 
