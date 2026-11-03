@@ -2651,12 +2651,10 @@ func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected boo
 		row.WriteString(styled(padCol(turnModel(events, s), modelW)+"  ", lipgloss.Color("3"), selected, false))
 	}
 	remain := max(1, m.width-1-lipgloss.Width(row.String()))
-	headColor := lipgloss.Color("")
-	if !selected && hit {
-		headColor = roleColor("meta") // emphasize the headline of a search hit
-	}
 	head := clip(convlogic.TurnHeadline(*m.detail, turn), remain)
-	row.WriteString(styled(head, headColor, selected, false))
+	// A search hit is emphasized in bold, not in a color: the summary that follows is
+	// in the color of generated text, and a prompt in it would read as generated too.
+	row.WriteString(styled(head, "", selected, !selected && hit))
 	row.WriteString(m.turnSummaryTail(rowData, remain-runewidth.StringWidth(head), selected))
 	line := row.String()
 	if selected && lipgloss.Width(line) < m.width-1 {

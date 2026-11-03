@@ -567,3 +567,22 @@ func TestASessionRowMarksOnlyAHeadlineAsGenerated(t *testing.T) {
 		t.Errorf("row=%q", row)
 	}
 }
+
+// A search hit stands out from the rows around it, but not in the color of generated
+// text: the summary after it is in that color, and the prompt is what the session said.
+func TestASearchHitsPromptIsNotColoredAsGenerated(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	yellow := lipgloss.NewStyle().Foreground(roleColor("meta")).Render("x")
+	yellow = yellow[:strings.Index(yellow, "x")]
+
+	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加した"}})
+	hit := m.detailTurnLine(s, row, false, [9]int{}, 0, true)
+	if strings.Contains(hit, yellow+"やって") {
+		t.Errorf("the prompt of a hit is in the color of generated text: %q", hit)
+	}
+	if hit == m.detailTurnLine(s, row, false, [9]int{}, 0, false) {
+		t.Error("a hit looks the same as a row that is not one")
+	}
+}
