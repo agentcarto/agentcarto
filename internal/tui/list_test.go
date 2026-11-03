@@ -34,6 +34,8 @@ func TestStatusMarkPrototypeFormat(t *testing.T) {
 		{domain.Session{Status: domain.StatusRunning, LastKind: domain.EventAssistant}, "● RUN"},
 		{domain.Session{Status: domain.StatusRunning}, "● RUN"},
 		{domain.Session{Status: domain.StatusRunning, PermissionWait: true}, "● ASK"},
+		// The turn is over, so whatever the tail of the log says is not what the session is doing.
+		{domain.Session{Status: domain.StatusShell, LastKind: domain.EventStream}, "◐ SHELL"},
 		{domain.Session{Status: domain.StatusReady}, "○ READY"},
 		{domain.Session{Status: domain.StatusOther}, "· OTHER"},
 	}
@@ -696,6 +698,37 @@ func TestTurnFullViewHeaderShowsStatusMark(t *testing.T) {
 	out := stripANSI(m.detailView())
 	if !strings.Contains(strings.Split(out, "\n")[0], "● RUN") {
 		t.Fatalf("missing status mark in full view header:\n%s", out)
+	}
+}
+
+// Only a running session has a turn in progress. A session whose turn is over while a background
+// shell lives on says so in the header, and its newest turn is not marked as still going.
+func TestDetailMarksNewestTurnInProgressOnlyWhenRunning(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Prompt: "q"}}},
+	})
+	newestTurnRow := func(status domain.Status) (header, row string) {
+		s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s", CWD: "/repo", Title: "t", Status: status}
+		m := Model{width: 120, height: 12, detailSession: &s}
+		updated, _ := m.Update(convMsg{c: &c, reset: true})
+		lines := strings.Split(stripANSI(updated.(Model).detailView()), "\n")
+		for _, l := range lines {
+			if strings.Contains(l, "#1 ") {
+				return lines[0], l
+			}
+		}
+		t.Fatalf("no row for turn #1:\n%s", strings.Join(lines, "\n"))
+		return "", ""
+	}
+	if _, row := newestTurnRow(domain.StatusRunning); !strings.HasPrefix(strings.TrimLeft(row, "> "), "● #1") {
+		t.Fatalf("running session's newest turn should be marked in progress: %q", row)
+	}
+	header, row := newestTurnRow(domain.StatusShell)
+	if !strings.Contains(header, "◐ SHELL") {
+		t.Fatalf("missing shell mark in detail header: %q", header)
+	}
+	if strings.Contains(row, "●") {
+		t.Fatalf("shell session's newest turn should not be marked in progress: %q", row)
 	}
 }
 

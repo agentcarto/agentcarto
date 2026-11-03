@@ -1567,6 +1567,8 @@ func wrapWidth(s string, n int) []string {
 // record. THINK is therefore the model working before it emits anything
 // (a prompt or a tool result went in), and a session already producing its
 // answer — reasoning over, text or a tool input streaming out — is RUN.
+// SHELL is a session whose turn is over while a shell it started in the
+// background is still alive.
 func statusMark(s domain.Session) string {
 	if s.Status == domain.StatusRunning {
 		if s.PermissionWait {
@@ -1581,6 +1583,9 @@ func statusMark(s domain.Session) string {
 			return padCol("● THINK", 8)
 		}
 		return padCol("● RUN", 8)
+	}
+	if s.Status == domain.StatusShell {
+		return padCol("◐ SHELL", 8)
 	}
 	if s.Status == domain.StatusReady {
 		return padCol("○ READY", 8)
@@ -1697,6 +1702,11 @@ func statusColor(s domain.Session) lipgloss.Color {
 	if s.Status == domain.StatusRunning {
 		return lipgloss.Color("3")
 	}
+	if s.Status == domain.StatusShell {
+		// Blue rather than cyan: only Claude sessions are ever SHELL, and cyan is
+		// Claude's default agent color in the column beside it.
+		return lipgloss.Color("4")
+	}
 	if s.Status == domain.StatusReady {
 		return lipgloss.Color("2")
 	}
@@ -1765,7 +1775,7 @@ func (m Model) sessionRow(s domain.Session, selected bool, maxN int, prefix stri
 	optsCount := m.width >= 53
 	var b strings.Builder
 	b.WriteString(styled(" ", "", selected, false))
-	b.WriteString(statusStyled(statusMark(s), s, selected, s.Status == domain.StatusRunning || s.Status == domain.StatusReady))
+	b.WriteString(statusStyled(statusMark(s), s, selected, s.Status == domain.StatusRunning || s.Status == domain.StatusShell || s.Status == domain.StatusReady))
 	b.WriteString(styled(s.UpdatedAt.Local().Format("01-02 15:04")+" ", "", selected, false))
 	b.WriteString(styled(fmt.Sprintf("%-12s ", s.AgentType), m.pluginColor(s), selected, false))
 	if optsCount {

@@ -31,6 +31,7 @@ own processes, no integration required:
 | `●` | `THINK` | Working on a reply, with nothing emitted yet |
 | `●` | `TOOL` | Running a tool |
 | `●` | `ASK` | Waiting for **your** approval (a permission prompt) |
+| `◐` | `SHELL` | The turn is over, but a shell it started in the background is still running |
 | `○` | `READY` | The process is alive but idle, ready for input |
 | `·` | `OTHER` | Some other live state |
 
