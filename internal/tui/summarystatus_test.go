@@ -558,10 +558,12 @@ func TestASessionRowMarksOnlyAHeadlineAsGenerated(t *testing.T) {
 	moved := s
 	moved.Fingerprint = "fp2"
 	moved.UpdatedAt = time.Now()
-	if h := m.headlines[s.Key()]; h.Stale(moved, m.summaryGrace()) {
-		m.headlines = map[domain.SessionKey]cache.Summary{moved.Key(): h}
-		if row := ansi.Strip(m.sessionRow(moved, false, 0, "")); !strings.Contains(row, summaryMark+" (stale) 要約の見出し") {
-			t.Errorf("row=%q", row)
-		}
+	h := m.headlines[s.Key()]
+	if !h.Stale(moved, m.summaryGrace()) {
+		t.Fatal("test setup: the headline does not read as stale")
+	}
+	m.headlines = map[domain.SessionKey]cache.Summary{moved.Key(): h}
+	if row := ansi.Strip(m.sessionRow(moved, false, 0, "")); !strings.Contains(row, summaryMark+" (stale) 要約の見出し") {
+		t.Errorf("row=%q", row)
 	}
 }
