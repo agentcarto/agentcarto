@@ -510,6 +510,23 @@ func TestALogThatMovedIsStaleOnlyPastTheInterval(t *testing.T) {
 	}
 }
 
+// Either sign of a summary being behind is enough, so a log that moved within the
+// interval does not excuse a turn described past it. A worker stopped between a
+// session's turns and its own summary leaves both: the turns written, the log's
+// version not yet recorded.
+func TestALogWithinTheIntervalDoesNotHideATurnDescribedPastIt(t *testing.T) {
+	written := time.Now().Add(-10 * time.Hour)
+	sum := Summary{Turn: 0, Text: "セッション全体の要約", Fingerprint: "fp", Created: written, TurnSummarizedAt: written.Add(6 * time.Hour)}
+	sess := domain.Session{PluginID: "claude", SessionID: "s", Fingerprint: "fp", UpdatedAt: written.Add(20 * time.Minute)}
+	if !sum.Stale(sess, time.Hour) {
+		t.Fatal("test setup: a turn described past the interval does not read as stale")
+	}
+	sess.Fingerprint = "fp2"
+	if !sum.Stale(sess, time.Hour) {
+		t.Error("a log that moved within the interval hid a turn described past it")
+	}
+}
+
 // Summaries reads back when a row was written, which is what tells a stale
 // session summary from a current one.
 func TestSummariesCarryTheirWriteTime(t *testing.T) {

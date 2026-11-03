@@ -90,8 +90,8 @@ func (s Summary) Stale(sess domain.Session, within time.Duration) bool {
 	if s.Turn != 0 || (strings.TrimSpace(s.Text) == "" && strings.TrimSpace(s.Headline) == "") {
 		return false
 	}
-	if s.Fingerprint != sess.Fingerprint {
-		return within == 0 || s.Created.IsZero() || s.Created.Add(within).Before(sess.UpdatedAt)
+	if s.Fingerprint != sess.Fingerprint && (within == 0 || s.Created.IsZero() || s.Created.Add(within).Before(sess.UpdatedAt)) {
+		return true
 	}
 	// Both times are stored to the second, and a session summary written in the
 	// same call as the turns under it shares theirs: only a turn described after
