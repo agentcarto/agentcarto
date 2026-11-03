@@ -217,6 +217,25 @@ func TestPromptCarriesNoContextFromASilentTurn(t *testing.T) {
 	}
 }
 
+// A recap written after the turn (Claude's away_summary) is not what the turn
+// closed with: the next prompt answers the reply, not the recap.
+func TestPromptCarriesTheReplyNotTheRecapAfterIt(t *testing.T) {
+	ts := func(n int64) time.Time { return time.Unix(n, 0).UTC() }
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Timestamp: ts(1), Events: []domain.Event{{Kind: domain.EventUser, Text: "調べて", Prompt: "調べて"}}},
+		{ID: "a1", Parent: "u1", Timestamp: ts(2), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "A と B のどちらにしますか"}}},
+		{ID: "w1", Parent: "a1", Timestamp: ts(3), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "離席中に調査を終えた", BetweenTurns: true}}},
+		{ID: "u2", Parent: "w1", Timestamp: ts(4), Events: []domain.Event{{Kind: domain.EventUser, Text: "B", Prompt: "B"}}},
+		{ID: "a2", Parent: "u2", Timestamp: ts(5), Events: []domain.Event{{Kind: domain.EventAssistant, Text: "B にした"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s1"}
+	turns := transcript.Turns(c, c.ActivePath())
+	doc, _ := Prompt(s, c, turns, Options{Turns: map[int]bool{2: true}})
+	if !strings.Contains(doc, "> A と B のどちらにしますか") || strings.Contains(doc, "離席中に調査を終えた") {
+		t.Errorf("the context should be the reply, not the recap after it:\n%s", doc)
+	}
+}
+
 // The tail is what is kept: a reply's proposal, its question, the choices it
 // offered are at its end, and that is what the next turn answers.
 func TestPromptKeepsTheEndOfALongReply(t *testing.T) {

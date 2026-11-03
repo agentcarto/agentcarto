@@ -206,13 +206,15 @@ func carriedContext(c domain.Conversation, turns, want []transcript.Turn, render
 //
 // Empty assistant events are passed over rather than taken as the end of the
 // turn: an agent's last event can carry encrypted thinking and no text at all.
-// A turn with nothing said in it yields nothing — the search stops at the turn
-// boundary rather than reaching further back, since a document with no context
-// is what every document had before this existed.
+// So is a recap written between turns (an away_summary after the turn): what
+// the next prompt answers is the reply, not the recap. A turn with nothing said
+// in it yields nothing — the search stops at the turn boundary rather than
+// reaching further back, since a document with no context is what every
+// document had before this existed.
 func closingReply(c domain.Conversation, t transcript.Turn) string {
 	events := t.Events(c)
 	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Kind != domain.EventAssistant {
+		if events[i].Kind != domain.EventAssistant || events[i].BetweenTurns {
 			continue
 		}
 		if text := strings.TrimSpace(events[i].Text); text != "" {
