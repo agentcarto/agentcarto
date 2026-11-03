@@ -87,11 +87,28 @@ func EventsOf(c domain.Conversation, ids []string) []domain.Event {
 	return out
 }
 
-// TurnTime returns the smallest (earliest) timestamp among a turn's events. It does not
-// depend on the events' order, guaranteeing chronological correctness (min of the times).
+// TimedEvents returns the events that make up a turn's time: all of them but those written
+// between turns (domain.Event.BetweenTurns), such as an idle compaction the turn is filed
+// under. A turn that holds nothing else keeps them all, so it still has a time.
+func TimedEvents(events []domain.Event) []domain.Event {
+	own := make([]domain.Event, 0, len(events))
+	for _, e := range events {
+		if !e.BetweenTurns && !e.Timestamp.IsZero() {
+			own = append(own, e)
+		}
+	}
+	if len(own) == 0 {
+		return events
+	}
+	return own
+}
+
+// TurnTime returns the smallest (earliest) timestamp among a turn's timed events (TimedEvents).
+// It does not depend on the events' order, guaranteeing chronological correctness (min of the
+// times).
 func TurnTime(events []domain.Event) time.Time {
 	var t time.Time
-	for _, e := range events {
+	for _, e := range TimedEvents(events) {
 		if e.Timestamp.IsZero() {
 			continue
 		}

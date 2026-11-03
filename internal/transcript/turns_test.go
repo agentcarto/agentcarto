@@ -1,8 +1,10 @@
 package transcript
 
 import (
-	"github.com/agentcarto/core/domain"
 	"testing"
+	"time"
+
+	"github.com/agentcarto/core/domain"
 )
 
 func userNode(id, parent, prompt string) domain.ConvNode {
@@ -132,5 +134,29 @@ func TestBranchesSkipsWhatCannotBeRead(t *testing.T) {
 	)
 	if got := Branches(c, c.ActivePath()); got != 1 {
 		t.Fatalf("branches=%d want 1 (the readable rewind only)", got)
+	}
+}
+
+// A turn's time is the time of its own work. An idle compaction it is filed
+// under and a recap after it were written while no turn was running, so they
+// date neither its start nor its end — unless the turn holds nothing else.
+func TestTurnTimeLeavesOutEventsWrittenBetweenTurns(t *testing.T) {
+	at := func(min int) time.Time { return time.Date(2026, 11, 3, 10, min, 0, 0, time.UTC) }
+	events := []domain.Event{
+		{Kind: domain.EventUser, RawType: domain.RawCompactSummary, Timestamp: at(0), BetweenTurns: true},
+		{Kind: domain.EventAttachment, Timestamp: at(0), BetweenTurns: true},
+		{Kind: domain.EventTask, Timestamp: at(46)},
+		{Kind: domain.EventAssistant, Text: "done", Timestamp: at(47)},
+		{Kind: domain.EventAssistant, Text: "recap", Timestamp: at(59), BetweenTurns: true},
+	}
+	if got := TurnTime(events); !got.Equal(at(46)) {
+		t.Fatalf("TurnTime = %v, want %v", got, at(46))
+	}
+	if got := len(TimedEvents(events)); got != 2 {
+		t.Fatalf("TimedEvents kept %d events, want the 2 of the turn's own work", got)
+	}
+	only := events[:2]
+	if got := TurnTime(only); !got.Equal(at(0)) {
+		t.Fatalf("a turn of between-turn events only lost its time: %v", got)
 	}
 }

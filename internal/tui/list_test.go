@@ -303,6 +303,24 @@ func TestTurnMarkPartsPrototypeTaskRetryAndEditStats(t *testing.T) {
 	}
 }
 
+// A recap written after the turn is shown with it but is neither a reply nor part of its time.
+func TestTurnMarkPartsLeaveOutBetweenTurns(t *testing.T) {
+	t0 := time.Date(2026, 6, 23, 1, 0, 0, 0, time.Local)
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u", Timestamp: t0, Events: []domain.Event{{Kind: domain.EventUser, Text: "q", Prompt: "q", Timestamp: t0}}},
+		{ID: "a", Parent: "u", Timestamp: t0.Add(45 * time.Second), Events: []domain.Event{
+			{Kind: domain.EventAssistant, Text: "answer", Timestamp: t0.Add(45 * time.Second)},
+			{Kind: domain.EventAssistant, Text: "recap", Timestamp: t0.Add(30 * time.Minute), BetweenTurns: true},
+		}},
+	})
+	m := Model{detail: &c}
+	m.setDetailPath(c.ActivePath())
+	parts := m.turnMarkParts([]string{"u", "a"}, time.Time{})
+	if parts[0] != "45s" || parts[2] != "↩1" {
+		t.Fatalf("parts=%#v", parts)
+	}
+}
+
 func TestFormatDurationPrototypeUnits(t *testing.T) {
 	cases := []struct {
 		d    time.Duration

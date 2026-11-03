@@ -33,6 +33,27 @@ func TestTurnDurationOutOfOrder(t *testing.T) {
 	}
 }
 
+// Events written while no turn was running are not part of the turn's time: an idle compaction the
+// turn is filed under (here forty minutes before the work) and a recap after it (half an hour later).
+func TestTurnDurationLeavesOutBetweenTurns(t *testing.T) {
+	between := func(e domain.Event) domain.Event { e.BetweenTurns = true; return e }
+	turn := []domain.Event{between(ev(ts(-2300))), ev(ts(100)), ev(ts(145)), between(ev(ts(1900)))}
+	if got := turnDuration(turn); got != 45*time.Second {
+		t.Fatalf("got %v, want 45s", got)
+	}
+	if got := transcript.TurnTime(turn); !got.Equal(ts(100)) {
+		t.Fatalf("TurnTime = %v, want %v", got, ts(100))
+	}
+	// A turn that holds nothing else keeps its time rather than losing it.
+	only := []domain.Event{between(ev(ts(100))), between(ev(ts(130)))}
+	if got := transcript.TurnTime(only); !got.Equal(ts(100)) {
+		t.Fatalf("TurnTime of a turn of between-turn events only = %v, want %v", got, ts(100))
+	}
+	if got := turnDuration(only); got != 30*time.Second {
+		t.Fatalf("duration of a turn of between-turn events only = %v, want 30s", got)
+	}
+}
+
 // TurnTime/turnEndTime return the min/max regardless of order.
 func TestTurnTimeEndTimeAreMinMax(t *testing.T) {
 	turn := []domain.Event{ev(ts(145)), ev(ts(100)), ev(ts(130))}

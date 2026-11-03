@@ -2607,12 +2607,9 @@ func (m Model) detailTurnLine(s *domain.Session, rowData detailRow, selected boo
 	turn := rowData.Turn
 	chronIndex := rowData.TurnIndex
 	events := m.turnEvents(turn)
-	var ts time.Time
-	for _, e := range events {
-		if ts.IsZero() && !e.Timestamp.IsZero() {
-			ts = e.Timestamp
-		}
-	}
+	// The same start the elapsed time counts from, so an idle compaction the turn is filed under
+	// does not date it.
+	ts := transcript.TurnTime(events)
 	// Leading marker (fixed width 2): ● for the newest in-progress turn, » for a /compact boundary, blank otherwise.
 	mark, markRole := "  ", ""
 	if s.Status == domain.StatusRunning && chronIndex == m.detailNewestChron {
@@ -3790,7 +3787,9 @@ func (m Model) turnMarkParts(ids []string, now time.Time) [9]string {
 		case domain.EventToolCall:
 			tools++
 		case domain.EventAssistant:
-			replies++
+			if !e.BetweenTurns {
+				replies++
+			}
 		case domain.EventQueued:
 			queued++
 		case domain.EventTask:
@@ -3847,10 +3846,11 @@ func alignMark(s string, width int) string {
 	return icon + strings.Repeat(" ", max(0, pad)) + num
 }
 
-// turnEndTime returns the largest (latest) timestamp among a turn's events (the max of the times).
+// turnEndTime returns the largest (latest) timestamp among a turn's timed events (the max of the
+// times; see transcript.TimedEvents).
 func turnEndTime(events []domain.Event) time.Time {
 	var t time.Time
-	for _, e := range events {
+	for _, e := range transcript.TimedEvents(events) {
 		if e.Timestamp.IsZero() {
 			continue
 		}
