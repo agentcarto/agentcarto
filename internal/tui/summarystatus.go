@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentcarto/agentcarto/internal/app"
+	"github.com/agentcarto/agentcarto/internal/cache"
 	"github.com/agentcarto/agentcarto/internal/summary"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
@@ -155,13 +157,38 @@ func summaryRowMark(state summary.SessionState, selected bool) string {
 // gap before it. Less than this is a few words cut off, which reads as a mistake.
 const turnSummaryMinWidth = 20
 
-// turnSummaryText is the summary of the turn a row stands for, on one line. A row with no
-// turn number has none: key 0 is the session's own, and would read as this turn's.
+// turnSummaryText is the summary of the turn a row stands for, on one line.
 func (m Model) turnSummaryText(r detailRow) string {
-	if r.TurnIndex < 0 {
-		return ""
+	return strings.Join(strings.Fields(m.turnSummary(r.TurnIndex+1, r.Turn).Text), " ")
+}
+
+// turnSummary returns the stored summary of the turn made of ids that the list
+// shows as number n, or none. A turn with no number has none: key 0 is the
+// session's own, and would read as this turn's.
+//
+// The number alone does not say which turn: a rewound line goes on with the
+// same numbers as the line the session took, and only the latter was
+// summarized. So the summary is shown only if it was made against this turn's
+// last node, under the id the session's own log gives it.
+func (m Model) turnSummary(n int, ids []string) cache.Summary {
+	if n <= 0 || len(ids) == 0 {
+		return cache.Summary{}
 	}
-	return strings.Join(strings.Fields(m.summaries[r.TurnIndex+1].Text), " ")
+	sum, ok := m.summaries[n]
+	if !ok || sum.NodeID != storedNodeID(m.detailOrigins, ids[len(ids)-1]) {
+		return cache.Summary{}
+	}
+	return sum
+}
+
+// storedNodeID is the id a node has in the log that holds it, which is what its
+// summary is stored against. A fork's nodes are renamed when it is grafted into
+// the tree it is read from.
+func storedNodeID(origins map[string]app.NodeOrigin, id string) string {
+	if o, ok := origins[id]; ok {
+		return o.NodeID
+	}
+	return id
 }
 
 // turnSummaryTail is what a turn row shows of its summary in the room its prompt left.

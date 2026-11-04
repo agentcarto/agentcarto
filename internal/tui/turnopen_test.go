@@ -68,7 +68,7 @@ func TestTurnBlocksLeadWithTheSummary(t *testing.T) {
 	m := Model{width: 120, height: 30, detailSession: &s}
 	u, _ := m.Update(convMsg{c: &c, reset: true})
 	m = u.(Model)
-	m.summaries = map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加し、OSC 52 でコピー", Model: "claude claude-sonnet-5"}}
+	m.summaries = map[int]cache.Summary{1: {Turn: 1, NodeID: "a1", Text: "yキーを追加し、OSC 52 でコピー", Model: "claude claude-sonnet-5"}}
 
 	var ids []string
 	for _, r := range m.detailRows {
@@ -121,7 +121,7 @@ func TestTurnSummaryIsColoredAsGeneratedTextThroughout(t *testing.T) {
 	m := Model{width: 120, height: 30, detailSession: &s}
 	u, _ := m.Update(convMsg{c: &c, reset: true})
 	m = u.(Model)
-	m.summaries = map[int]cache.Summary{1: {Turn: 1, Text: "2 点を直した。\n- y キーを追加した\n+ OSC 52 でコピーする"}}
+	m.summaries = map[int]cache.Summary{1: {Turn: 1, NodeID: "a1", Text: "2 点を直した。\n- y キーを追加した\n+ OSC 52 でコピーする"}}
 
 	var ids []string
 	for _, r := range m.detailRows {

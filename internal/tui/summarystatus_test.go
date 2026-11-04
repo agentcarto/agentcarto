@@ -371,6 +371,66 @@ func TestDetailHeaderDoesNotCountTheTurnsOfAFork(t *testing.T) {
 	}
 }
 
+// A fork is read from a tree that starts at its root, while its summaries were made
+// along its own line and against the ids its own log gives. Its turns show those,
+// and not the summary of the inherited turn that once shared their number.
+func TestAForkShowsTheSummariesOfItsOwnTurns(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: "one", Prompt: "one"}}},
+		{ID: "a1", Parent: "u1", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}}},
+		{ID: "u2", Parent: "a1", Events: []domain.Event{{Kind: domain.EventUser, Text: "root two", Prompt: "root two"}}},
+		{ID: "a2", Parent: "u2", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}}},
+		{ID: "f0:uF", Parent: "a1", Events: []domain.Event{{Kind: domain.EventUser, Text: "fork two", Prompt: "fork two"}}},
+		{ID: "f0:aF", Parent: "f0:uF", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "answer"}}},
+	})
+	c.ActiveLeaf = "a2"
+	c.ForkRoots = []string{"f0:uF"}
+	db, e := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if e != nil {
+		t.Fatalf("open cache: %v", e)
+	}
+	t.Cleanup(func() { db.Close() })
+	root := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "root"}
+	fork := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "fork", ParentSessionID: "root", Fingerprint: "fp"}
+	if e := db.PutSummaries(context.Background(), fork, []cache.Summary{
+		{Turn: 1, NodeID: "a1", Text: "引き継いだターン", Model: "m"},
+		{Turn: 2, NodeID: "aF", Text: "フォーク自身のターン", Model: "m"},
+	}); e != nil {
+		t.Fatalf("put summaries: %v", e)
+	}
+	origins := map[string]app.NodeOrigin{
+		"u1": {Session: root, NodeID: "u1"}, "a1": {Session: root, NodeID: "a1"},
+		"u2": {Session: root, NodeID: "u2"}, "a2": {Session: root, NodeID: "a2", ActiveLeaf: true},
+		"f0:uF": {Session: fork, NodeID: "uF"}, "f0:aF": {Session: fork, NodeID: "aF", ActiveLeaf: true},
+	}
+	m := Model{width: 160, height: 20, detailSession: &fork, sessions: []domain.Session{root, fork}, cache: db}
+	u, _ := m.Update(convMsg{c: &c, origins: origins, focusLeaf: "f0:aF", reset: true})
+	m = u.(Model)
+
+	view := ansi.Strip(m.detailView())
+	if !strings.Contains(view, "フォーク自身のターン") {
+		t.Errorf("the fork's own turn lost its summary:\n%s", view)
+	}
+	if strings.Contains(view, "引き継いだターン") {
+		t.Errorf("an inherited turn's summary is shown on the fork's own turn:\n%s", view)
+	}
+}
+
+// A rewound line goes on with the numbers of the line the session took, which is
+// the one that was summarized. A turn of the rewound line does not show the summary
+// of the turn that shares its number, and that turn still shows it.
+func TestARewoundLineDoesNotShowTheSummariesOfTheSessionsLine(t *testing.T) {
+	m := rewoundDetail(t)
+	m.summaries = map[int]cache.Summary{3: {Turn: 3, NodeID: "p4", Text: "本線のターン3"}}
+	if view := ansi.Strip(m.detailView()); strings.Contains(view, "本線のターン3") {
+		t.Errorf("the rewound line's #3 shows the summary of the session's #3:\n%s", view)
+	}
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if view := ansi.Strip(u.(Model).detailView()); !strings.Contains(view, "本線のターン3") {
+		t.Errorf("the session's own #3 lost its summary:\n%s", view)
+	}
+}
+
 // The same cut as the detail header's, on the line the turn view leads with.
 func TestTurnViewHeaderIsCutByWhatIsVisible(t *testing.T) {
 	prev := lipgloss.ColorProfile()
@@ -450,7 +510,7 @@ func turnRowFixture(t *testing.T, w int, summaries map[int]cache.Summary) (Model
 // follows in whatever room the row has left, marked as generated, so a list can be read
 // without opening each turn and without losing a row to do it.
 func TestATurnRowContinuesIntoItsSummary(t *testing.T) {
-	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加した"}})
+	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, NodeID: "a1", Text: "yキーを追加した"}})
 	line := ansi.Strip(m.detailTurnLine(s, row, false, [9]int{}, 0, false))
 	if !strings.Contains(line, "やって") {
 		t.Errorf("the prompt is gone: %q", line)
@@ -463,7 +523,7 @@ func TestATurnRowContinuesIntoItsSummary(t *testing.T) {
 // One row is one line, however the summary was written and however long it is.
 func TestATurnRowStaysOneLineOfTheScreen(t *testing.T) {
 	long := strings.Repeat("長い要約の一文。", 40) + "\n\n" + strings.Repeat("次の段落。", 40)
-	m, s, row := turnRowFixture(t, 80, map[int]cache.Summary{1: {Turn: 1, Text: long}})
+	m, s, row := turnRowFixture(t, 80, map[int]cache.Summary{1: {Turn: 1, NodeID: "a1", Text: long}})
 	for _, selected := range []bool{false, true} {
 		line := m.detailTurnLine(s, row, selected, [9]int{}, 0, false)
 		if strings.Contains(line, "\n") {
@@ -481,7 +541,7 @@ func TestATurnRowStaysOneLineOfTheScreen(t *testing.T) {
 // A few columns of a summary say nothing and read as a mistake, so a row without the
 // room for it shows the prompt as it always did.
 func TestATurnRowLeavesOutASummaryItHasNoRoomFor(t *testing.T) {
-	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加した"}})
+	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, NodeID: "a1", Text: "yキーを追加した"}})
 	wide := ansi.Strip(m.detailTurnLine(s, row, false, [9]int{}, 0, false))
 	before := runewidth.StringWidth(wide[:strings.Index(wide, summaryMark)])
 	room := func(w int) string {
@@ -512,7 +572,7 @@ func TestATurnRowShowsOnlyItsOwnSummary(t *testing.T) {
 
 // A word on screen that finds nothing reads as a broken search.
 func TestATurnRowsSummaryCanBeSearchedFor(t *testing.T) {
-	m, _, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加した"}})
+	m, _, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, NodeID: "a1", Text: "yキーを追加した"}})
 	if got := m.detailRowText(row); !strings.Contains(got, "yキーを追加") {
 		t.Errorf("the row's searchable text is %q", got)
 	}
@@ -577,7 +637,7 @@ func TestASearchHitsPromptIsNotColoredAsGenerated(t *testing.T) {
 	yellow := lipgloss.NewStyle().Foreground(roleColor("meta")).Render("x")
 	yellow = yellow[:strings.Index(yellow, "x")]
 
-	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, Text: "yキーを追加した"}})
+	m, s, row := turnRowFixture(t, 120, map[int]cache.Summary{1: {Turn: 1, NodeID: "a1", Text: "yキーを追加した"}})
 	hit := m.detailTurnLine(s, row, false, [9]int{}, 0, true)
 	if strings.Contains(hit, yellow+"やって") {
 		t.Errorf("the prompt of a hit is in the color of generated text: %q", hit)

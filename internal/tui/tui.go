@@ -720,13 +720,24 @@ func (m Model) handleConvMsg(x convMsg) (tea.Model, tea.Cmd) {
 		m.summaries, m.summaryStale, m.summaryAt, m.summaryTurns = nil, false, time.Time{}, 0
 		if m.cache != nil && x.c != nil {
 			turns := transcript.Turns(*x.c, x.c.ActivePath())
+			// A fork's summaries were made along its own line, which in this tree
+			// runs from the root to focusLeaf rather than along the root's own
+			// line, and against the ids its own log gives its nodes.
+			own := *x.c
+			if x.focusLeaf != "" {
+				own.ActiveLeaf = x.focusLeaf
+			}
+			nodes := summary.NodesByTurn(transcript.Turns(own, own.ActivePath()))
+			for n, id := range nodes {
+				nodes[n] = storedNodeID(x.origins, id)
+			}
 			// Not for a fork: this tree starts at its root, while its summaries were made
 			// from its own conversation in its own numbering, so the count would not be
 			// of anything it has.
 			if m.detailSession.ParentSessionID == "" {
 				m.summaryTurns = len(turns)
 			}
-			m.summaries = m.cache.Summaries(context.Background(), *m.detailSession, summary.NodesByTurn(turns))
+			m.summaries = m.cache.Summaries(context.Background(), *m.detailSession, nodes)
 			// Turn 0 alone can describe a session that has since gone on; what makes
 			// it so is the store's business, not the view's (cache.Summary.Stale).
 			m.summaryAt = m.summaries[0].Created
@@ -3427,7 +3438,7 @@ func (m Model) turnBlocksOf(ids []string) []turnBlock {
 	// turn amounted to, and someone who opened a turn is deciding how much of it
 	// to read. It says it is generated because everything else in this view is
 	// the session verbatim, and the two must not be read as the same thing.
-	if stored := m.summaries[m.turnNumberOf(ids)]; strings.TrimSpace(stored.Text) != "" {
+	if stored := m.turnSummary(m.turnNumberOf(ids), ids); strings.TrimSpace(stored.Text) != "" {
 		sum := strings.TrimSpace(stored.Text)
 		label := "SUMMARY"
 		if stored.Model != "" {
