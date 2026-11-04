@@ -59,11 +59,11 @@ func TestForkParentRowSitsUnderTheOldestTurn(t *testing.T) {
 		t.Fatal("no rows built")
 	}
 	last := m.detailRows[len(m.detailRows)-1]
-	if last.Kind != "forkparent" {
-		t.Fatalf("last row kind=%q want forkparent (the row belongs under turn #1)", last.Kind)
+	if last.Kind != "origin" {
+		t.Fatalf("last row kind=%q want origin (the row belongs under turn #1)", last.Kind)
 	}
 	for _, r := range m.detailRows[:len(m.detailRows)-1] {
-		if r.Kind == "forkparent" {
+		if r.Kind == "origin" {
 			t.Fatal("the fork-parent row must appear once, at the bottom")
 		}
 	}
@@ -102,25 +102,26 @@ func TestOrdinarySessionHasNoForkParentRow(t *testing.T) {
 	u, _ := m.Update(convMsg{c: &c, reset: true})
 	m = u.(Model)
 	for _, r := range m.detailRows {
-		if r.Kind == "forkparent" {
+		if r.Kind == "origin" {
 			t.Fatal("a session with no parent should not offer a row to one")
 		}
 	}
 }
 
-// Descending into another line by hand changes what the list is showing, and a
-// row about this session's origin no longer belongs to it.
-func TestForkParentRowGoesAwayWhenDescendingByHand(t *testing.T) {
+// Descending into another line by hand changes what the list is showing, so the
+// row under turn #1 and the p key lead back to the line it was entered from, not
+// to this session's parent.
+func TestHandEnteredFrameLeadsBackToItsLineNotTheParentSession(t *testing.T) {
 	m := forkDetail(true)
 	m.detailPathStack = append(m.detailPathStack, detailFrame{path: []string{"p2"}, label: "rewind p2"})
 	m.setDetailPath(m.currentDetailPath())
-	for _, r := range m.detailRows {
-		if r.Kind == "forkparent" {
-			t.Fatal("a hand-entered frame should not carry the fork-parent row")
-		}
+	if got := stripANSI(m.detailView()); strings.Contains(got, "↳"+shortID("parent")+" forked from") {
+		t.Fatalf("a hand-entered frame still offers the parent session:\n%s", got)
 	}
-	if got := stripANSI(m.detailView()); strings.Contains(got, "(p)") {
-		t.Fatalf("the heading offers (p) where the row is gone:\n%s", got)
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = u.(Model)
+	if m.detailSession == nil || m.detailSession.SessionID != "child" || len(m.detailPathStack) != 2 {
+		t.Fatalf("p left the session instead of the hand-entered frame: session=%v frames=%d", m.detailSession, len(m.detailPathStack))
 	}
 }
 
@@ -131,7 +132,7 @@ func TestForkParentRowAndHeadingAgree(t *testing.T) {
 	m := forkDetail(true)
 	row := false
 	for _, r := range m.detailRows {
-		if r.Kind == "forkparent" {
+		if r.Kind == "origin" {
 			row = true
 		}
 	}
