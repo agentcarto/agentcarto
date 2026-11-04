@@ -8,15 +8,17 @@ package transcript
 import (
 	"github.com/agentcarto/core/conversation"
 	"github.com/agentcarto/core/domain"
+	"sort"
 	"time"
 )
 
 // Turn is one turn of a branch, in the shape the reader sees it.
 type Turn struct {
-	// Index is the turn's position among the turns a reader can open. It is the number
-	// the TUI shows as "turn #N" (Index+1) and the one an exported document
-	// carries. Summary-only compact boundaries are left out before this index is
-	// assigned, so public turn numbers are contiguous.
+	// Index is the turn's position among the turns a reader can open, counted
+	// along the whole line from the conversation's root. It is the number the TUI
+	// shows as "turn #N" (Index+1) and the one an exported document carries.
+	// Summary-only compact boundaries are left out before this index is assigned,
+	// so public turn numbers are contiguous.
 	Index int
 	Nodes []string
 	// Compact marks a turn whose context was compacted at its boundary (the TUI's
@@ -29,7 +31,63 @@ type Turn struct {
 // but a compact summary gets no entry of its own — there is nothing in it to
 // read — and passes its Compact mark to the turn that follows it (or, at the end
 // of the branch, to the one before).
+//
+// A path that starts below the root — a rewound line, or a fork's own turns —
+// is numbered on from the turn it branched after, not from 1. That is the
+// number a fork's own log gives the same turn, since the log carries a copy of
+// what came before it, and the one its summaries are stored under.
 func Turns(c domain.Conversation, path []string) []Turn {
+	out := turnsOf(c, path)
+	if len(path) == 0 || c.Nodes[path[0]].Parent == "" {
+		return out
+	}
+	line := append(ancestors(c, path[0]), path...)
+	pos := make(map[string]int, len(line))
+	for i, id := range line {
+		pos[id] = i
+	}
+	// Where each turn of the whole line ends, in line order. A turn of path is
+	// numbered by how many of them end at or before it does, rather than by
+	// looking up the line's turn holding its last node: the two group path's
+	// first turn differently when the branch starts inside a turn, and a turn
+	// the line leaves out as compact-only can hold one that path shows.
+	var ends []int
+	for _, t := range turnsOf(c, line) {
+		ends = append(ends, pos[t.Nodes[len(t.Nodes)-1]])
+	}
+	for i := range out {
+		last := pos[out[i].Nodes[len(out[i].Nodes)-1]]
+		out[i].Index = max(0, sort.SearchInts(ends, last+1)-1)
+	}
+	return out
+}
+
+// Count is how many turns Turns returns for path, without numbering them along
+// the line from the root, which a caller that only shows the count would be
+// paying for on every redraw.
+func Count(c domain.Conversation, path []string) int { return len(turnsOf(c, path)) }
+
+// ancestors returns the nodes above id, from the root down to id's parent.
+func ancestors(c domain.Conversation, id string) []string {
+	var up []string
+	seen := map[string]bool{id: true}
+	for cur := c.Nodes[id].Parent; cur != "" && !seen[cur]; {
+		n, ok := c.Nodes[cur]
+		if !ok {
+			break
+		}
+		seen[cur] = true
+		up = append(up, cur)
+		cur = n.Parent
+	}
+	for i, j := 0, len(up)-1; i < j; i, j = i+1, j-1 {
+		up[i], up[j] = up[j], up[i]
+	}
+	return up
+}
+
+// turnsOf is Turns numbered from path's own first turn.
+func turnsOf(c domain.Conversation, path []string) []Turn {
 	var out []Turn
 	carry := false
 	for _, nodes := range conversation.TurnsOfPath(c, path) {

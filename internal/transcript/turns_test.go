@@ -48,6 +48,39 @@ func TestTurnsNumbersEveryTurnOnThePath(t *testing.T) {
 	}
 }
 
+// A branch read on its own goes on from the turn it branched after, as the
+// session holding a copy of that history numbers it.
+func TestTurnsNumbersABranchOnFromWhereItBranched(t *testing.T) {
+	c := conv(userNode("a", "", "first"), userNode("b", "a", "second"), userNode("c", "b", "third"),
+		userNode("x", "b", "rewound"), userNode("y", "x", "after the rewind"))
+	if got := indexes(Turns(c, []string{"x", "y"})); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("indexes=%v, want [2 3]", got)
+	}
+}
+
+// A compact-only turn before the branch is not a turn a reader can open, so it
+// is not counted toward the branch's numbers either.
+func TestTurnsLeavesACompactBeforeTheBranchUncounted(t *testing.T) {
+	c := conv(userNode("a", "", "first"), compactNode("b", "a"), userNode("c", "b", "second"),
+		userNode("x", "c", "branched"))
+	if got := indexes(Turns(c, []string{"x"})); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("indexes=%v, want [2]", got)
+	}
+}
+
+// A branch that starts inside a turn, such as another reply to the same
+// prompt, is that turn told differently and keeps its number.
+func TestTurnsGivesABranchInsideATurnThatTurnsNumber(t *testing.T) {
+	prompt := domain.ConvNode{ID: "u", Parent: "a", Events: []domain.Event{{Kind: domain.EventUser, Text: "ask", Prompt: "ask"}}}
+	reply := func(id string) domain.ConvNode {
+		return domain.ConvNode{ID: id, Parent: "u", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "reply " + id}}}
+	}
+	c := conv(userNode("a", "", "first"), prompt, reply("r1"), reply("r2"))
+	if got := indexes(Turns(c, []string{"r2"})); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("indexes=%v, want [1]", got)
+	}
+}
+
 func TestTurnsCarriesTheCompactMarkForward(t *testing.T) {
 	c := conv(userNode("a", "", "first"), compactNode("b", "a"), userNode("c", "b", "second"))
 	ts := Turns(c, c.ActivePath())

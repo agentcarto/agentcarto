@@ -2545,7 +2545,7 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool, colW [9]int, m
 	if rowData.LastBranch {
 		conn = "└─"
 	}
-	bt := transcript.Turns(*m.detail, convlogic.DeepestPath(*m.detail, rowData.Root))
+	nt := transcript.Count(*m.detail, convlogic.DeepestPath(*m.detail, rowData.Root))
 	sz := len(convlogic.Subtree(*m.detail, rowData.Root))
 	nb := convlogic.BranchAltCount(*m.detail, rowData.Root)
 	indent := strings.Repeat(" ", m.detailTurnHeadlineColumn(rowData, colW, modelW))
@@ -2556,7 +2556,7 @@ func (m Model) detailBranchLine(rowData detailRow, selected bool, colW [9]int, m
 	if m.isParentForkPoint(rowData.Root) {
 		kind += " [fork point]"
 	}
-	label := fmt.Sprintf("%s%s %s (%dturn/%dmsg/%dbranch) %s", indent, conn, kind, len(bt), sz, nb, convlogic.BranchLead(*m.detail, rowData.Root))
+	label := fmt.Sprintf("%s%s %s (%dturn/%dmsg/%dbranch) %s", indent, conn, kind, nt, sz, nb, convlogic.BranchLead(*m.detail, rowData.Root))
 	line := styled(clip(label, max(20, m.width-1)), lipgloss.Color("5"), selected, false)
 	if selected && lipgloss.Width(line) < m.width-1 {
 		line += styled(strings.Repeat(" ", m.width-1-lipgloss.Width(line)), "", true, false)
@@ -2613,11 +2613,9 @@ func (m Model) originLabel() string {
 }
 
 // frameOriginLabel names the turn of the line from that frame branches after, by
-// the number and headline that line lists it under, in the shape of the
-// fork-parent row: "↳#3 rewound from <headline>". The number is counted along
-// from, not from the conversation's root, because a frame descended from another
-// frame numbers its turns from its own first one. A frame whose branch point is
-// not on from gets no number rather than a guessed one.
+// the number and headline that line lists it under, in the shape a fork's origin
+// row has: "↳#3 rewound from <headline>". A frame whose branch point is not on
+// from gets no number rather than a guessed one.
 func (m Model) frameOriginLabel(frame, from detailFrame) string {
 	if m.detail == nil || len(frame.path) == 0 {
 		return ""
@@ -3122,8 +3120,10 @@ func (m *Model) rebuildDetailRows(path []string) {
 		m.detailRows = append(m.detailRows, detailRow{Kind: kind, Line: i})
 	}
 	turns := transcript.Turns(*m.detail, path)
-	m.detailNewestChron = len(turns) - 1
 	visible := len(turns) - 1
+	if visible >= 0 {
+		m.detailNewestChron = turns[visible].Index
+	}
 	// Compact-only turns have no body to display, but can still be fork points.
 	// Walk the unfiltered path so their branches stay at the original boundary.
 	rawTurns := convlogic.TurnsOfPath(*m.detail, path)
@@ -3671,7 +3671,9 @@ func (m Model) turnFullView(row detailRow) string {
 	if len(events) > 0 {
 		head += turnSpan(events) + "   "
 	}
-	head += fmt.Sprintf("turn #%d/%d", turnNo, len(m.detailTurns))
+	// Out of the newest turn's number rather than how many turns are listed: a
+	// branch's turns are numbered on from where it branched.
+	head += fmt.Sprintf("turn #%d/%d", turnNo, m.detailNewestChron+1)
 	// The model that produced this turn, matching the per-turn model column in
 	// the turn list.
 	if s != nil {

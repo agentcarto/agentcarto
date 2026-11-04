@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -61,11 +62,12 @@ func TestRewoundLineEndsWithRowToWhereItBranched(t *testing.T) {
 	if last.Kind != "origin" {
 		t.Fatalf("last row kind=%q, want the origin row under turn #1", last.Kind)
 	}
-	// Turn #1's own branch rows sit between it and the origin row.
+	// The line's oldest turn, numbered on from the #2 it branched after. Its own
+	// branch rows sit between it and the origin row.
 	for i := len(m.detailRows) - 2; i >= 0; i-- {
 		if r := m.detailRows[i]; r.Kind == "turn" {
-			if r.TurnIndex != 0 {
-				t.Fatalf("the turn above the origin row is #%d, want #1", r.TurnIndex+1)
+			if r.TurnIndex != 2 {
+				t.Fatalf("the turn above the origin row is #%d, want #3", r.TurnIndex+1)
 			}
 			break
 		}
@@ -79,13 +81,44 @@ func TestRewoundLineEndsWithRowToWhereItBranched(t *testing.T) {
 	}
 }
 
-// A rewind entered from inside another rewind is named by the turn number its
-// own line shows, which counts from that line's first turn, not the session's.
-func TestNestedRewindNamesTheTurnAsItsLineNumbersIt(t *testing.T) {
-	m := descendInto(t, rewoundDetail(t), "n1")
-	if view := stripANSI(m.detailView()); !strings.Contains(view, "↳#1 rewound from asked before rewind") {
-		t.Fatalf("the nested rewind is not named by its line's turn #1:\n%s", view)
+// A rewound line goes on with the session's numbers rather than starting again
+// at #1, at every depth, and the origin row names the turn it branched after by
+// the number the line it came from shows.
+func TestRewoundLinesNumberOnFromWhereTheyBranched(t *testing.T) {
+	m := rewoundDetail(t)
+	if got := turnNumbers(m); got != "4,3" {
+		t.Fatalf("rewound line numbers %s, want 4,3 (on from #2)", got)
 	}
+	m = descendInto(t, m, "n1")
+	if got := turnNumbers(m); got != "4" {
+		t.Fatalf("nested rewound line numbers %s, want 4 (on from #3)", got)
+	}
+	if view := stripANSI(m.detailView()); !strings.Contains(view, "↳#3 rewound from asked before rewind") {
+		t.Fatalf("the nested rewind does not name the #3 it branched after:\n%s", view)
+	}
+}
+
+// The turn view counts up to the newest turn's number, not to how many turns
+// the line lists, which for a rewound line are fewer.
+func TestTurnViewOfARewoundLineCountsToItsNewestNumber(t *testing.T) {
+	m := rewoundDetail(t)
+	m.detailCursor = m.firstTurnRow()
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = u.(Model)
+	if view := stripANSI(m.detailView()); !strings.Contains(view, "turn #4/4") {
+		t.Fatalf("the newest turn of the rewound line is not shown as #4/4:\n%s", view)
+	}
+}
+
+// turnNumbers lists the numbers of the turn rows, top to bottom.
+func turnNumbers(m Model) string {
+	var out []string
+	for _, r := range m.detailRows {
+		if r.Kind == "turn" {
+			out = append(out, fmt.Sprint(r.TurnIndex+1))
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 // Every way out of a rewound line lands on the branch row that leads back into

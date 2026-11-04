@@ -48,8 +48,8 @@ func forkDetail(listed bool) Model {
 }
 
 // A fork holds a copy of what was said before it, so the parent session is where
-// that conversation carries on. The row leading there sits under turn #1 — the
-// bottom of a list that runs newest first.
+// that conversation carries on. The row leading there sits under the fork's
+// oldest turn — the bottom of a list that runs newest first.
 func TestForkParentRowSitsUnderTheOldestTurn(t *testing.T) {
 	m := forkDetail(true)
 	if len(m.detailPathStack) < 2 || !m.detailPathStack[len(m.detailPathStack)-1].followFocus {
@@ -60,17 +60,18 @@ func TestForkParentRowSitsUnderTheOldestTurn(t *testing.T) {
 	}
 	last := m.detailRows[len(m.detailRows)-1]
 	if last.Kind != "origin" {
-		t.Fatalf("last row kind=%q want origin (the row belongs under turn #1)", last.Kind)
+		t.Fatalf("last row kind=%q want origin (the row belongs under the oldest turn)", last.Kind)
 	}
 	for _, r := range m.detailRows[:len(m.detailRows)-1] {
 		if r.Kind == "origin" {
 			t.Fatal("the fork-parent row must appear once, at the bottom")
 		}
 	}
-	// The turn above it is #1, so the row really is under the oldest turn.
+	// The turn above it is the fork's own first, numbered on from the #1 it was
+	// forked after — the number its own log gives it.
 	above := m.detailRows[len(m.detailRows)-2]
-	if above.Kind != "turn" || above.TurnIndex != 0 {
-		t.Fatalf("row above the fork-parent row is %q index=%d, want turn #1", above.Kind, above.TurnIndex)
+	if above.Kind != "turn" || above.TurnIndex != 1 {
+		t.Fatalf("row above the fork-parent row is %q index=%d, want turn #2", above.Kind, above.TurnIndex)
 	}
 	view := stripANSI(m.detailView())
 	if !strings.Contains(view, "↳"+shortID("parent")+" forked from ask") {
