@@ -58,6 +58,29 @@ func TestIndexCoversToolCalls(t *testing.T) {
 	}
 }
 
+// What the agent asked through its ask tool, and what the user answered, is how
+// a session's decisions are looked up afterwards. Both are indexed whole, past
+// the length a tool call is cut to, and both count as messages.
+func TestIndexCoversQuestionsAndAnswersWhole(t *testing.T) {
+	question := "範囲: どこまで直しますか？\n- 全章: " + strings.Repeat("長い説明", 100) + "末尾の選択肢"
+	c := domain.NewConversation([]domain.ConvNode{{ID: "n1", Events: []domain.Event{
+		{Kind: domain.EventUser, Text: "直して", Prompt: "直して"},
+		{Kind: domain.EventQuestion, Text: question},
+		{Kind: domain.EventAnswer, Text: "範囲: 全章\n  note: 年表は除く"},
+	}}})
+	i := New(1 << 16)
+	s := domain.Session{}
+	i.Add(s, c)
+	for _, want := range []string{"どこまで直しますか", "末尾の選択肢", "年表は除く"} {
+		if !i.Match(s, NewQuery(want)) {
+			t.Errorf("index does not match %q", want)
+		}
+	}
+	if n, _ := i.Count(s); n != 3 {
+		t.Errorf("message count=%d want 3 (the prompt, the question and the answer)", n)
+	}
+}
+
 // The message count is not cut short by the character cap: a long session still
 // reports how many messages it holds.
 func TestIndexCountsEveryMessagePastTheCap(t *testing.T) {

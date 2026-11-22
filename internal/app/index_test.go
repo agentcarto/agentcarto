@@ -164,7 +164,7 @@ func TestBuildIndexReusesPreviousEntryForUnchangedSession(t *testing.T) {
 // has, and the tests above would stay green because they write and read through
 // the same struct.
 func TestIndexArtifactFormatIsFixed(t *testing.T) {
-	if SearchArtifactKind != "search-v6" {
+	if SearchArtifactKind != "search-v7" {
 		t.Fatalf("kind=%q: changing it discards every cached index entry", SearchArtifactKind)
 	}
 	b, err := json.Marshal(indexArtifact{Text: "folded text", Count: 3})
@@ -264,6 +264,44 @@ func TestBuildIndexDoesNotAskThePluginForADeletedLog(t *testing.T) {
 	}
 	if fp[gone.SourceRef.Source] != gone.Fingerprint {
 		t.Errorf("the fingerprint should still be reported: %#v", fp)
+	}
+}
+
+// A new generation of the index (a bump of SearchArtifactKind) leaves a deleted
+// log with no entry to read and no log to parse one from. The conversation that
+// was kept is what there is, so the entry is rebuilt from it — once, after which
+// it is read back like any other.
+func TestBuildIndexRebuildsADeletedLogsEntryFromTheKeptConversation(t *testing.T) {
+	l := &loaderStub{text: "handoff order"}
+	a := indexApp(l)
+	a.Config.Cache.CacheConversations = true
+	store := newStore()
+	s := indexSession()
+
+	a.BuildIndex(context.Background(), []domain.Session{s}, store, nil, nil)
+	loads := l.loads
+	gone := s
+	gone.LogDeleted = true
+	// What a bump leaves behind: the conversation, and no entry of this generation.
+	store.m = map[string]indexArtifact{}
+
+	idx, _ := a.BuildIndex(context.Background(), []domain.Session{gone}, store, nil, nil)
+	if !idx.Match(gone, search.NewQuery("handoff")) {
+		t.Fatal("a deleted log with a kept conversation should still be searchable")
+	}
+	if l.loads != loads {
+		t.Errorf("the plugin was asked for a log that is gone: loads=%d want %d", l.loads, loads)
+	}
+	if _, ok := store.m[store.key(gone, SearchArtifactKind)]; !ok {
+		t.Error("the rebuilt entry should be stored, so the conversation is read once and not on every run")
+	}
+
+	// Neither an entry nor a conversation: there is nothing to index, and nothing
+	// is made up.
+	store.m, store.blobs = map[string]indexArtifact{}, map[string]any{}
+	idx, _ = a.BuildIndex(context.Background(), []domain.Session{gone}, store, nil, nil)
+	if _, ok := idx.Count(gone); ok {
+		t.Error("a deleted log with nothing kept should not be indexed")
 	}
 }
 

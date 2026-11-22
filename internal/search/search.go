@@ -90,7 +90,9 @@ const toolTextLimit = 300
 // Tool calls are covered by their name and one-line argument — the command that
 // was run, the file that was read. Their expanded body (ToolDetail) is not: a
 // heredoc writing a file would put the whole file in the index. Tool output,
-// reasoning and file diffs are not covered either.
+// reasoning and file diffs are not covered either. A question the agent asked
+// through a tool and the user's answer to it are neither: they are messages,
+// covered whole.
 func IndexText(e domain.Event) (text string, message bool) {
 	switch e.Kind {
 	case domain.EventUser:
@@ -104,7 +106,7 @@ func IndexText(e domain.Event) (text string, message bool) {
 			return "", true
 		}
 		return e.Text, true
-	case domain.EventQueued, domain.EventAssistant:
+	case domain.EventQueued, domain.EventAssistant, domain.EventQuestion, domain.EventAnswer:
 		return e.Text, true
 	case domain.EventTask:
 		// Task notices were once user events; their summaries and results stay

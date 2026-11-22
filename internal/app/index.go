@@ -11,7 +11,7 @@ import (
 // version suffix is part of the key: an entry written by an older shape of the
 // artifact is simply never read again. Bump it whenever search.IndexText changes
 // what it covers, or stale entries would keep answering with the old coverage.
-const SearchArtifactKind = "search-v6"
+const SearchArtifactKind = "search-v7"
 
 // ConversationArtifactKind names the cached copy of a session's conversation.
 // Unlike the index it is not derived data that can be rebuilt: once the log it
@@ -70,8 +70,20 @@ func (a *App) BuildIndex(ctx context.Context, sessions []domain.Session, store A
 			// session on every scan.
 			if store != nil {
 				var cached indexArtifact
+				var kept domain.Conversation
 				if store.GetArtifact(ctx, s, SearchArtifactKind, &cached) {
 					idx.Set(s, cached.Text, cached.Count)
+				} else if store.GetBlob(ctx, s, ConversationArtifactKind, &kept) {
+					// No entry of this generation: a bump of SearchArtifactKind left the
+					// old one unread. The kept conversation is the only thing it can be
+					// built from again, and without this the session would drop out of
+					// content search for good.
+					idx.Add(s, kept)
+					if t, n, ok := idx.Lookup(s); ok {
+						// A failed write costs reading the conversation again next time
+						// and nothing else.
+						_ = store.PutArtifact(ctx, s, SearchArtifactKind, indexArtifact{t, n})
+					}
 				}
 			}
 			fp[src] = s.Fingerprint

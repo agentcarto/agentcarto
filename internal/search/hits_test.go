@@ -90,6 +90,30 @@ func TestHitsSearchTheSameEventsAsTheIndex(t *testing.T) {
 	}
 }
 
+// A hit in a question or an answer says which of the two it is, and is not
+// counted as a tool call: a session is not "one that only ran tools" for having
+// been asked something.
+func TestHitsInQuestionsAndAnswersAreMessages(t *testing.T) {
+	c := domain.NewConversation([]domain.ConvNode{
+		node("u1", "", prompt("start")),
+		node("a1", "u1", domain.Event{Kind: domain.EventQuestion, Text: "範囲: needle をどこまで直しますか？\n- 全章\n- 1 章だけ"}),
+		node("u2", "a1", domain.Event{Kind: domain.EventAnswer, Text: "範囲: needle のある章だけ"}),
+	})
+	hits, sum := Hits(c, transcript.Turns(c, c.ActivePath()), NewQuery("needle"), HitOptions{})
+	if sum.Total != 2 || len(hits) != 2 {
+		t.Fatalf("total=%d hits=%d want 2", sum.Total, len(hits))
+	}
+	if hits[0].Kind != domain.EventQuestion || hits[1].Kind != domain.EventAnswer {
+		t.Fatalf("kinds=%q,%q want question, answer", hits[0].Kind, hits[1].Kind)
+	}
+	if hits[0].Turn != 1 || hits[1].Turn != 1 {
+		t.Fatalf("turns=%d,%d: a question and its answer belong to the turn that asked", hits[0].Turn, hits[1].Turn)
+	}
+	if sum.ToolCalls != 0 {
+		t.Fatalf("tool calls=%d want 0", sum.ToolCalls)
+	}
+}
+
 func TestHitsFoldCaseAndReportTheTotal(t *testing.T) {
 	c := domain.NewConversation([]domain.ConvNode{
 		node("u1", "", prompt("Handoff")),
