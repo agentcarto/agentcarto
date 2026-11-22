@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/termenv"
 
+	"github.com/agentcarto/agentcarto/internal/transcript"
 	"github.com/agentcarto/core/domain"
 )
 
@@ -36,8 +37,9 @@ func copiedFlash(text string) string {
 
 // turnCopyText is the exchange of a turn: what the user asked and what the agent
 // answered, in the order they happened, each under the same role label the full
-// turn view shows. Tool calls, their output and thinking are left out — those
-// are copied one block at a time from the full turn view instead.
+// turn view shows. A question the agent put to the user and the answer it got
+// are part of that exchange. Tool calls, their output and thinking are left out
+// — those are copied one block at a time from the full turn view instead.
 //
 // A turn holds several such events (a reply interleaved with tool calls, a
 // queued prompt sent mid-turn), so every one of them is kept.
@@ -52,6 +54,10 @@ func turnCopyText(events []domain.Event) string {
 			label = "USER (queued)"
 		case e.Kind == domain.EventAssistant:
 			label = "ASSISTANT"
+		case e.Kind == domain.EventQuestion:
+			label = transcript.QuestionLabel
+		case e.Kind == domain.EventAnswer:
+			label = transcript.AnswerLabel
 		default:
 			// EventUser without a Prompt is an injected system message, not
 			// something the user typed.

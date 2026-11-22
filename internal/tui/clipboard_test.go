@@ -30,6 +30,22 @@ func TestTurnCopyTextKeepsPromptAndReply(t *testing.T) {
 	}
 }
 
+// What the agent asked through its ask tool and what the user chose are part of
+// the exchange, in their place between the prompt and the reply.
+func TestTurnCopyTextKeepsQuestionAndAnswer(t *testing.T) {
+	events := []domain.Event{
+		{Kind: domain.EventUser, Text: "直して", Prompt: "直して"},
+		{Kind: domain.EventQuestion, Text: "範囲: どこまで？\n- 全章\n- 1 章だけ"},
+		{Kind: domain.EventToolResult, Text: "raw payload"},
+		{Kind: domain.EventAnswer, Text: "範囲: 全章"},
+		{Kind: domain.EventAssistant, Text: "直した"},
+	}
+	want := "USER\n直して\n\nASSISTANT (question)\n範囲: どこまで？\n- 全章\n- 1 章だけ\n\nUSER (answer)\n範囲: 全章\n\nASSISTANT\n直した"
+	if got := turnCopyText(events); got != want {
+		t.Fatalf("turnCopyText=%q want %q", got, want)
+	}
+}
+
 // A block with a body copies the body; a body-less block falls back to its label.
 func TestBlockCopyText(t *testing.T) {
 	if got, want := blockCopyText(turnBlock{Label: "ASSISTANT", Body: []string{"line1", "line2", ""}}), "line1\nline2"; got != want {

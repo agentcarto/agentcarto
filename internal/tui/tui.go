@@ -3523,6 +3523,10 @@ func eventBlock(e domain.Event) turnBlock {
 		return turnBlock{Sym: "⤤", Style: style, Label: strings.TrimSpace("TASK " + e.ToolArg), Body: body}
 	case domain.EventAssistant:
 		return turnBlock{Sym: "●", Style: "assistant", Label: "ASSISTANT", Body: lines, Open: true}
+	case domain.EventQuestion:
+		return turnBlock{Sym: "?", Style: "question", Label: transcript.QuestionLabel, Body: lines, Open: true}
+	case domain.EventAnswer:
+		return turnBlock{Sym: "▶", Style: "answer", Label: transcript.AnswerLabel, Body: lines, Open: true}
 	case domain.EventReasoning:
 		// Reasoning the agent recorded without plaintext (e.g. encrypted thinking)
 		// carries no Text; the plugin describes it in ToolArg/ToolDetail instead.
@@ -3636,9 +3640,10 @@ func (m Model) turnFullLines() []turnLine {
 			for _, ln := range b.Body {
 				st := b.Style
 				switch {
-				case st == "summary":
+				case st == "summary", st == "question", st == "answer":
 					// Ahead of the +/- cases: a line of a summary starting "- " is a bullet
-					// the model wrote, not a line taken out of a file.
+					// the model wrote, and one in a question is an option it offered, not
+					// a line taken out of a file.
 				case strings.HasPrefix(st, "diff"):
 					st = diffLineStyle(ln)
 				case strings.HasPrefix(ln, "+ "):
@@ -3766,9 +3771,9 @@ func renderSpans(spans []labelSpan, w int, selected bool) string {
 // turnStyle maps a block or line style to its color and whether it is bold.
 func turnStyle(style string) (lipgloss.Color, bool) {
 	switch style {
-	case "user":
+	case "user", "answer":
 		return roleColor("user"), true
-	case "assistant":
+	case "assistant", "question":
 		return roleColor("assistant"), true
 	case "task-high":
 		return lipgloss.Color("1"), true
