@@ -31,7 +31,7 @@ import (
 // the report: every check that passed, every caveat, every item left for later. A
 // summary is read to decide which turn to open, and the turn is one keypress away.
 func System(language string) string {
-	return `You summarize the logs of AI coding agents. The input is one session as Markdown. Each turn sits under a "## Turn N" heading and holds the USER message, the ASSISTANT reply, and the tool calls made. Long tool calls are cut short (a trailing … marks it).
+	return `You summarize the logs of AI coding agents. The input is one session as Markdown. Each turn sits under a "## Turn N" heading and holds the USER message, the ASSISTANT reply, and the tool calls made. Long tool calls are cut short (a trailing … marks it). Where the agent stopped to ask, its question is under "` + transcript.QuestionLabel + `" and the user's answer to it is under "` + transcript.AnswerLabel + `".
 
 A quote under a ` + transcript.ContextLabel + ` line above a heading is the end of the reply that closed the turn before it, carried over because that turn is not in this input. Read it, but do not summarize it: it gets no @@TURN section of its own.
 

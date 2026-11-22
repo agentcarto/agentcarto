@@ -293,3 +293,34 @@ func TestSystemNamesTheMarkerPromptPrints(t *testing.T) {
 		t.Errorf("System does not name %q, which the document it is asked about carries", label)
 	}
 }
+
+// What a turn decided is often in an answer to the agent's own question rather
+// than in a prompt. The document carries both in full, under labels the
+// instruction names, so the model reads the answer as the user's.
+func TestPromptCarriesQuestionsAndAnswersUnderLabelsSystemNames(t *testing.T) {
+	question := "範囲: どこまで直しますか？\n- 全章: " + strings.Repeat("長い説明", 100) + "\n- 1 章だけ"
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: "直して", Prompt: "直して"}}},
+		{ID: "a1", Parent: "u1", Events: []domain.Event{{Kind: domain.EventQuestion, Text: question}}},
+		{ID: "u2", Parent: "a1", Events: []domain.Event{{Kind: domain.EventAnswer, Text: "範囲: 全章"}}},
+		{ID: "a2", Parent: "u2", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "直した"}}},
+	})
+	s := domain.Session{PluginID: "claude", AgentType: "claude", SessionID: "s1", Title: "t"}
+	doc, asked := Prompt(s, c, transcript.Turns(c, c.ActivePath()), Options{})
+	if len(asked) != 1 {
+		t.Fatalf("asked=%v want one turn", asked)
+	}
+	for _, want := range []string{question, "範囲: 全章"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("the prompt is missing %.40q:\n%s", want, doc)
+		}
+	}
+	for _, label := range []string{transcript.QuestionLabel, transcript.AnswerLabel} {
+		if !strings.Contains(doc, "**"+label+"**") {
+			t.Errorf("the document does not print %q", label)
+		}
+		if !strings.Contains(System(""), label) {
+			t.Errorf("System does not name %q, which the document carries", label)
+		}
+	}
+}

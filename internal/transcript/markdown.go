@@ -307,6 +307,15 @@ func editedFiles(events []domain.Event, cwd string) []string {
 	return out
 }
 
+// QuestionLabel and AnswerLabel head a question the agent put to the user
+// through an ask tool and the user's response to it. They are exported because
+// every rendering of a turn uses the same pair, and because the instruction a
+// model reads about a document has to name the labels the document carries.
+const (
+	QuestionLabel = "ASSISTANT (question)"
+	AnswerLabel   = "USER (answer)"
+)
+
 // eventLines renders one event, or nil for the events a document leaves out.
 func eventLines(e domain.Event, o Options) []string {
 	switch e.Kind {
@@ -319,6 +328,12 @@ func eventLines(e domain.Event, o Options) []string {
 		return bodySection("USER (queued)", e.Text)
 	case domain.EventAssistant:
 		return bodySection("ASSISTANT", e.Text)
+	case domain.EventQuestion:
+		// Asked through a tool, but it is the conversation: what was decided in a
+		// session is in these two, so no tool mode leaves them out.
+		return bodySection(QuestionLabel, e.Text)
+	case domain.EventAnswer:
+		return bodySection(AnswerLabel, e.Text)
 	case domain.EventToolCall:
 		name := e.ToolName
 		if name == "" {

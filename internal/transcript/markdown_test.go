@@ -20,6 +20,11 @@ func TestEventMarkdownSelection(t *testing.T) {
 		{"user", domain.Event{Kind: domain.EventUser, Text: "やって\n", Prompt: "やって"}, []string{"**USER**", "", "やって"}},
 		{"queued", domain.Event{Kind: domain.EventQueued, Text: "急いで"}, []string{"**USER (queued)**", "", "急いで"}},
 		{"assistant", domain.Event{Kind: domain.EventAssistant, Text: "できた"}, []string{"**ASSISTANT**", "", "できた"}},
+		{"question", domain.Event{Kind: domain.EventQuestion, Text: "範囲: どこまで直しますか？\n- 全章: 11 章すべて\n- 1 章だけ"},
+			[]string{"**ASSISTANT (question)**", "", "範囲: どこまで直しますか？", "- 全章: 11 章すべて", "- 1 章だけ"}},
+		{"answer", domain.Event{Kind: domain.EventAnswer, Text: "範囲: 全章\n  note: 年表は除く"},
+			[]string{"**USER (answer)**", "", "範囲: 全章", "  note: 年表は除く"}},
+		{"empty answer", domain.Event{Kind: domain.EventAnswer, Text: ""}, nil},
 		{"tool call", domain.Event{Kind: domain.EventToolCall, ToolName: "Read", ToolArg: "a.go"}, []string{"- Read a.go"}},
 		{"multiline detail", domain.Event{Kind: domain.EventToolCall, ToolName: "Bash",
 			ToolArg: "$ cat <<EOF body EOF", ToolDetail: "cat <<EOF\nbody\nEOF"},
@@ -228,6 +233,32 @@ func TestToolsNoneKeepsTheConversationAndTheEdits(t *testing.T) {
 	for _, want := range []string{"**USER**", "**ASSISTANT**", "- Edited files (1)", "  - M a.go (+1 -1)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("ToolsNone dropped %q:\n%s", want, got)
+		}
+	}
+}
+
+// A question the agent asked and the answer the user gave are the conversation,
+// though both went through a tool: a reader who drops the tool calls, or has
+// them cut short, still has to see what was asked and what was decided.
+func TestQuestionAndAnswerSurviveEveryToolMode(t *testing.T) {
+	question := "範囲: どこまで直しますか？\n- 全章: " + strings.Repeat("長い説明", 100) + "\n- 1 章だけ"
+	c := domain.NewConversation([]domain.ConvNode{
+		{ID: "u1", Events: []domain.Event{{Kind: domain.EventUser, Text: "直して", Prompt: "直して"}}},
+		{ID: "a1", Parent: "u1", Events: []domain.Event{{Kind: domain.EventQuestion, Text: question}}},
+		{ID: "u2", Parent: "a1", Events: []domain.Event{{Kind: domain.EventAnswer, Text: "範囲: 全章"}}},
+		{ID: "a2", Parent: "u2", Events: []domain.Event{{Kind: domain.EventAssistant, Text: "直した"}}},
+	})
+	s := domain.Session{AgentType: "claude", SessionID: "x", CWD: abs("/repo"), Title: "t"}
+	turns := Turns(c, c.ActivePath())
+	if len(turns) != 1 {
+		t.Fatalf("a question and its answer opened a turn: %d turns", len(turns))
+	}
+	for _, mode := range []ToolMode{ToolsLabel, ToolsFull, ToolsBrief, ToolsNone} {
+		got, _ := Markdown(s, c, turns, Options{Tools: mode})
+		for _, want := range []string{"**ASSISTANT (question)**\n\n" + question, "**USER (answer)**\n\n範囲: 全章"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("Tools=%d: the document is missing %.40q:\n%s", mode, want, got)
+			}
 		}
 	}
 }
