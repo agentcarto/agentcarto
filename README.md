@@ -335,8 +335,10 @@ Patterns are matched case-insensitively (the index is folded to lower case) and 
 line anchors. There is no phrase search; a quoted phrase is just words, and `--regex` is
 where exact wording belongs.
 
-What is searched is what a transcript shows: prompts, replies, queued messages, subagent
-reports (printed by `show --tools full`), the one-line form of each tool call (`Bash $ git push origin main`, first 300
+What is searched is what a transcript shows: prompts, replies, queued messages, the questions
+an agent asked through its ask tool and the answers it got (`ASSISTANT (question)` /
+`USER (answer)` in a transcript), subagent reports (printed by `show --tools full`), the
+one-line form of each tool call (`Bash $ git push origin main`, first 300
 characters), and **the paths a turn changed** — so `search internal/tui/tui.go` finds the
 sessions that edited it. What is **not**: tool output, reasoning, file diffs, the expanded
 body of a call (a heredoc writing a file would otherwise put the whole file in the index),

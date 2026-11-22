@@ -125,6 +125,12 @@ label argument) / `Event.ToolDetail` (expanded body), file edits into `Event.Cha
 tool call within a turn), and background-task notices into `EventTask`. The TUI renders these
 fields generically and must never inspect `Event.Text` with agent-specific format knowledge.
 
+A question an agent asks through its ask tool (Claude's `AskUserQuestion`, Codex's
+`request_user_input`) and the user's answer are conversation, not tool traffic: the plugin turns
+them into `EventQuestion` / `EventAnswer`, whose `Text` is the readable body built with
+`common.QuestionText` / `common.AnswerText`. The host shows and indexes both as messages
+(`ASSISTANT (question)` / `USER (answer)`), whatever the tool mode. Neither opens a turn.
+
 ### Host-side UI, search and transcript (`internal/tui`, `internal/search`, `internal/transcript`)
 `internal/tui` is the Bubble Tea program (Elm-style model/update/view) for the list and detail
 screens; it calls `internal/app` for every operation and never touches plugins directly. `internal/search`

@@ -60,9 +60,11 @@ A session id may be given as a prefix, the way every listing shows it.
 
 ## What is searched, and what is not
 
-Searched: prompts, replies, queued messages, subagent reports, the one-line form of each tool
-call, and the paths a turn changed — so `agentcarto search internal/tui/tui.go` finds the
-sessions that edited that file.
+Searched: prompts, replies, queued messages, the questions an agent asked through its ask tool
+and the answers it got, subagent reports, the one-line form of each tool call, and the paths a
+turn changed — so `agentcarto search internal/tui/tui.go` finds the sessions that edited that
+file. A decision is often in an answer rather than in a prompt: `show` prints the pair as
+`ASSISTANT (question)` and `USER (answer)`, under every `--tools` setting.
 
 Not searched: tool output, reasoning, file diffs, the expanded body of a call, and messages
 the agent was handed rather than told (system reminders, injected files). Each session is
